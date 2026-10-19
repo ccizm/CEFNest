@@ -1,0 +1,10 @@
+builddir/
+helper/build/
+compile_commands.json
+*.o
+*.a
+*.so
+*.png
+*.log
+.ninja_deps
+.ninja_log
