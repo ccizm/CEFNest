@@ -28,6 +28,11 @@ void               chromium_session_go_forward    (ChromiumSession *self);
 void               chromium_session_reload        (ChromiumSession *self,
                                                    gboolean hard);
 void               chromium_session_stop_loading  (ChromiumSession *self);
+/* Results arrive on the ::script-result signal, with the same @id:
+ * (id, ok, value, message), where @value is the result as JSON text — "null"
+ * for a script that returned nothing. @message explains a failure, a result the
+ * page could not serialise, or a result too large for the channel. A script
+ * that navigates the page away may never answer at all. */
 void               chromium_session_run_javascript (ChromiumSession *self,
                                                    const char *code,
                                                    int id);

@@ -8,6 +8,8 @@
 //
 //   host   -> helper   {"cmd":"load","url":"https://example.com"}
 //   helper -> host     {"event":"address","url":"https://example.com"}
+//   host   -> helper   {"cmd":"js","code":"document.title","id":7}
+//   helper -> host     {"event":"js-result","id":7,"ok":true,"value":"Page"}
 //
 // Commands are parsed off the socket on a reader thread and re-dispatched to
 // the CEF UI thread; events are serialised to the socket under a mutex. If the
@@ -42,7 +44,10 @@
 #include "include/cef_life_span_handler.h"
 #include "include/cef_load_handler.h"
 #include "include/cef_parser.h"
+#include "include/cef_process_message.h"
+#include "include/cef_render_process_handler.h"
 #include "include/cef_task.h"
+#include "include/cef_v8.h"
 #include "include/cef_values.h"
 #include "include/cef_version.h"
 #include "include/views/cef_browser_view.h"
@@ -54,6 +59,16 @@
 namespace {
 
 constexpr char kSocketEnv[] = "CHROMIUM_HELPER_SOCKET";
+
+/* The renderer's side of a js command: one function installed on every global,
+ * one CefProcessMessage carrying one JSON text back to the browser process. */
+constexpr char kReportFunction[] = "__chromiumHelperReport";
+constexpr char kJsResultMessage[] = "chromium-helper-js-result";
+
+/* Events are written on the UI thread with a 200 ms send timeout, so a script
+ * that returns the whole DOM would stall Chromium and then be dropped anyway.
+ * Say so instead. */
+constexpr size_t kMaxResultBytes = 64 * 1024;
 
 const char kDefaultUrl[] =
     "data:text/html;charset=utf-8,"
@@ -293,6 +308,78 @@ void EmitStatus(const std::string& message) {
   Emit(dict);
 }
 
+// ExecuteJavaScript has no return value, so the code is wrapped: the page
+// evaluates it, turns the result into JSON itself, and hands that one text to
+// kReportFunction. Statements work as well as expressions because eval() yields
+// the last value; a script that returns nothing reports null, not a failure.
+std::string WrapScript(const std::string& code, int id) {
+  CefRefPtr<CefValue> quoted = CefValue::Create();
+  quoted->SetString(code);
+  // JSON string syntax is a subset of JavaScript string syntax, so the code can
+  // be re-quoted here and never has to be escaped again.
+  const std::string literal = CefWriteJSON(quoted, JSON_WRITER_DEFAULT).ToString();
+
+  std::string out;
+  out += "(function () {";
+  out += "var __id = " + std::to_string(id) + ";";
+  out += "function __report(ok, valueJson, message) {";
+  out += "try { window." + std::string(kReportFunction) +
+         "('{\"id\":' + __id + ',\"ok\":' + (ok ? 'true' : 'false') + "
+         "',\"value\":' + valueJson + ',\"message\":' + JSON.stringify(message) + '}');";
+  out += "} catch (e) {}";
+  out += "}";
+  out += "var __value;";
+  out += "try { __value = eval(" + literal + "); }";
+  out += "catch (e) { __report(false, 'null', String((e && e.message) ? e.message : e)); return; }";
+  out += "if (typeof __value === 'undefined') { __report(true, 'null', ''); return; }";
+  out += "var __text;";
+  out += "try { __text = JSON.stringify(__value); }";
+  out += "catch (e) { __report(true, JSON.stringify(String(__value)), "
+        "'result was converted to a string'); return; }";
+  out += "__report(true, __text === undefined ? 'null' : __text, '');";
+  out += "})();";
+  return out;
+}
+
+// The payload arrives as one JSON text built by WrapScript; it becomes the
+// host's js-result event with the same fields.
+void EmitJsResult(const CefString& payload) {
+  CefString parse_error;
+  CefRefPtr<CefValue> root =
+      CefParseJSONAndReturnError(payload, JSON_PARSER_RFC, parse_error);
+  if (!root || root->GetType() != VTYPE_DICTIONARY) {
+    fprintf(stderr, "helper: unreadable js result: %s\n",
+            parse_error.ToString().c_str());
+    EmitStatus("js-result-unreadable");
+    return;
+  }
+
+  CefRefPtr<CefDictionaryValue> result = root->GetDictionary();
+  CefRefPtr<CefDictionaryValue> event = NewEvent("js-result");
+  event->SetInt("id", result->HasKey("id") ? result->GetInt("id") : 0);
+  event->SetBool("ok", result->HasKey("ok") ? result->GetBool("ok") : false);
+  event->SetString("message",
+                   result->HasKey("message")
+                       ? result->GetString("message").ToString()
+                       : std::string());
+
+  CefRefPtr<CefValue> value =
+      result->HasKey("value") ? result->GetValue("value") : nullptr;
+  if (value && CefWriteJSON(value, JSON_WRITER_DEFAULT).ToString().size() >
+                  kMaxResultBytes) {
+    event->SetString("message", "result exceeded 64 KiB and was dropped");
+    event->SetBool("truncated", true);
+    value = nullptr;
+  }
+
+  if (value)
+    event->SetValue("value", value);
+  else
+    event->SetNull("value");
+
+  Emit(event);
+}
+
 void HandleCommand(const std::string& line) {
   CEF_REQUIRE_UI_THREAD();
 
@@ -356,8 +443,6 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
-  // The result of the script comes back through the renderer, which is not
-  // wired up yet: this only guarantees the code reached the main frame.
   if (name == "js") {
     const std::string code = command->GetString("code").ToString();
     if (code.empty()) {
@@ -369,10 +454,11 @@ void HandleCommand(const std::string& line) {
       EmitStatus("no-main-frame");
       return;
     }
-    frame->ExecuteJavaScript(code, "chromium-helper", 0);
-    CefRefPtr<CefDictionaryValue> dict = NewEvent("js-ack");
-    dict->SetInt("id", command->HasKey("id") ? command->GetInt("id") : 0);
-    Emit(dict);
+    const int id = command->HasKey("id") ? command->GetInt("id") : 0;
+    frame->ExecuteJavaScript(WrapScript(code, id), "chromium-helper", 0);
+    // The answer comes back from the renderer as a js-result event. Nothing is
+    // emitted here: a navigation away from the frame can lose the script, and
+    // an ack would promise a delivery the page has not confirmed.
     return;
   }
 
@@ -380,8 +466,69 @@ void HandleCommand(const std::string& line) {
   EmitStatus("unknown-command");
 }
 
+// Runs in the renderer subprocess. The report function is one-way on purpose:
+// the host wants the value, not a callback inside the page.
+class ReportHandler : public CefV8Handler {
+ public:
+  bool Execute(const CefString& name,
+               CefRefPtr<CefV8Value> object,
+               const CefV8ValueList& arguments,
+               CefRefPtr<CefV8Value>& retval,
+               CefString& exception) override {
+    if (arguments.size() != 1 || !arguments[0]->IsString()) {
+      exception = "expected the result as one JSON string";
+      return true;
+    }
+
+    CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+    CefRefPtr<CefFrame> frame = context ? context->GetFrame() : nullptr;
+    if (!frame) {
+      exception = "no frame to report the js result from";
+      return true;
+    }
+
+    CefRefPtr<CefProcessMessage> message =
+        CefProcessMessage::Create(kJsResultMessage);
+    message->GetArgumentList()->SetString(0, arguments[0]->GetStringValue());
+    frame->SendProcessMessage(PID_BROWSER, message);
+
+    retval = CefV8Value::CreateUndefined();
+    return true;
+  }
+
+  IMPLEMENT_REFCOUNTING(ReportHandler);
+};
+
+class HelperRenderProcessHandler : public CefRenderProcessHandler {
+ public:
+  void OnContextCreated(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefFrame> frame,
+                        CefRefPtr<CefV8Context> context) override {
+    // DONTENUM keeps the function out of for-in loops and Object.keys(), so a
+    // page walking its own globals does not trip over the host. READONLY and
+    // DONTDELETE make the channel reliable: a page that replaced or deleted the
+    // function would turn every js command into silence, and a missing answer is
+    // indistinguishable from a script that never finished.
+    context->GetGlobal()->SetValue(
+        kReportFunction,
+        CefV8Value::CreateFunction(kReportFunction, handler_),
+        static_cast<cef_v8_propertyattribute_t>(
+            V8_PROPERTY_ATTRIBUTE_READONLY | V8_PROPERTY_ATTRIBUTE_DONTENUM |
+            V8_PROPERTY_ATTRIBUTE_DONTDELETE));
+  }
+
+ private:
+  CefRefPtr<CefV8Handler> handler_{new ReportHandler};
+
+  IMPLEMENT_REFCOUNTING(HelperRenderProcessHandler);
+};
+
 class HelperApp : public CefApp {
  public:
+  CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override {
+    return render_handler_;
+  }
+
   void OnBeforeCommandLineProcessing(
       const CefString& process_type,
       CefRefPtr<CefCommandLine> command_line) override {
@@ -405,6 +552,10 @@ class HelperApp : public CefApp {
     }
   }
 
+ private:
+  CefRefPtr<CefRenderProcessHandler> render_handler_{
+      new HelperRenderProcessHandler};
+
   IMPLEMENT_REFCOUNTING(HelperApp);
 };
 
@@ -420,6 +571,17 @@ class HelperClient : public CefClient,
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+
+  bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefFrame> frame,
+                                CefProcessId source_process,
+                                CefRefPtr<CefProcessMessage> message) override {
+    if (source_process != PID_RENDERER || message->GetName() != kJsResultMessage)
+      return false;
+
+    EmitJsResult(message->GetArgumentList()->GetString(0));
+    return true;
+  }
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
@@ -637,10 +799,13 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Hosted: the host navigates us, so start on a blank page rather than
-  // keeping a placeholder in the history. Standalone: take the URL from argv.
+  // Hosted: no initial navigation. The empty document a browser starts with is
+  // not a history entry of its own — the host's first load replaces it, which is
+  // why the first page reports can_go_back false — but a URL passed here *does*
+  // become an entry, so starting on about:blank would leave the user one Back
+  // press away from a page they never asked for. Standalone mode takes argv.
   const std::string url =
-      socket_path.empty() ? PickUrl(argc, argv) : std::string("about:blank");
+      socket_path.empty() ? PickUrl(argc, argv) : std::string();
   fprintf(stderr, "helper: url=%s\n", url.c_str());
 
   CefRefPtr<HelperClient> client(new HelperClient);

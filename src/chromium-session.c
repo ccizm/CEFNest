@@ -22,6 +22,7 @@ enum {
   SIG_CHANGED,
   SIG_READY,
   SIG_LOAD_END,
+  SIG_SCRIPT_RESULT,
   SIG_CLOSED,
   N_SIGNALS
 };
@@ -196,12 +197,22 @@ handle_event (ChromiumSession *self, const char *line)
       return;
     }
 
-  if (!strcmp (event, "js-ack"))
+  if (!strcmp (event, "js-result"))
     {
-      /* The script reached the main frame. Its value would have to come back
-       * through the renderer, which is not wired up yet. */
-      g_message ("session: script %d delivered",
-                 (int) json_object_get_int_member (object, "id"));
+      JsonNode *value = json_object_has_member (object, "value") ?
+                          json_object_get_member (object, "value") : NULL;
+      /* The result keeps its JSON shape rather than being flattened into a
+       * string: callers who want the text can parse it, and a script returning
+       * an object or array still arrives whole. */
+      g_autofree char *json_text =
+          value ? json_to_string (value, FALSE) : g_strdup ("null");
+
+      g_signal_emit (self, signals[SIG_SCRIPT_RESULT], 0,
+                     (int) json_object_get_int_member (object, "id"),
+                     json_object_get_boolean_member (object, "ok"),
+                     json_text,
+                     json_object_has_member (object, "message") ?
+                       json_object_get_string_member (object, "message") : "");
       return;
     }
 
@@ -761,6 +772,10 @@ chromium_session_class_init (ChromiumSessionClass *klass)
     g_signal_new ("load-end", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 2,
                   G_TYPE_STRING, G_TYPE_INT);
+  signals[SIG_SCRIPT_RESULT] =
+    g_signal_new ("script-result", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 4,
+                  G_TYPE_INT, G_TYPE_BOOLEAN, G_TYPE_STRING, G_TYPE_STRING);
   signals[SIG_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);

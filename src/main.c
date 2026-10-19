@@ -157,6 +157,15 @@ session_load_end (ChromiumSession *session, const char *uri, int http_code,
 }
 
 static void
+session_script_result (ChromiumSession *session, int id, gboolean ok,
+                       const char *value, const char *message, gpointer data)
+{
+  g_printerr ("demo: script %d %s value=%s%s%s\n", id, ok ? "ok" : "failed",
+              value, message && *message ? " message=" : "",
+              message && *message ? message : "");
+}
+
+static void
 session_closed (ChromiumSession *session, gpointer data)
 {
   gtk_widget_set_sensitive (demo.back, FALSE);
@@ -206,7 +215,11 @@ initial_url (void)
     return env;
   if (arg && strstr (arg, "://"))
     return arg;
-  return "about:blank";
+
+  /* Nothing to show yet, so nothing to load: starting on about:blank would make
+   * it entry 0 of the session history and leave Back one press away from a page
+   * the user never asked for. The first real navigation then becomes entry 0. */
+  return "";
 }
 
 static void
@@ -244,6 +257,8 @@ build_toolbar (GtkHeaderBar *header)
   chromium_session_set_view (demo.session, demo.view);
   g_signal_connect (demo.session, "changed", G_CALLBACK (session_changed), NULL);
   g_signal_connect (demo.session, "load-end", G_CALLBACK (session_load_end), NULL);
+  g_signal_connect (demo.session, "script-result",
+                    G_CALLBACK (session_script_result), NULL);
   g_signal_connect (demo.session, "closed", G_CALLBACK (session_closed), NULL);
 
   if (!chromium_session_start (demo.session, initial_url (), &error))
@@ -363,7 +378,9 @@ dump_view (gpointer data)
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "quit". This is how
- * a headless run proves navigation, history and repaint all work together. */
+ * a headless run proves navigation, history and repaint all work together. A
+ * "js" step is tagged with its own line number, which is what comes back on
+ * ::script-result, so a result can be matched to the step that asked for it. */
 typedef struct {
   GPtrArray *steps;
   guint index;
