@@ -75,7 +75,7 @@ static const struct wl_data_offer_interface data_offer_impl;
 static const struct wl_data_device_interface data_device_impl;
 
 static void data_offer_resource_destroyed (struct wl_resource *resource);
-static void compositor_advertise_selection (NestedCompositor *self, DataSource *source);
+static void compositor_advertise_selection (NestedCompositor *self);
 static void compositor_clipboard_read_done (GObject *clipboard, GAsyncResult *result,
                                             gpointer user_data);
 
@@ -462,21 +462,44 @@ data_device_advertise (DataDevice *device, DataSource *source)
            wl_resource_get_version (offer_resource));
 }
 
-/* Each device gets its own offer object: the protocol has the client destroy
- * the previous one when a new selection arrives, so the compositor must not
- * retire it early or the client's destroy request lands on a dead id. */
-static void
-compositor_advertise_selection (NestedCompositor *self, DataSource *source)
+static gboolean
+compositor_replay_selection (gpointer data)
 {
+  NestedCompositor *self = data;
   struct wl_list *link;
+
+  self->selection_replay_id = 0;
 
   for (link = self->data_devices.next; link != &self->data_devices; link = link->next)
     {
       DataDevice *device = wl_container_of (link, device, link);
 
-      data_device_advertise (device, source);
+      data_device_advertise (device, self->selection_source);
     }
+
+  return G_SOURCE_REMOVE;
 }
+
+/* Advertise from an idle, never from the middle of handling a client request:
+ * a GTK client asks for its data device while still inside gtk_init(), before
+ * GDK has a default display, and the clipboard it builds for the offer asks GDK
+ * for one — gdk_display_should_use_portal() asserts on the NULL and aborts the
+ * client. One loop later it has already had its roundtrip reply, so the offer
+ * arrives in a dispatch where the display exists. Reading selection_source at
+ * that point is the point: several requests in one batch coalesce into the
+ * latest state. */
+static void
+compositor_advertise_selection (NestedCompositor *self)
+{
+  if (self->selection_replay_id)
+    return;
+
+  self->selection_replay_id = g_idle_add (compositor_replay_selection, self);
+}
+
+/* Each device gets its own offer object: the protocol has the client destroy
+ * the previous one when a new selection arrives, so the compositor must not
+ * retire it early or the client's destroy request lands on a dead id. */
 
 /* ------------------------------------------------------------ the GTK clipboard */
 
@@ -506,7 +529,7 @@ compositor_paste_clipboard (NestedCompositor *self)
       g_clear_pointer (&self->clipboard_bytes, g_bytes_unref);
       g_clear_pointer (&self->clipboard_mime, g_free);
       if (!self->selection_source)
-        compositor_advertise_selection (self, NULL);
+        compositor_advertise_selection (self);
       return;
     }
 
@@ -535,7 +558,7 @@ compositor_clipboard_read_done (GObject *clipboard, GAsyncResult *result, gpoint
       g_clear_pointer (&self->clipboard_bytes, g_bytes_unref);
       g_clear_pointer (&self->clipboard_mime, g_free);
       if (!self->selection_source)
-        compositor_advertise_selection (self, NULL);
+        compositor_advertise_selection (self);
       return;
     }
 
@@ -551,7 +574,7 @@ compositor_clipboard_read_done (GObject *clipboard, GAsyncResult *result, gpoint
 
   /* A client that owns the selection is served from its source, not from here. */
   if (!self->selection_source)
-    compositor_advertise_selection (self, NULL);
+    compositor_advertise_selection (self);
 }
 
 static void
@@ -696,7 +719,7 @@ data_source_resource_destroyed (struct wl_resource *resource)
 
       /* The copying client is gone: the widget clipboard is the selection
        * again, and whoever is still connected has to be told. */
-      compositor_advertise_selection (self, NULL);
+      compositor_advertise_selection (self);
     }
 
   g_clear_pointer (&source->mime_types, g_ptr_array_unref);
@@ -747,11 +770,11 @@ data_device_set_selection (struct wl_client *client, struct wl_resource *resourc
 
   if (!source)
     {
-      compositor_advertise_selection (self, NULL);
+      compositor_advertise_selection (self);
       return;
     }
 
-  compositor_advertise_selection (self, source);
+  compositor_advertise_selection (self);
 
   mime = pick_text_mime (source->mime_types);
   if (mime)
@@ -847,7 +870,7 @@ data_device_manager_get_data_device (struct wl_client *client, struct wl_resourc
   if (!self->selection_source && !self->clipboard_bytes)
     compositor_paste_clipboard (self);
   else
-    data_device_advertise (device, self->selection_source);
+    compositor_advertise_selection (self);
 }
 
 static const struct wl_data_device_manager_interface data_device_manager_impl = {

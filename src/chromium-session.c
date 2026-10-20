@@ -564,8 +564,15 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_NONE);
 
   /* Native Wayland only, and only on our compositor: hand the helper the
-   * private socket and hide the X11 display so Ozone cannot pick XWayland. */
+   * private socket and hide the X11 display so Ozone cannot pick XWayland.
+   *
+   * GDK_BACKEND has to be pinned, not just inferred from an absent DISPLAY:
+   * GTK reads it before it looks at anything else, so a host environment of
+   * GDK_BACKEND=x11 makes the helper open the X11 backend on a display we just
+   * removed, gdk_get_display() returns NULL, and Chromium's portal lookup
+   * aborts on it before any window exists. */
   g_subprocess_launcher_setenv (launcher, "WAYLAND_DISPLAY", socket_name, TRUE);
+  g_subprocess_launcher_setenv (launcher, "GDK_BACKEND", "wayland", TRUE);
   g_subprocess_launcher_setenv (launcher, "XDG_SESSION_TYPE", "wayland", TRUE);
   g_subprocess_launcher_setenv (launcher, "CHROMIUM_HELPER_SOCKET",
                                 self->socket_path, TRUE);

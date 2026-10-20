@@ -1734,6 +1734,12 @@ nested_compositor_dispose (GObject *object)
       self->frame_timer_id = 0;
     }
 
+  if (self->selection_replay_id)
+    {
+      g_source_remove (self->selection_replay_id);
+      self->selection_replay_id = 0;
+    }
+
   if (self->frame_clock)
     {
       if (self->frame_clock_handler != 0)

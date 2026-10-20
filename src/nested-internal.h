@@ -208,6 +208,7 @@ struct _NestedCompositor {
   GBytes *clipboard_bytes;
   char *clipboard_mime;
   guint clipboard_echo;             /* ignores the notify our own write causes */
+  guint selection_replay_id;        /* pending idle, see nested-data-device.c */
 
   int width;                  /* configured size, in widget logical pixels */
   int height;

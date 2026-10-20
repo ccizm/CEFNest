@@ -193,20 +193,18 @@ stop，客户端收到的是"这个方向现在不在滚"这个陈述，不会�
 
 ## 8. 还没做的
 
-- **Blink 那一侧要复测**。#24 的最后一环本来是"真的把 Chromium 的视口滚起来"，现在这台机器上
-  helper 一起来就撞 `gdk.c:490 gdk_display_should_use_portal: assertion failed (display != NULL)`
-  （signal 6），0.3 秒内死掉，页面根本不 load。为确认不是这次改动带出来的，做了两次对照：跑**完全
-  没改过的 `test/drag.session`**（#19 里 3/3 通过），以及把 `NESTED_SEAT_VERSION` 按回 5 重建后再跑
-  ——两次都是同一行断言。所以是环境/ helper 自己的问题。机器空下来以后复跑：
+- **Blink 那一侧要复测**。#24 的最后一环本来是"真的把 Chromium 的视口滚起来"，这一次被 helper 自己
+  挡住了：它一起来就撞 `gdk.c:490 gdk_display_should_use_portal: assertion failed (display != NULL)`
+  （signal 6），0.3 秒内死掉，页面根本不 load。当时做了两次对照确认不是这次改动带出来的——跑**完全
+  没改过的 `test/drag.session`**（#19 里 3/3 通过），以及把 `NESTED_SEAT_VERSION` 按回 5 重建后再跑，
+  两次都是同一行断言——所以当时把它记成了"环境/ helper 自己的问题"。
 
-  ```
-  CHROMIUM_HELPER=$PWD/helper/build/Release/chromium-helper \
-  CHROMIUM_URL=file://$PWD/test/wheel-page.html \
-  CHROMIUM_SESSION_SCRIPT=$PWD/test/wheel.session \
-  G_MESSAGES_DEBUG=chromium-session ./builddir/src/chromium-demo
-  ```
-
-  期望：`wheel 0 3` 之后 `document.scrollingElement.scrollTop` 不再是 0，`wheel 0 0.5` 也能看出位移。
+  **它不是环境问题，是我们的 compositor 发事件发错了时机**，根因、排除掉的假设和修复都在
+  `docs/clipboard-offer-during-client-init.md`。helper 现在在外层 X11 的宿主环境里也能起来了，复跑
+  上面那条命令的实际结果是：`browser created` → `loaded ... (HTTP 200)` 全程没有 `Bail out`，但
+  `document.scrollingElement.scrollTop` 在 `wheel 0 3`、`wheel 0 0.5`、`wheel 0 5` 之后**仍然是 0**
+  （`script 3/6/9/12 ok value=0`）。线级证据（第 5 节）说明我们发出去的东西是对的，所以问题在更后面
+  的一环，那是 #31。
 - **真人手上的滚轮/触摸板没验**：`unit` 和 `is_stop` 两个映射只在脚本路径上测过，脚本喂的是合成
   事件。
 - **JS 侧 `wheel` 监听对不上**：之前那次成功的 CEF 跑里视口确实滚了，但页面自己注册的

@@ -738,13 +738,18 @@ class HelperWindowDelegate : public CefWindowDelegate {
 };
 
 void PrintEnvironment() {
+  // GDK_BACKEND belongs here with the display variables: GTK picks its backend
+  // from it before it looks at DISPLAY at all, so "x11" leaking in from the host
+  // is enough to make the helper die before it has a window.
   fprintf(stderr,
           "helper: CEF %s\n"
           "helper: WAYLAND_DISPLAY=%s DISPLAY=%s XDG_SESSION_TYPE=%s\n"
+          "helper: GDK_BACKEND=%s\n"
           "helper: %s=%s\n",
           CEF_VERSION, EnvOrEmpty("WAYLAND_DISPLAY").c_str(),
           EnvOrEmpty("DISPLAY").c_str(),
-          EnvOrEmpty("XDG_SESSION_TYPE").c_str(), kSocketEnv,
+          EnvOrEmpty("XDG_SESSION_TYPE").c_str(),
+          EnvOrEmpty("GDK_BACKEND").c_str(), kSocketEnv,
           EnvOrEmpty(kSocketEnv).empty() ? "(unset, no control)"
                                          : EnvOrEmpty(kSocketEnv).c_str());
 }

@@ -169,6 +169,7 @@ They are the record of *why* the code is shaped like this:
 | `resource-limits.md` | shm pool caps, allocation checks, the dmabuf fd leak |
 | `empty-request-slot.md` | a NULL request slot killing the whole desktop |
 | `wheel-resolution-and-key-repeat.md` | `axis_value120`, one frame per gesture, auto-repeat bookkeeping |
+| `clipboard-offer-during-client-init.md` | a legal `data_offer` sent one dispatch too early kills a GTK client |
 
 ## Known limitations
 
