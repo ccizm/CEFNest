@@ -134,5 +134,9 @@ default display 要等 `gdk_display_open()` **返回之后**才设得上，此�
   户端。
 - **GDK 是 4.18.6**。这个 `g_assert` 后来有没有被 GTK 自己改掉、改掉以后是不是就安全，没查；我们的
   排队规则不依赖它改不改。
-- **滚轮没跟真 Chromium 复测成功**：helper 现在起来了，`test/wheel.session` 的
-  `document.scrollingElement.scrollTop` 在 `wheel 0 3` / `0 0.5` / `0 5` 之后**还是 0**。那是 #31。
+- **滚轮已经跟真 Chromium 复测通过了**（#31 结案）。当时留的"scrollTop 还是 0"不是 helper 没起来，
+  是我们把 `axis_stop` 发在它要结束的那条 `axis` 的**同一帧**里，Chromium 收到 stop 就结算序列，把
+  同帧的位移丢了。修法是 stop 单独占一帧，且滚轮刻度干脆不带 stop（GDK 也从不把一次刻度标成
+  stop）——现在 `wheel 0 3` / `0 0.5` / `0 5` 之后是 360 / 420 / 1020。同一类形状从此由 shm-client
+  的断言守着（`test/seat-selftest.c:136` 收它的退出码）。根因、三种发法的实测差别和第 7.4 节那条
+  "JS 监听丢掉注册后第一段手势"的 Blink 行为，都在 `docs/wheel-resolution-and-key-repeat.md` 第 7 节。

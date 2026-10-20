@@ -640,7 +640,10 @@ script_run_next (void)
           /* Detents go in because that is what a hand on a wheel gives, and this
            * is the same arithmetic the widget does: ten surface pixels and 120
            * in the high-resolution channel for one of them. Half a detent is the
-           * case only the 120ths can carry. */
+           * case only the 120ths can carry. The stop is FALSE because a detent
+           * is not the end of a gesture — GDK never marks one as a stop either,
+           * and a stop would make Chromium settle the sequence and drop this
+           * step's delta, whether it rides in this frame or not. */
           compositor = chromium_view_get_compositor (demo.view);
           if (!compositor)
             {
@@ -652,7 +655,7 @@ script_run_next (void)
           nested_compositor_notify_pointer_axis (compositor, dx * 10.0, dy * 10.0,
                                                  (int32_t) lround (dx * 120.0),
                                                  (int32_t) lround (dy * 120.0),
-                                                 WL_POINTER_AXIS_SOURCE_WHEEL, TRUE);
+                                                 WL_POINTER_AXIS_SOURCE_WHEEL, FALSE);
           continue;
         }
       else if (!strcmp (line, "close"))

@@ -192,6 +192,12 @@ static double scroll_y;
 static int32_t scroll120_x;
 static int32_t scroll120_y;
 static int axis_stops;
+/* Which axes sent a wl_pointer.axis in the frame being filled, one bit each. */
+static unsigned int axis_in_frame;
+/* Which wl_pointer.frame we are in. An axis event and the stop that ends its
+ * gesture have to land in different ones, and this counter is how the log of a
+ * run shows whether they did. */
+static int pointer_frames;
 static int pointer_inside;
 /* Which of our surfaces the pointer is over: the toplevel or one of the popups
  * drawn on top of it. Motion events do not name a surface, so the enter does
@@ -1342,18 +1348,24 @@ pointer_axis (void *data, struct wl_pointer *wl_pointer, uint32_t time,
 {
   double v = wl_fixed_to_double (value);
 
+  axis_in_frame |= 1u << axis;
+
   if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
     scroll_y += v;
   else
     scroll_x += v;
 
-  fprintf (stderr, "client: axis %u %+.2f (total %+.1f)\n", axis, v,
-           axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? scroll_y : scroll_x);
+  fprintf (stderr, "client: axis %u %+.2f (total %+.1f) in frame #%d\n", axis, v,
+           axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? scroll_y : scroll_x,
+           pointer_frames + 1);
 }
 
 static void
 pointer_frame (void *data, struct wl_pointer *wl_pointer)
 {
+  pointer_frames++;
+  axis_in_frame = 0;
+
   if (mapped)
     draw ();
 
@@ -1367,7 +1379,7 @@ pointer_axis_source (void *data, struct wl_pointer *wl_pointer, uint32_t axis_so
   const char *name = axis_source < sizeof (names) / sizeof (names[0])
     ? names[axis_source] : "?";
 
-  fprintf (stderr, "client: axis source %s\n", name);
+  fprintf (stderr, "client: axis source %s, frame #%d\n", name, pointer_frames + 1);
 }
 
 static void
@@ -1375,7 +1387,21 @@ pointer_axis_stop (void *data, struct wl_pointer *wl_pointer, uint32_t time,
                    uint32_t axis)
 {
   axis_stops++;
-  fprintf (stderr, "client: axis %u stop (#%d)\n", axis, axis_stops);
+
+  /* This one is an assertion, not a note in a log: a stop says the sequence has
+   * ended, and Chromium settles the sequence when it reads one, so a delta in
+   * the same frame never becomes a wheel event and the page scrolls nothing.
+   * Exiting non-zero is what makes `meson test` hear about it. */
+  if (axis_in_frame & (1u << axis))
+    {
+      fprintf (stderr,
+               "client: axis %u stop came in frame #%d, the same frame as the axis "
+               "event it stops\n", axis, pointer_frames + 1);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: axis %u stop (#%d) in frame #%d\n", axis, axis_stops,
+           pointer_frames + 1);
 }
 
 static void
@@ -1394,8 +1420,10 @@ pointer_axis_value120 (void *data, struct wl_pointer *wl_pointer, uint32_t axis,
   else
     scroll120_x += value120;
 
-  fprintf (stderr, "client: axis %u value120 %+d (total %+d)\n", axis, value120,
-           axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? scroll120_y : scroll120_x);
+  fprintf (stderr, "client: axis %u value120 %+d (total %+d) in frame #%d\n", axis,
+           value120,
+           axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? scroll120_y : scroll120_x,
+           pointer_frames + 1);
 }
 
 static const struct wl_pointer_listener pointer_listener = {

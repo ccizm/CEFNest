@@ -133,9 +133,30 @@ with `--dmabuf`, `--text-input`, `--cursor-shape`, `--popup`, `--refused`,
 `--gtk-client` is not another flavour of `shm-client`: it finishes the run by
 launching a second copy of `seat-selftest` as a GTK client of its own
 compositor, and fails if that client is killed by an assertion of its own.
-A raw client only ever sets a flag when an event arrives, so it cannot crash on
-a legal event sequence — a toolkit can, and did
+A raw client only sets a flag when an event arrives, so it cannot crash on a
+legal event sequence — a toolkit can, and did
 (`docs/clipboard-offer-during-client-init.md`).
+
+The raw client does check one thing of its own, and the run stops on it: a
+`wl_pointer.axis_stop` may not share a `wl_pointer.frame` with the `axis` event
+it stops, which is the shape that makes Chromium throw the scroll delta away
+(`docs/wheel-resolution-and-key-repeat.md`). `seat-selftest` waits for its
+child rather than polling it, so a client that leaves by signal or with a
+non-zero status fails the test at that step instead of printing the rest of the
+script to nobody.
+
+What the compositor sends is only half of it, so the wheel is also checked where
+it matters:
+
+```bash
+GDK_BACKEND=wayland CHROMIUM_HELPER=$PWD/helper/build/Release/chromium-helper \
+  CHROMIUM_URL=file://$PWD/test/wheel-page.html \
+  CHROMIUM_SESSION_SCRIPT=$PWD/test/wheel.session ./builddir/src/chromium-demo
+```
+
+`test/wheel.session` reads `document.scrollingElement.scrollTop` after each
+`wheel` step, and expects 120 CSS px per detent — 360 for `wheel 0 3`, 420 after
+the half detent that follows it.
 
 `test/audit-impl-slots.py` is the static half of the same idea: it reads the
 generated protocol headers and every `wl_*_interface` initializer in `src/`, and

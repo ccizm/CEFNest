@@ -1,14 +1,16 @@
 wait 3000
 hover 200 150
 js document.scrollingElement.scrollTop
+js window.__w=[],window.addEventListener('wheel',function(e){window.__w.push(e.deltaY)},true),window.__w.length
+wait 1500
 wheel 0 3
 wait 700
-js document.scrollingElement.scrollTop
+js document.scrollingElement.scrollTop+','+window.__w.join('|')
 wheel 0 0.5
 wait 700
-js document.scrollingElement.scrollTop
+js document.scrollingElement.scrollTop+','+window.__w.join('|')
 wheel 0 5
 wait 700
-js document.scrollingElement.scrollTop
+js document.scrollingElement.scrollTop+','+window.__w.join('|')
 wait 300
 quit

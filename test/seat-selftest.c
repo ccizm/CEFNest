@@ -12,9 +12,11 @@
  * which is what the embedding widget draws.
  *
  * --gtk-client finishes the run by launching this same binary again as a GTK
- * client of its own compositor. Raw libwayland clients accept whatever the
- * compositor sends; a toolkit has state it builds while the events arrive and
- * can die on that, so only a real client can prove a sequence is survivable. */
+ * client of its own compositor. libwayland hands events over as they arrive and
+ * a raw client reads what it likes; a toolkit builds state out of the same
+ * events and can die on that, so only a real client can prove a sequence is
+ * survivable. The raw client does check one thing of its own, and stops the run
+ * if the compositor gets it wrong: see client_exited(). */
 #define G_LOG_DOMAIN "seat-selftest"
 
 #include <stdlib.h>
@@ -37,6 +39,7 @@ typedef enum {
   STEP_BUTTON_PRESS,
   STEP_BUTTON_RELEASE,
   STEP_AXIS,
+  STEP_AXIS_STOP,
   STEP_KEY_DOWN,
   STEP_KEY_UP,
   STEP_TI_STATE,
@@ -66,6 +69,10 @@ static const Step script[] = {
   { STEP_KEYBOARD_ENTER,  0,   0,  60 },
   { STEP_BUTTON_PRESS, BTN_LEFT, 1, 60 },
   { STEP_AXIS, WL_POINTER_AXIS_VERTICAL_SCROLL, 100, 60 },
+  /* The end of the gesture is a call of its own with no distance, the way GDK
+   * reports a touchpad lift. It has to stay a separate step: a stop sent in the
+   * frame of the axis events it stops makes Chromium drop the delta. */
+  { STEP_AXIS_STOP,     0,   0,   60 },
   { STEP_KEY_DOWN,      KEY_A,   1, 60 },
   /* GDK hands over the host's auto-repeat as another press of the same key. The
    * client has to keep seeing those, but the key must not be counted twice: the
@@ -99,7 +106,7 @@ static const Step script[] = {
 
 static const char *step_names[N_STEP_KINDS] = {
   "settle", "pointer-enter", "pointer-motion", "keyboard-enter", "keyboard-leave",
-  "button-press", "button-release", "axis", "key-down", "key-up",
+  "button-press", "button-release", "axis", "axis-stop", "key-down", "key-up",
   "text-input-state", "preedit", "commit", "delete-surrounding", "stack",
   "dump", "dump-text-input", "dump-composite", "gtk-client",
 };
@@ -116,7 +123,54 @@ static char *dump_ti_path;
 static char *dump_composite_path;
 static gboolean gtk_client_mode;
 static gboolean gtk_client_failed;
+static gboolean client_failed;
+static gboolean run_finished;
 static guint gtk_client_watchdog_id;
+
+/* The raw client checks the shape of what it is sent — an axis_stop may not ride
+ * in the frame of the axis events it stops — and leaves non-zero when the
+ * compositor got that wrong. An early exit 0 is not a complaint: --refused
+ * returns that way, and so does a toplevel close. Asking a live child what its
+ * status is would be a GLib critical, so this waits instead of polling. */
+static void
+client_exited (GObject *object, GAsyncResult *result, gpointer data)
+{
+  GSubprocess *client = G_SUBPROCESS (object);
+  GMainLoop *loop = data;
+  GError *error = NULL;
+  gboolean complained = FALSE;
+
+  /* Every run ends by killing the client, so a wait that completes after the
+   * script ran out is the tidy-up rather than news. */
+  if (run_finished)
+    return;
+
+  if (!g_subprocess_wait_finish (client, result, &error))
+    {
+      complained = TRUE;
+      g_printerr ("selftest: cannot wait for the client: %s\n",
+                  error ? error->message : "?");
+      g_clear_error (&error);
+    }
+  else if (g_subprocess_get_if_signaled (client))
+    {
+      complained = TRUE;
+      g_printerr ("selftest: the client was killed by signal %d\n",
+                  g_subprocess_get_term_sig (client));
+    }
+  else if (g_subprocess_get_exit_status (client) != 0)
+    {
+      complained = TRUE;
+      g_printerr ("selftest: the client exited with status %d\n",
+                  g_subprocess_get_exit_status (client));
+    }
+
+  if (complained)
+    {
+      client_failed = TRUE;
+      g_main_loop_quit (loop);
+    }
+}
 
 static void
 save_texture (const char *path)
@@ -425,13 +479,20 @@ run_step (gpointer data)
       break;
     case STEP_AXIS:
       /* a is the axis, b the surface pixels; twelve pixels per tenth of a
-       * detent, so 120 back-converts the one wheel click this step means. */
+       * detent, so 120 back-converts the one wheel click this step means. No
+       * stop: a detent is a step, not the end of a gesture. */
       nested_compositor_notify_pointer_axis (compositor,
           step->a == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? (double) step->b : 0.0,
           step->a == WL_POINTER_AXIS_VERTICAL_SCROLL ? (double) step->b : 0.0,
           step->a == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? step->b * 12 : 0,
           step->a == WL_POINTER_AXIS_VERTICAL_SCROLL ? step->b * 12 : 0,
-          WL_POINTER_AXIS_SOURCE_WHEEL, TRUE);
+          WL_POINTER_AXIS_SOURCE_WHEEL, FALSE);
+      break;
+    case STEP_AXIS_STOP:
+      /* A finger lifting off a touchpad is the only device that really ends a
+       * gesture here, and it carries no distance with the end. */
+      nested_compositor_notify_pointer_axis (compositor, 0.0, 0.0, 0, 0,
+          WL_POINTER_AXIS_SOURCE_FINGER, TRUE);
       break;
     case STEP_KEY_DOWN:
       nested_compositor_notify_keyboard_key (compositor, step->a, TRUE);
@@ -619,9 +680,13 @@ main (int argc, char *argv[])
 
   loop = g_main_loop_new (NULL, FALSE);
   g_timeout_add (script[0].delay, run_step, loop);
+  /* Waiting, not polling: a client that leaves while the script still has steps
+   * to run has complained, and the complaint ends the run there. */
+  g_subprocess_wait_async (child, NULL, client_exited, loop);
 
   g_main_loop_run (loop);
 
+  run_finished = TRUE;
   g_print ("selftest: finished at step %zu, %d fds open (%d at start)\n",
            step_index, open_fds (), fds_at_start);
 
@@ -638,7 +703,8 @@ main (int argc, char *argv[])
   g_free (dump_ti_path);
   g_free (dump_composite_path);
 
-  /* A real toolkit client that died on what the compositor sent is a failure of
-   * the compositor, not of the test. */
-  return gtk_client_failed ? 1 : 0;
+  /* A client that died on what the compositor sent is a failure of the
+   * compositor, not of the test — and that is true of the toolkit one as much
+   * as of this raw one. */
+  return (gtk_client_failed || client_failed) ? 1 : 0;
 }

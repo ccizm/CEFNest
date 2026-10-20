@@ -172,13 +172,18 @@ selftest: finished at step 27, 139 fds open (119 at start)
 | 同上，把三个槽再掏空（对照） | exit=134，`listener function for opcode 2 of wl_data_source is NULL`——仓库里第一次自己复现出这个死法 |
 | `meson test -C builddir`（含 #24 之后，现共 9 条） | 9/9 OK；上面这些跑法从此不用手敲，`--suite selftest` / `--suite protocol` 各跑一半 |
 
-注：表里 `step 24`、`fd 115 → 133` 是 #30 当时那轮的数，脚本后来在 #24 里长了 3 步。#32 又给脚本末尾
-加了第 28 步（`--gtk-client`：把 seat-selftest 自己再启一遍当 GTK 客户端），所以现在是
-`finished at step 28`——前七个模式那一步什么都不做。fd 的**净增**才是有用的数，基线绝对值每轮都会飘；
-`meson test -v` 这一轮按模式量出来是 plain `11 → 28`（净增 17）、`--refused` `11 → 23`（12）、
-`--dmabuf` `11 → 42`（31）、`--gtk-client` `11 → 28`（17，和 plain 一格不差，说明那个真 toolkit 客户端
-走掉之后连接没留下 fd）。跟手敲那轮的 18/13 差一个 fd，这一格差没去追——要看的是同一模式换跑法、换
-几轮，净增不往上走。
+注：表里 `step 24`、`fd 115 → 133` 是 #30 当时那轮的数，脚本后来在 #24 里长了 3 步。#32 给脚本末尾
+加了 `--gtk-client` 那一步，#31 又把滚轮的"手势结束"单列成一步（`axis-stop`），所以现在是
+`finished at step 29`。fd 的**净增**才是有用的数，基线绝对值每轮都会飘；`meson test -v` 这一轮按模式
+量出来是 plain `11 → 28`（净增 17）、`--refused` `11 → 23`（12）、`--dmabuf` `11 → 42`（31）、
+`--dnd-requests` `11 → 30`（19）、`--gtk-client` `11 → 28`（17，和 plain 一格不差，说明那个真 toolkit
+客户端走掉之后连接没留下 fd）。跟手敲那轮的 18/13 差一个 fd，这一格差没去追——要看的是同一模式换
+跑法、换几轮，净增不往上走。
+
+`#31` 还改了闸门的另一件事：`shm-client` 现在会**检查事件形状**（一条 `axis_stop` 不许和它要结束的
+`axis` 同一帧），不合格就 `exit (1)`，`seat-selftest` 等子进程的报告、非零状态或信号立刻让 run 停在
+那一步并返回 1（`test/seat-selftest.c:136`）。以前客户端半路死了没人管——空事件槽那种死法（本篇
+第 1 节）在 selftest 里本来是看不见的。
 
 ## 8. 还没做的
 

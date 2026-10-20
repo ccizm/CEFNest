@@ -94,7 +94,9 @@ void              nested_compositor_notify_pointer_button (NestedCompositor *sel
  * are surface pixels; @value120_x and @value120_y are the same movement in
  * 120ths of a wheel detent, zero when the device has no detents (a touchpad).
  * @source is a WL_POINTER_AXIS_SOURCE_* code, and @stop says this is the end of
- * the gesture, which is when the client may start its own momentum. */
+ * the gesture, which is when the client may start its own momentum. It goes out
+ * in a frame of its own: a stop in the frame of the axis events it stops makes
+ * Chromium throw their delta away. */
 void              nested_compositor_notify_pointer_axis   (NestedCompositor *self,
                                                            double dx, double dy,
                                                            int32_t value120_x,

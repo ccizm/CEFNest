@@ -741,6 +741,7 @@ nested_compositor_notify_pointer_axis (NestedCompositor *self, double dx, double
   wl_list_for_each (sc, &self->seat_clients, link)
     {
       gboolean framed;
+      gboolean moved;
       uint32_t version;
 
       if (!sc->pointer || !sc->pointer_inside)
@@ -748,11 +749,12 @@ nested_compositor_notify_pointer_axis (NestedCompositor *self, double dx, double
 
       version = wl_resource_get_version (sc->pointer);
       framed = version >= WL_POINTER_FRAME_SINCE_VERSION;
+      moved = dy != 0.0 || dx != 0.0;
 
       /* Both axes of one device movement belong to one frame: a client that
        * builds momentum out of a fling accumulates per frame, and two frames
        * make one diagonal gesture look like two scrolls. */
-      if (framed)
+      if (framed && moved)
         wl_pointer_send_axis_source (sc->pointer, source);
 
       if (dy != 0.0)
@@ -762,15 +764,26 @@ nested_compositor_notify_pointer_axis (NestedCompositor *self, double dx, double
         axis_send_one (sc->pointer, version, time, WL_POINTER_AXIS_HORIZONTAL_SCROLL,
                        dx, value120_x, framed);
 
-      if (framed)
+      if (!framed)
+        continue;
+
+      if (moved)
+        wl_pointer_send_frame (sc->pointer);
+
+      /* A stop rides in a frame of its own, never in the frame of the axis
+       * events it stops. Chromium settles the scroll sequence when it reads a
+       * stop, so a stop that lands in the same frame as a delta throws that
+       * delta away — a wheel click sent this way scrolls nothing at all, on any
+       * page. GDK hands a stop over as an event carrying no distance, so a
+       * caller that passes both gets the step and the end in the two frames a
+       * real device would have used. */
+      if (stop)
         {
-          if (stop)
-            {
-              wl_pointer_send_axis_stop (sc->pointer, time,
-                                         WL_POINTER_AXIS_VERTICAL_SCROLL);
-              wl_pointer_send_axis_stop (sc->pointer, time,
-                                         WL_POINTER_AXIS_HORIZONTAL_SCROLL);
-            }
+          wl_pointer_send_axis_source (sc->pointer, source);
+          wl_pointer_send_axis_stop (sc->pointer, time,
+                                     WL_POINTER_AXIS_VERTICAL_SCROLL);
+          wl_pointer_send_axis_stop (sc->pointer, time,
+                                     WL_POINTER_AXIS_HORIZONTAL_SCROLL);
           wl_pointer_send_frame (sc->pointer);
         }
     }
