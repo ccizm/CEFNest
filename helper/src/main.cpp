@@ -46,6 +46,7 @@
 #include "include/cef_parser.h"
 #include "include/cef_process_message.h"
 #include "include/cef_render_process_handler.h"
+#include "include/cef_request_handler.h"
 #include "include/cef_task.h"
 #include "include/cef_v8.h"
 #include "include/cef_values.h"
@@ -570,7 +571,8 @@ class HelperClient : public CefClient,
                      public CefLifeSpanHandler,
                      public CefLoadHandler,
                      public CefDisplayHandler,
-                     public CefKeyboardHandler {
+                     public CefKeyboardHandler,
+                     public CefRequestHandler {
  public:
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override {
     return this;
@@ -578,6 +580,7 @@ class HelperClient : public CefClient,
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
+  CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
 
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
                                 CefRefPtr<CefFrame> frame,
@@ -668,6 +671,23 @@ class HelperClient : public CefClient,
     dict->SetInt("error_code", static_cast<int>(errorCode));
     dict->SetString("message", errorText.ToString());
     dict->SetString("url", failedUrl.ToString());
+    Emit(dict);
+  }
+
+  // The renderer is the process the sandbox exists for (docs/sandbox-policy.md),
+  // and its death looks exactly like a page that stopped answering: the surface
+  // keeps showing the last frame, every command after it goes unanswered. So it
+  // has to reach the host as its own event rather than as a silent gap.
+  void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
+                                 TerminationStatus status,
+                                 int error_code,
+                                 const CefString& error_string) override {
+    fprintf(stderr, "helper: render process terminated (status=%d error=%d)\n",
+            static_cast<int>(status), error_code);
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("renderer-exited");
+    dict->SetInt("status", static_cast<int>(status));
+    dict->SetInt("error_code", error_code);
+    dict->SetString("message", error_string.ToString());
     Emit(dict);
   }
 

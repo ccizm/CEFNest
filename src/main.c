@@ -167,6 +167,24 @@ session_load_end (ChromiumSession *session, const char *uri, int http_code,
 }
 
 static void
+session_load_error (ChromiumSession *session, int error_code, const char *uri,
+                    const char *message, gpointer data)
+{
+  g_printerr ("demo: load failed %d %s %s\n", error_code, uri,
+              message ? message : "");
+}
+
+static void
+session_renderer_exited (ChromiumSession *session, int status, int error_code,
+                         const char *message, gpointer data)
+{
+  /* The page does not change when this happens — the surface keeps its last
+   * frame — so a transcript is the only place the difference shows. */
+  g_printerr ("demo: renderer exited status=%d error=%d %s\n", status,
+              error_code, message ? message : "");
+}
+
+static void
 session_script_result (ChromiumSession *session, int id, gboolean ok,
                        const char *value, const char *message, gpointer data)
 {
@@ -269,6 +287,10 @@ build_toolbar (GtkHeaderBar *header)
   chromium_session_set_view (demo.session, demo.view);
   g_signal_connect (demo.session, "changed", G_CALLBACK (session_changed), NULL);
   g_signal_connect (demo.session, "load-end", G_CALLBACK (session_load_end), NULL);
+  g_signal_connect (demo.session, "load-error",
+                    G_CALLBACK (session_load_error), NULL);
+  g_signal_connect (demo.session, "renderer-exited",
+                    G_CALLBACK (session_renderer_exited), NULL);
   g_signal_connect (demo.session, "script-result",
                     G_CALLBACK (session_script_result), NULL);
   g_signal_connect (demo.session, "closed", G_CALLBACK (session_closed), NULL);

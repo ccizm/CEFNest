@@ -175,8 +175,11 @@ demo: loaded https://example.com/ (HTTP 200)
 * **老路没量**：没把 `chrome-sandbox` 装成 setuid 再跑一次（要 root 改 CEF 分发里的文件权限）。
   所以"命名空间不可用时那个 SUID helper 确实能顶上"这句在本篇里只是 Chromium 文档的说法，
   不是我们量到的。
-* **renderer 崩了不报**。helper 没实现 `OnRenderProcessTerminated`；沙箱开起来之后 renderer
-  被 seccomp 杀掉（比如某个新 API 需要额外 syscall）会比以前更难发现，因为它只表现为页面静止。
-  这条记在 #25（ready/load-error 信号）那一栏里一起做。
+* **renderer 崩了不报**这条已经做掉了：helper 实现了 `OnRenderProcessTerminated`，控制通道上新增
+  `renderer-exited` 事件，宿主侧是 `ChromiumSession::renderer-exited`
+  （`docs/control-channel.md`）。实测 `kill -9` 掉最大的那个 `Seccomp=2` 子进程后，host 只多出
+  `status=1 error=9` 这一行，其余一切照旧——正是本篇原本担心的「只表现为页面静止」。
+  反过来，**其它**沙箱子进程（utility、GPU、网络）死了仍然没有任何事件，CEF 那边没有对应的回调，
+  这条留在 `docs/control-channel.md` 的「还没做的」里。
 * 沙箱开着时的**逐帧渲染正确性**没比对过（截图、dmabuf 提交都发生在不沙箱的浏览器进程里，
   逻辑上无关，所以只比了第 5 节那些可观察数字）。

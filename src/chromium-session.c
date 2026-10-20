@@ -22,6 +22,8 @@ enum {
   SIG_CHANGED,
   SIG_READY,
   SIG_LOAD_END,
+  SIG_LOAD_ERROR,
+  SIG_RENDERER_EXITED,
   SIG_SCRIPT_RESULT,
   SIG_CLOSED,
   N_SIGNALS
@@ -201,6 +203,26 @@ handle_event (ChromiumSession *self, const char *line)
                  (int) json_object_get_int_member (object, "error_code"),
                  json_object_get_string_member (object, "url"),
                  json_object_get_string_member (object, "message"));
+
+      /* A failed navigation also arrives as ::load-end with HTTP code 0, so a
+       * host that only listens there cannot tell "loaded" from "did not": this
+       * signal is the only place the reason is. */
+      g_signal_emit (self, signals[SIG_LOAD_ERROR], 0,
+                     (int) json_object_get_int_member (object, "error_code"),
+                     json_object_get_string_member (object, "url"),
+                     json_object_get_string_member (object, "message"));
+      return;
+    }
+
+  if (!strcmp (event, "renderer-exited"))
+    {
+      /* Nothing else reports this. The surface keeps showing the last frame and
+       * every command after it goes unanswered, so a host that does not listen
+       * here sees a page that stopped moving rather than a dead process. */
+      g_signal_emit (self, signals[SIG_RENDERER_EXITED], 0,
+                     (int) json_object_get_int_member (object, "status"),
+                     (int) json_object_get_int_member (object, "error_code"),
+                     json_object_get_string_member (object, "message"));
       return;
     }
 
@@ -787,6 +809,14 @@ chromium_session_class_init (ChromiumSessionClass *klass)
     g_signal_new ("load-end", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 2,
                   G_TYPE_STRING, G_TYPE_INT);
+  signals[SIG_LOAD_ERROR] =
+    g_signal_new ("load-error", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING);
+  signals[SIG_RENDERER_EXITED] =
+    g_signal_new ("renderer-exited", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+                  G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING);
   signals[SIG_SCRIPT_RESULT] =
     g_signal_new ("script-result", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 4,

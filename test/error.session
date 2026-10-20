@@ -1,0 +1,3 @@
+load https://no-such-host.invalid/
+wait 2500
+quit

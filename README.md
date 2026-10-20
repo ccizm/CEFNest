@@ -180,9 +180,12 @@ if (!chromium_session_start (session, "https://example.com", &error))
 ```
 
 `ChromiumSession` signals: `::changed` (uri / title / loading / history moved),
-`::ready` (the helper answered its handshake), `::load-end` (uri, HTTP code),
+`::ready` (the helper answered its handshake), `::load-end` (uri, HTTP code —
+it fires for failed loads too, with code 0), `::load-error` (net error code,
+uri, name), `::renderer-exited` (termination status, error code, message),
 `::script-result` (id, ok, JSON value, message), `::closed` (the helper is gone
-and will not come back).
+and will not come back). `docs/control-channel.md` is the full command and event
+list, and the record of the commands decided against.
 
 ## Where the detail is
 
@@ -201,6 +204,7 @@ They are the record of *why* the code is shaped like this:
 | `wheel-resolution-and-key-repeat.md` | `axis_value120`, one frame per gesture, auto-repeat bookkeeping |
 | `clipboard-offer-during-client-init.md` | a legal `data_offer` sent one dispatch too early kills a GTK client |
 | `sandbox-policy.md` | the sandbox decision: no setuid helper needed, what a host without user namespaces does to the run |
+| `control-channel.md` | every command and event on the socket, what a failed load and a dead renderer look like, and the commands decided against |
 
 ## Known limitations
 
@@ -209,8 +213,14 @@ They are the record of *why* the code is shaped like this:
   answered, they just do nothing.
 - **One seat, one pointer, no touch.** The embedding widget is the only device
   the compositor knows about.
-- **Load failures are not a signal yet.** `load-error` arrives on the channel and
-  is logged; there is no `ChromiumSession::load-error` to connect to.
+- **A failed navigation reports twice, and `::load-end` still fires.** First the
+  real code (`ERR_NAME_NOT_RESOLVED`), then `ERR_ABORTED` (-3) about a second
+  later; the load-end arrives with HTTP code 0. Nothing is filtered, because
+  picking which error a host should see is not this layer's call
+  (`docs/control-channel.md`).
+- **Only the renderer's death is reported.** `::renderer-exited` comes from CEF's
+  render-process callback; when one of the other sandboxed children goes, the
+  host hears nothing until the page stops answering.
 - **The renderer is sandboxed; the helper itself is not, and cannot be.** The
   browser process holds the Wayland connection, the GPU buffers and the control
   socket, so it stays unsandboxed by design — the trust boundary is the page
@@ -218,8 +228,6 @@ They are the record of *why* the code is shaped like this:
   unprivileged user namespaces nor a setuid `chrome-sandbox` the helper dies at
   startup instead of quietly running unsandboxed; `CHROMIUM_HELPER_NO_SANDBOX=1`
   is the way to say it on purpose (`docs/sandbox-policy.md`).
-- **A renderer crash is not reported.** `OnRenderProcessTerminated` is not
-  implemented, so a killed renderer looks like a page that stopped moving.
 - **Native Wayland only, by design.** Under an X11 session GDK cannot give the
   widget a Wayland surface to hand to clients, so the component will not work
   there.
