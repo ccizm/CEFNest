@@ -321,6 +321,31 @@ pinned — it is a sawtooth. Measured run: 40 s, 19 samples, fd 379 → 378 (pea
 386), 898 MB, 18 of 20 readbacks answered, 0 leftovers.
 `docs/sandbox-policy.md` §7 and §8 are the numbers this keeps from going stale.
 
+`test/ci-session.sh` is the one gate runner that does not open a window on the
+desktop of whoever is sitting here. It starts a nested compositor — GNOME Shell 48
+in `--headless` mode, which is mutter with no output device — inside its own HOME,
+its own XDG directories and its own D-Bus bus, and runs whatever it is handed
+against that display:
+
+```bash
+./test/ci-session.sh                        # proof: a window maps, a page loads
+./test/ci-session.sh ./test/find-gate.sh    # any gate, unchanged
+```
+
+The isolation is not tidiness: a nested shell started against the real HOME joined
+the host's session bus and activated nautilus, the Tracker miner and the app-grid
+autofit, so an unattended run moved the desktop of the person using the machine.
+The compositor is a session leader of its own, so one signal to its process group
+takes the bus, the portal and gvfsd with it, and the run asserts that nothing is
+left behind. What it proves is that a real window maps, that a real Chromium
+session with the sandbox on loads a page and answers JavaScript, and that the
+existing gates need no headless branch to pass — `find-gate.sh` 34 assertions and
+`permission-gate.sh` 58 of them both run green inside it. What it cannot prove is
+frame pacing: a display with no output device never runs a second GTK display
+cycle, which is exactly the failure mode `docs/frame-clock-pacing.md` §8 documents,
+where a client left waiting on that cycle stopped animating and stopped painting.
+`docs/headless-ci.md` is the write-up.
+
 ## Using it as a library
 
 `meson install` puts `libcefnest.so` in `libdir`, three headers in
@@ -404,7 +429,7 @@ They are the record of *why* the code is shaped like this:
 | Document | About |
 | --- | --- |
 | `nested-split.md` | how `nested.c` became per-protocol modules |
-| `frame-clock-pacing.md` | painting on the GTK frame clock instead of a timer |
+| `frame-clock-pacing.md` | painting on the GTK frame clock instead of a timer, and the watchdog for the display cycles that never come |
 | `popup-compositing.md` | the surface stack, placement and dismissal of page popups |
 | `clipboard-bridge.md` | `wl_data_device` ↔ `GdkClipboard` in both directions |
 | `session-lifecycle.md` | starting, stopping and dying with the helper |
@@ -422,6 +447,7 @@ They are the record of *why* the code is shaped like this:
 | `context-menu.md` | the one constraint that decided the whole design (Chromium holds a single unanswered menu request), what CEF's default model really contains — the same five rows for a link, an image and a blank page — and `Continue(id)` proven inside the page |
 | `permission-prompt.md` | which asks never reach the host at all, the two queues that make an unanswered request cost the page its next question too, and why `accept` can only ever mean "the whole mask" |
 | `packaging.md` | what installs where, the five-step rule by which a session finds its helper, why `get_option('libexecdir')` must be joined to the prefix before it is compiled in, and the two fallbacks that deliberately run in opposite directions |
+| `headless-ci.md` | running the gates against a nested mutter nobody can see: why the session needs its own HOME and bus, how one signal reaps the whole tree, and what a display with no output device can and cannot prove |
 
 ## Known limitations
 
