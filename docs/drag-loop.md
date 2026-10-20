@@ -1,4 +1,4 @@
-# 拖放环，和它越过窗口边界时的一跳：谁在什么时候发哪一条
+# 拖放环，和它越过窗口边界时的两跳：谁在什么时候发哪一条
 
 日期：2026-10-21
 问题：P2「拖拽三段式」的第一段——一次在**同一个页面里**开始并结束的 HTML5 拖放，要经
@@ -6,7 +6,8 @@
 拽当成浏览器内部的事，用 views 自己的 `DragDropManager` 处理掉，根本不理会我们发的
 `wl_data_device.enter`。这一篇钉住它**确实**理会了，并且把只有实测才知道的六条写下来。
 
-三段式的第二段——拖拽越过窗口边界时交给宿主——在 §6。第三段（反向拖入）还没做，见 §7。
+三段式的第二段——拖拽越过窗口边界时交给宿主——在 §6。第三段方向相反，宿主把拖拽带进来、页面
+当目的地，在 §7。
 
 ## 1. 形状：一端是页面，另一端也是页面
 
@@ -155,9 +156,10 @@ Chromium 在普通复制时也可能发这几条——为了一个不存在的�
 ## 5. 怎么验
 
 ```sh
-./test/dnd-gate.sh              # loop / refused / twice / held / out
+./test/dnd-gate.sh              # loop / refused / twice / held / out / in
 ./test/dnd-gate.sh held         # 只看拖动图标那一段
 ./test/dnd-gate.sh out          # 只看越界移交那一段
+./test/dnd-gate.sh in           # 只看宿主拖入那一段
 ```
 
 跑之前先 `ninja -C builddir`。要看 compositor 的 trace，得把 stderr 接成管道：GLib 默认的
@@ -166,7 +168,8 @@ log writer 在 stderr 是**普通文件**时会丢掉 DEBUG 级消息，
 `2>&1 | tee log` 才有。门禁里 `run_demo` 用 `tee` 就是为了这个。
 
 协议错误那半边由 `meson test -C builddir` 的 `seat-selftest-dnd-requests` 覆盖；§6 的移交则由
-`seat-selftest-drag-out` 用一个假客户端重放一遍，不需要浏览器，也不需要窗口。
+`seat-selftest-drag-out` 用一个假客户端重放一遍，不需要浏览器，也不需要窗口。§7 的拖入同理，是
+`seat-selftest-drag-in`。
 
 ## 6. 第二段：越界的移交（预取 + `::drag-out`）
 
@@ -244,8 +247,99 @@ opcode 0 是 v3 的 `target`，而那个假客户端的 listener 表只填了 `s
 条 `if (FALSE)` 跑一遍，两次 check 都会红并且报「the page kept its drag, still offering …」——这条
 门禁是要能咬人的。
 
-## 7. 还没有
+## 7. 第三段：宿主把拖拽带进来（`drag_from_host` + `::drag-in-end`）
 
-- **拖入方向**（第三段）：`GdkDropTarget` → `wl_data_device.enter` + 一个新 `DataSource`。
+### 7.1 方向反过来了：这一趟 compositor 是源
+
+前两段源都是页面。第三段页面是目的地，源是 compositor 自己：
+`nested_compositor_drag_from_host (self, mime_types, payload, can_move)` 把宿主手上的（类型表，字节）
+交给 `data_source_host_new()`——那种 `DataSource` 后面没有客户端，载荷已经在内存里，类型表就是宿主
+自己的 drop 报出来的那几个名字。之后全是 §1 那一套，只是主客对调：我们给指针下的 surface 介绍一个
+`wl_data_offer`，页面自己 `accept`、自己 `set_actions`、自己发 `receive`。公开的入口是三样——这个
+加上 `..._drag_from_host_drop()` 和 `..._cancel()`——加一个 `::drag-in-end (taken, mime)` 让宿主把
+话答回它自己那条外层 `GdkDrop`。
+
+| | 源 | 谁读载荷 | 这一趟由谁说完 |
+| --- | --- | --- | --- |
+| 出界（§6） | 页面 | compositor 自己预取 | compositor 发 `cancelled` |
+| 拖入（本节） | compositor | 页面 | 页面发 `wl_data_offer.finish` |
+
+源掩码恒定给 COPY|ASK，宿主说原件可以搬走（`can_move`）才再加 MOVE；demo 的 `drop-in` 传 FALSE。
+实测的一轮协商是：源 `0x5`，页面 `set_actions (0x3, COPY)`，落到 `action 0x1`。
+
+### 7.2 到达就得 `enter`，而且位置要先进
+
+`wl_data_device.enter` 是 surface 得知「有拖拽」的唯一途径，而指针在拖入那一刻**已经**停在某个
+surface 上了——没有人会再动一下，所以 `drag_from_host()` 末尾自己补一次 `drag_update_destination()`。
+少了这一次，页面一个 `dragenter` 都不发，后面 motion 多少条都没用。demo 那边同一件事的另一半：
+`drop-in` 先 `notify_pointer_motion (x0, y0)` 再 `drag_from_host()`，因为 compositor 只能按指针当前
+位置挑要 enter 哪个 surface。
+
+### 7.3 判定只能听目的地的话：`taken = dropped && concluded`
+
+整段的地基问题是宿主该怎么回答它自己那条 `GdkDrop`。第一版按「目的地读过载荷」算，实测直接推翻。
+`./test/dnd-gate.sh in` 四趟拖入（`DEMO_DROP_IN_TEXT` 是 `from-host`，9 字节，两个名字）：
+
+```
+drop-in 400 300 400 360   → #target   ：dragenter + 12×dragover + drop(from-host)，finish 也发了
+drop-in 150 60 150 140    → #source   ：页面日志是空的；drop 照发，没人 finish
+```
+
+两趟在 compositor 这边都出现 `nested: handing the page 9 bytes of the host's drag`，而且**每趟两次**
+（四趟共 8 次）；两次都发生在 `enter` 的那一毫秒里，`drop` 是 300 ms 之后的事：
+
+```
+05:57:41.934 handing the page 9 bytes …      ← 被 enter 到的那一刻
+05:57:41.934 handing the page 9 bytes …
+05:57:42.234 dropped text/plain as action 0x0
+05:57:42.234 a drag ended without the destination finishing
+demo: drop-in verdict: given back, text/plain
+```
+
+所以「读了」不等于「收了」，Blink 一被 `enter` 就把宿主的字节读两遍，跟它后面要不要这次 drop 无关。
+能区分的只有 `finish`：落地**且**发过 finish 才算 `taken`。`struct _Drag` 里那个 `payload_read` 位
+就是这么删掉的。同理，`nested: dropped … as action 0x1` 配 `a drag concluded` 是 taken，
+`as action 0x0` 配 `a drag ended without the destination finishing` 不是。
+
+一个 25 ms 的坑：motion 的头一拍里 Chromium 会先报一次 `settled on action 0x0 … destination 0x0`，
+下一拍才落到 0x1。落地用的是**最后一次**协商结果，别按 enter 那条日志下结论。
+
+取消那条路的 mime 是 `(none)`：`drag_cancel()` 会先 `drag_leave()`，而 leave 要把目的地的协商状态
+整个擦掉（换 surface 得重新问过），`accepted_mime` 也在其中。反正 `taken == FALSE` 时宿主不需要
+类型名，这个不修，但读 `::drag-in-end` 的人要知道它可能是空的。
+
+### 7.4 并发与退休
+
+一个座位只有一条拖拽。第二条进来时：
+
+- 第一条还握着指针 → `nested: a drag already has the pointer, so the host cannot bring in a second`，
+  返回 FALSE，旧的那条一动不动。
+- 第一条已经落地但没 finish（§7.3 那种不接的页面）→ 先 `drag_destroy (…, FALSE)` 把它退休，
+  日志是 `the drag that was dropped never said it was done`，然后新拖拽正常进来。`tell_host` 传
+  FALSE 是刻意的：从「制造新拖拽」的那只手里去通知宿主旧判定，等于叫一个正在起手的人再拖第二条。
+
+退休那条路径会把 host 的 `DataSource`（连同 GBytes）一起释放，所以第三条、第四条还能进来——门禁里
+`in` 那一段跑的四趟就是这么排的，第四趟 `a fourth drag arrived after the other three ended`。
+
+### 7.5 假客户端重放：`shm-client --drag-in` + `seat-selftest-drag-in`
+
+这一段不需要浏览器也能钉死，用的是一趟真的 `wl_data_offer` 往返。`shm-client --drag-in` 是**主动**
+的目的地：`enter` 里 `set_actions (COPY|MOVE, COPY)`、从 offer 的类型表里挑出 `text/plain`、
+`accept` 掉，然后按页面的样子读两遍（一趟在 enter 之前，一趟在 drop 之后），字节不等于
+`drag-in-payload` 就 `exit(1)`——`seat-selftest` 看见客户端非零退出就算红，判定不靠读日志。落地的
+时候它发 `wl_data_offer_finish`。
+
+`seat-selftest-drag-in` 排三趟，钉的是判定的三种收尾：taken（`text/plain`）、cancel 之后的
+given back、退休后再进来一条仍然 taken。每趟 check 里还断言 `nested_compositor_drag_get_types()`
+回到空数组（`the drag outlived its verdict`）和 fd 计数回到拖入之前。中间插一条 `STEP_DRAG_IN_SECOND`
+专门撞 §7.4 的并发拒绝。反向做一遍负对照：把 `DRAG_IN_PAYLOAD` 改一个字符，客户端 exit 1，整条
+`meson test` 红。
+
+## 8. 还没有
+
+- **拖入的宿主那一头还没接。** `GtkDropTarget` 一个都没装：这一段的三条入口现在只被 `drop-in`
+  脚本步骤驱动。装上一个 `GtkDropTarget`（`gdk_drop_prepare_async` 里预取字节，`drop` 里
+  `drag_from_host`）就是把它接到真实来源上，协议侧不用再动。
 - 拖动图标目前是客户端给的 surface，宿主没有替换成 GTK 的拖拽图像。
-- 出界之后 GTK 那条腿（`gdk_drag_begin`）只有人工测量，原因见 §6.4。
+- 越过窗口边界之后**两条** GTK 腿都只有人工测量：出界的 `gdk_drag_begin`（§6.4）和拖入这条对面的
+  外层 `GdkDrop`。两个都要 GDK 手里有一次真实的、它自己见过的按下，脚本给不了。

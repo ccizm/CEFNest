@@ -36,7 +36,7 @@ Three pieces, and each only does one job:
 
 | Piece | File | Responsibility |
 | --- | --- | --- |
-| `NestedCompositor` | `src/nested.c` + `src/nested-{seat,dmabuf,xdg,cursor,text-input,data-device}.c` | the compositor: globals, surfaces, damage, input, clipboard |
+| `NestedCompositor` | `src/nested.c` + `src/nested-{seat,dmabuf,xdg,cursor,text-input,data-device}.c` | the compositor: globals, surfaces, damage, input, clipboard, drag in both directions across the window edge |
 | `ChromiumView` | `src/chromium-view.c` | the widget: hands its GdkSurface's input to the compositor, paints the composition |
 | `ChromiumSession` | `src/chromium-session.c` | the control plane: starts and stops the helper, tracks page state, runs JavaScript, brokers downloads, find, the page's context menu, and its permission requests |
 
@@ -110,7 +110,7 @@ of it is reproducible runs:
 | --- | --- |
 | `CHROMIUM_HELPER` | set (any value containing `/`) to enter session mode; the default is the path compiled in `src/meson.build` |
 | `CHROMIUM_URL` | page to open |
-| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `perm-accept <id>`, `perm-deny <id>`, `perm-dismiss <id>`, `close`, `quit` — see `test/*.session` |
+| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `drop-in <x0> <y0> <x1> <y1> [text] [mimes]`, `drop-in-hold`, `drop-in-move <x> <y>`, `drop-in-drop`, `drop-in-cancel`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `perm-accept <id>`, `perm-deny <id>`, `perm-dismiss <id>`, `close`, `quit` — see `test/*.session` |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_WINDOW` | `fullscreen` or `maximize`, for deterministic geometry |
 | `CHROMIUM_CLIPSET` / `CHROMIUM_CLIPWATCH` | seed the host clipboard, and bridge it into the page |
@@ -124,8 +124,8 @@ of it is reproducible runs:
 ## Test
 
 ```bash
-meson test -C builddir                       # 11 tests
-meson test -C builddir --suite selftest      # the ten seat selftests
+meson test -C builddir                       # 12 tests
+meson test -C builddir --suite selftest      # the eleven seat selftests
 meson test -C builddir --suite protocol      # the implementation-slot audit
 ```
 
@@ -138,8 +138,8 @@ client saw. Each mode asks for a different set of protocol objects:
 ```
 
 with `--dmabuf`, `--text-input`, `--cursor-shape`, `--popup`, `--refused`,
-`--dnd-requests`, `--gtk-client`. On a machine with no display they report
-`skipping` and exit 0.
+`--dnd-requests`, `--drag-out`, `--drag-in`, `--fullscreen`, `--gtk-client`. On a
+machine with no display they report `skipping` and exit 0.
 
 `--dmabuf` is scored on the compositor's side of the import: the client falls
 back to `wl_shm` on any refusal and still exits 0, so the run counts what the
@@ -161,6 +161,11 @@ it stops, which is the shape that makes Chromium throw the scroll delta away
 child rather than polling it, so a client that leaves by signal or with a
 non-zero status fails the test at that step instead of printing the rest of the
 script to nobody.
+
+`--drag-in` is the mode that leans on that hardest: the destination is the raw
+client, so it is the one place that can tell whether the bytes it was handed are
+the bytes it was promised, and it compares them itself and exits 1 on a mismatch
+rather than leaving the verdict to a log line.
 
 What the compositor sends is only half of it, so the wheel is also checked where
 it matters:
@@ -206,8 +211,8 @@ filtered on the host side, and they read `scrollTop` twice — before and after 
 step — because the measurement that says a search does not move the page while a
 step scrolls the match in is the whole reason no match rectangle is on the wire.
 
-`test/dnd-gate.sh` is the drag half, five real-Chromium runs on
-`test/dnd-page.html` and 41 assertions. It answers the question the whole
+`test/dnd-gate.sh` is the drag half, six real-Chromium runs on
+`test/dnd-page.html` and 59 assertions. It answers the question the whole
 in-process route hanged on: whether a browser inside a widget honours a
 `wl_data_device.enter` at all, or settles an in-window drag through its own
 internal drag manager. The page's own event log says it honours it — the
@@ -216,15 +221,25 @@ coordinates the script fed the seat are the coordinates the page reports on
 state machine left behind: a destination that will not take the payload, a
 second drag after the first, a drag held open so the drag image can be seen
 joining and leaving the paint stack and then a click that says the seat came
-back, and a drag that leaves the window entirely — which the compositor answers
+back, a drag that leaves the window entirely — which the compositor answers
 for by reading the payload off the page's own source, calling that drag off, and
-printing what it handed to the host. That last run is also the measurement that
-settles whether Blink serves a `send` for a mime no destination ever accepted,
-and it runs with `CEFNEST_DRAG_OUT=take` so no host drag can be started under a
-real pointer. The handover itself does not need a browser:
-`meson test -C builddir --suite selftest` has `seat-selftest-drag-out`, where
-`shm-client --drag-out` is both the origin and the destination of a drag of the
-three measured types. The gate pipes stderr through `tee` because GLib's writer
+printing what it handed to the host — and a drag the other way, which the
+compositor brings in as the source and the page then negotiates. That last run
+is four inbound drags because the direction's whole product is the verdict the
+host has to be given back: taken over the drop target, given back over an
+element that handles nothing, given back when the host calls the drag off, and
+taken again afterwards. The measurement that rewrote the verdict: a page reads a
+host drag's payload twice the moment it is entered, whether or not it then keeps
+the drop, so only `wl_data_offer.finish` decides. The outbound run is also the
+measurement that settles whether Blink serves a `send` for a mime no destination
+ever accepted, and it runs with `CEFNEST_DRAG_OUT=take` so no host drag can be
+started under a real pointer. Neither direction needs a browser for its protocol
+half: `meson test -C builddir --suite selftest` has `seat-selftest-drag-out`,
+where `shm-client --drag-out` is both the origin and the destination of a drag of
+the three measured types, and `seat-selftest-drag-in`, where
+`shm-client --drag-in` is an active destination that accepts a type, reads the
+payload the way a page was measured to and exits non-zero if the bytes are not
+the ones it was handed. The gate pipes stderr through `tee` because GLib's writer
 drops DEBUG messages when stderr is a plain file, and the compositor's own trace
 is half of what is asserted.
 
@@ -345,22 +360,28 @@ They are the record of *why* the code is shaped like this:
 | `protocol-ceilings.md` | what real clients bind against the nested compositor, and the measured verdict on every protocol and version ceiling left un-advertised |
 | `download-path.md` | the parked `OnBeforeDownload` gate, who decides the path, and the three CEF download behaviours only a measurement can tell you |
 | `find-path.md` | a command that answers nothing, the reply shape only a measurement gives (one identifier per request, one to three updates per request), and what actually scrolls the page |
-| `drag-loop.md` | the in-page drag choreography, the measured proof that a `wl_data_device.enter` reaches the page, what the destination actually accepts, why the fd relay is not what carries a same-page payload, and how a drag that crosses the window edge is read off the page's source and handed to the host |
+| `drag-loop.md` | the in-page drag choreography, the measured proof that a `wl_data_device.enter` reaches the page, what the destination actually accepts, why the fd relay is not what carries a same-page payload, how a drag that crosses the window edge is read off the page's source and handed to the host, and how the same crossing in reverse makes the compositor the source — including the measurement that says a page reads a host drag the moment it is entered, so only `finish` can decide the verdict |
 | `context-menu.md` | the one constraint that decided the whole design (Chromium holds a single unanswered menu request), what CEF's default model really contains — the same five rows for a link, an image and a blank page — and `Continue(id)` proven inside the page |
 | `permission-prompt.md` | which asks never reach the host at all, the two queues that make an unanswered request cost the page its next question too, and why `accept` can only ever mean "the whole mask" |
 
 ## Known limitations
 
-- **Drag and drop stops at the window edge in one direction only.** A drag that
-  starts and ends inside one page works: the compositor runs the whole
-  `wl_data_device` negotiation, the page's own drag image is composited on top of
-  everything, and the drop lands where the pointer says. A drag that crosses the
-  edge going out works too: the compositor reads the payload off the page's own
-  source, calls that drag off and hands mime, bytes and the full type list to the
-  host, which can start a `GdkDrag` of its own (`docs/drag-loop.md` §6). What is
-  missing is the reverse — a drop from the host into the page — and the host leg
-  of the outbound drag is measured by hand, because a scripted press leaves GDK no
-  serial to begin one with.
+- **Drag crosses the window edge in both directions; neither outer leg is on real
+  GTK input yet.** A drag that starts and ends inside one page works: the
+  compositor runs the whole `wl_data_device` negotiation, the page's own drag
+  image is composited on top of everything, and the drop lands where the pointer
+  says. Going out, the compositor reads the payload off the page's own source,
+  calls that drag off and hands mime, bytes and the full type list to the host,
+  which can start a `GdkDrag` of its own (`docs/drag-loop.md` §6). Coming in, it
+  is the source: `nested_compositor_drag_from_host()` introduces the host's bytes
+  as a `wl_data_offer`, the page negotiates and reads them, and whether the
+  destination kept the drop comes back on `::drag-in-end`
+  (`docs/drag-loop.md` §7) — but that direction is driven today by the `drop-in`
+  script steps, not by an application dropping on the window: no `GtkDropTarget`
+  is installed on the widget yet. And neither leg can be finished by a script:
+  `gdk_drag_begin()` and a real `GdkDrop` each need a press GDK saw itself, while
+  a scripted press is on the inner seat, so the automated runs stop at the
+  handover and the outer legs are measured with a hand on the mouse.
 - **One seat, one pointer, no touch.** The embedding widget is the only device
   the compositor knows about.
 - **No pinch zoom, no tablet input, no middle-click paste.** Chromium binds

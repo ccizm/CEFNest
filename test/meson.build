@@ -54,7 +54,7 @@ endif
 # sequence because it only ever sets flags, so that step brings in a second
 # copy of the test, built against GTK, as a client of its own compositor.
 foreach mode : [ 'plain', 'dmabuf', 'text-input', 'cursor-shape', 'popup',
-                 'refused', 'dnd-requests', 'drag-out', 'fullscreen',
+                 'refused', 'dnd-requests', 'drag-out', 'drag-in', 'fullscreen',
                  'gtk-client' ]
   selftest_args = [ 'seat-selftest-' + mode + '.png', shm_client.full_path() ]
   if mode != 'plain'

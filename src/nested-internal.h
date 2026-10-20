@@ -304,6 +304,11 @@ void           nested_surfaces_changed (NestedCompositor *self);
 gboolean       nested_has_drag_out_host  (NestedCompositor *self);
 void           nested_emit_drag_out      (NestedCompositor *self, const char *mime,
                                           GBytes *bytes, char **types);
+/* The verdict on a drag the host carried in, told to it when the drag is
+ * retired: a host has to answer its own compositor's drop with success or
+ * failure, and only the destination's requests say which it was. */
+void           nested_emit_drag_in_end   (NestedCompositor *self, gboolean taken,
+                                          const char *mime);
 /* The painted surface under a point in the widget's logical pixels, or NULL.
  * Popups sit on the toplevel, so this is where the pointer learns what it is
  * really over. */

@@ -60,6 +60,7 @@ enum {
   SIGNAL_TEXT_INPUT_STATE,
   SIGNAL_WINDOW_FULLSCREEN_REQUEST,
   SIGNAL_DRAG_OUT,
+  SIGNAL_DRAG_IN_END,
   N_SIGNALS,
 };
 
@@ -1740,6 +1741,14 @@ nested_emit_drag_out (NestedCompositor *self, const char *mime, GBytes *bytes,
 }
 
 void
+nested_emit_drag_in_end (NestedCompositor *self, gboolean taken, const char *mime)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  g_signal_emit (self, signals[SIGNAL_DRAG_IN_END], 0, taken, mime);
+}
+
+void
 nested_update_primary (NestedCompositor *self)
 {
   NestedSurface *candidate = NULL, *surface;
@@ -1975,6 +1984,25 @@ nested_compositor_class_init (NestedCompositorClass *klass)
     g_signal_new ("drag-out", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 3,
                   G_TYPE_STRING, G_TYPE_BYTES, G_TYPE_STRV);
+
+  /**
+   * NestedCompositor::drag-in-end:
+   * @taken: whether the destination ended up with the payload
+   * @mime: (nullable): the type it accepted, or %NULL if it never named one
+   *
+   * Emitted when a drag the host carried into the widget with
+   * nested_compositor_drag_from_host() is over — dropped and finished, or
+   * called off. @taken is TRUE only when the destination both took the drop and
+   * finished the offer, which is the answer a host's own drop target has to
+   * report back: gdk_drag_drop_done() and gdk_drag_report_success() are
+   * otherwise left guessing what the page made of the payload. Reading the
+   * payload is not that answer — a page was measured asking for a host drag's
+   * bytes the moment it was entered, whether or not it then dropped them.
+   */
+  signals[SIGNAL_DRAG_IN_END] =
+    g_signal_new ("drag-in-end", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_BOOLEAN, G_TYPE_STRING);
 }
 
 NestedCompositor *

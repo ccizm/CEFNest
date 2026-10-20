@@ -2,7 +2,7 @@
 #
 # test/dnd-gate.sh — drives the in-page drag loop and asserts on it.
 #
-# All five runs need the real browser: what is under test is the choreography
+# All six runs need the real browser: what is under test is the choreography
 # between a page's HTML5 drag and wl_data_device, and only Chromium does the
 # page half of it. The fake helper has no window to drag inside.
 #
@@ -17,7 +17,11 @@
 #      afterwards, which is how the seat is shown to have been handed back;
 #   5. a drag that leaves the window — the compositor reads the payload itself,
 #      calls the page's drag off and hands the whole thing to the host, and the
-#      page sees a leave and an end with no drop in between.
+#      page sees a leave and an end with no drop in between;
+#   6. a drag the host carries in — the page is the destination instead of the
+#      source, and the four endings a destination can give are told apart: taken
+#      over a drop target, given back over an element that handles nothing, given
+#      back when the host calls it off, and taken again after all of that.
 #
 # It opens a real demo window per run, so it is a documented manual gate rather
 # than a meson test — the same convention as test/*.session,
@@ -33,13 +37,15 @@
 # through tee.
 #
 #   ./test/dnd-gate.sh
-#   ./test/dnd-gate.sh loop      # only one of the five
+#   ./test/dnd-gate.sh loop      # only one of the six
 #
 # The protocol-error half is already covered by meson test: the
 # seat-selftest-dnd-requests case sends wl_data_device_manager version 3
-# requests at the compositor and asserts that both connections stay alive, and
+# requests at the compositor and asserts that both connections stay alive,
 # seat-selftest-drag-out drives the handover of run 5 from a fake client that
-# offers the same three types, with no browser and no window in the loop.
+# offers the same three types, and seat-selftest-drag-in drives run 6 from a fake
+# client that is an active destination — a type accepted, the payload read twice
+# and the offer finished — with no browser and no window in the loop.
 
 set -u -o pipefail
 
@@ -344,6 +350,114 @@ EOF
 
   expect_no 'nested: dropped' "$WORK/out.log" out
   no_protocol_error "$WORK/out.log" out
+fi
+
+# ---------------------------------------------------------------------------
+# 6. A drag the host carries in.
+# ---------------------------------------------------------------------------
+
+if [ "$WHICH" = all ] || [ "$WHICH" = in ]; then
+  # No real GdkDrop is involved: the outer leg would need a press in another
+  # window, which no script can give GDK. The drop-in steps call the same three
+  # entry points a drop target does, with the payload this process holds in
+  # memory, so the page is the destination for once and the compositor is the
+  # source. Four endings are measured in one run because the point of the
+  # direction is the verdict the host has to pass back: taken over the target,
+  # given back over the box that handles nothing, given back when the host calls
+  # it off, and taken again afterwards.
+  script in <<EOF
+load $PAGE
+wait 4000
+js window.dndLog=[]; 'clear'
+drop-in 400 300 400 360
+wait 1500
+js window.dndLog.join('|')
+wait 500
+js window.dndLog=[]; 'clear2'
+drop-in 150 60 150 140
+wait 1500
+js window.dndLog.join('|')
+wait 500
+js window.dndLog=[]; 'clear3'
+drop-in-hold 400 300 400 360
+wait 800
+drop-in-cancel
+wait 1200
+js window.dndLog.join('|')
+wait 500
+js window.dndLog=[]; 'clear4'
+drop-in 400 300 400 360
+wait 1500
+js window.dndLog.join('|')
+wait 1000
+quit
+EOF
+  run_demo in "$WORK/in.log" "$HELPER"
+
+  # The arrival, four times over: the bytes and the two names, and a surface
+  # entered with an offer the page never asked for.
+  expect_occ 'nested: the host brought a drag in: 9 bytes of 2 types' "$WORK/in.log" 4 in
+  expect_occ 'nested: dragged onto surface id [0-9]+ offering the host.s payload' "$WORK/in.log" 4 in
+  expect_occ 'demo: drop-in text/plain;charset=utf-8 at [0-9]+,[0-9]+: offered' "$WORK/in.log" 4 in
+  # Measured: the page asks for the payload the moment it is entered, twice,
+  # whether or not it then takes the drop. That is why the verdict cannot be
+  # built on the read.
+  expect_occ 'nested: handing the page 9 bytes of the host.s drag' "$WORK/in.log" 8 in
+
+  # The two endings the compositor saw, and the two the host was told.
+  expect_occ 'nested: dropped text/plain as action 0x1' "$WORK/in.log" 2 in
+  expect_occ 'nested: dropped text/plain as action 0x0' "$WORK/in.log" 1 in
+  expect_occ 'nested: a drag concluded' "$WORK/in.log" 2 in
+  expect_occ 'nested: a drag ended without the destination finishing' "$WORK/in.log" 1 in
+  expect_occ 'demo: drop-in verdict: taken, text/plain' "$WORK/in.log" 2 in
+  expect_occ 'demo: drop-in verdict: given back' "$WORK/in.log" 2 in
+
+  # The page's own account, one line per drag. The source box has no drop
+  # listeners and is not inside #target, so the second line is empty: a page
+  # that is entered but handles nothing says nothing, which is exactly the case
+  # the verdict has to catch.
+  taken=$(page_logs "$WORK/in.log" | grep -v '^clear' | sed -n 1p)
+  boxed=$(page_logs "$WORK/in.log" | grep -v '^clear' | sed -n 2p)
+  back=$(page_logs "$WORK/in.log" | grep -v '^clear' | sed -n 3p)
+  again=$(page_logs "$WORK/in.log" | grep -v '^clear' | sed -n 4p)
+
+  for want in 'dragenter\[text/plain\]@target 400,300' \
+              'dragover\[text/plain\]@target 400,3[0-6][0-9]' \
+              'drop\(from-host\)\[text/plain\]@target'; do
+    if printf '%s' "$taken" | grep -qaE "$want"; then
+      ok "in: the page saw /$want/"
+    else
+      bad "in: the page never saw /$want/ — log was $taken"
+    fi
+  done
+
+  if printf '%s' "$boxed" | grep -qaE 'drop\(|dragenter'; then
+    bad "in: the box that handles nothing reported /$boxed/"
+  else
+    ok "in: the element with no drop handler said nothing, as it does"
+  fi
+
+  if printf '%s' "$back" | grep -qaE 'dragenter\[text/plain\]@target' &&
+     printf '%s' "$back" | grep -qaE 'dragleave\[text/plain\]@target'; then
+    ok "in: the called-off drag reached the page as an enter and a leave"
+  else
+    bad "in: the called-off drag did not reach the page — log was $back"
+  fi
+  if printf '%s' "$back" | grep -qaE 'drop\('; then
+    bad "in: a cancelled drag still took a drop — log was $back"
+  else
+    ok "in: no drop came from a called-off drag"
+  fi
+
+  # Last, and the one that says the three endings left nothing behind: a page the
+  # host can drop on once more after all of them.
+  if printf '%s' "$again" | grep -qaE 'drop\(from-host\)\[text/plain\]@target'; then
+    ok "in: a fourth drag arrived after the other three ended"
+  else
+    bad "in: the drag after the endings never dropped — log was $again"
+  fi
+
+  no_protocol_error "$WORK/in.log" in
 fi
 
 echo

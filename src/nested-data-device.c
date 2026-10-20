@@ -44,6 +44,10 @@ struct _DataSource {
   GPtrArray *mime_types;      /* char *, owned */
   struct wl_list offers;      /* DataOffer.source_link */
   uint32_t dnd_actions;       /* the mask wl_data_source.set_actions named */
+  /* A source with no resource is the compositor's own: the host picked a drag
+   * up somewhere outside the window and is carrying it in, so the bytes are
+   * already here instead of being asked for over a pipe. */
+  GBytes *payload;
 };
 
 struct _DataOffer {
@@ -126,7 +130,7 @@ static void compositor_clipboard_read_done (GObject *clipboard, GAsyncResult *re
                                             gpointer user_data);
 
 static void drag_cancel (Drag *drag);
-static void drag_destroy (Drag *drag);
+static void drag_destroy (Drag *drag, gboolean tell_host);
 static void drag_leave (Drag *drag);
 static void drag_enter (Drag *drag, DataDevice *device, NestedSurface *surface);
 static void drag_negotiate (Drag *drag);
@@ -165,6 +169,16 @@ pick_text_mime (GPtrArray *types)
         return text_mimes[i];
 
   return types->len > 0 ? g_ptr_array_index (types, 0) : NULL;
+}
+
+/* Whether the bytes of this source are the compositor's own: a drag the host
+ * picked up outside the window and is carrying in has no client on the source
+ * side, so nothing may be sent to it and everything asked for is answered from
+ * memory. */
+static gboolean
+data_source_is_host (const DataSource *source)
+{
+  return source->resource == NULL;
 }
 
 /* ------------------------------------------------------------ one client copy */
@@ -738,6 +752,72 @@ device_for_surface (NestedCompositor *self, NestedSurface *surface)
   return NULL;
 }
 
+/* The offers outlive the source they were made from: a destination still holding
+ * one has to be left with an offer that reads as gone rather than one pointing
+ * at freed memory. */
+static void
+data_source_offers_detach (DataSource *source)
+{
+  while (!wl_list_empty (&source->offers))
+    {
+      DataOffer *offer = wl_container_of (source->offers.next, offer, source_link);
+
+      wl_list_remove (&offer->source_link);
+      wl_list_init (&offer->source_link);
+      offer->source = NULL;
+    }
+}
+
+/* The source of a drag the host is carrying in: no client is on this end, the
+ * payload is already in memory, and the mime list is whatever the host's own
+ * drop offered. */
+static DataSource *
+data_source_host_new (NestedCompositor *self, const char *const *mime_types,
+                      GBytes *payload)
+{
+  DataSource *source;
+  gsize i;
+
+  source = g_new0 (DataSource, 1);
+  source->compositor = self;
+  source->mime_types = g_ptr_array_new_with_free_func (g_free);
+  source->payload = g_bytes_ref (payload);
+  wl_list_init (&source->offers);
+
+  for (i = 0; mime_types[i]; i++)
+    g_ptr_array_add (source->mime_types, g_strdup (mime_types[i]));
+
+  return source;
+}
+
+/* Which of the host's names can answer for @asked. A different promise about a
+ * terminator is not a different payload, which is the licence the clipboard
+ * mirror already takes. */
+static const char *
+data_source_host_pick (const DataSource *source, const char *asked)
+{
+  gsize i;
+
+  for (i = 0; i < source->mime_types->len; i++)
+    {
+      const char *have = g_ptr_array_index (source->mime_types, i);
+
+      if (mime_can_serve (have, asked))
+        return have;
+    }
+
+  return NULL;
+}
+
+static void
+data_source_host_destroy (DataSource *source)
+{
+  data_source_offers_detach (source);
+  g_clear_pointer (&source->mime_types, g_ptr_array_unref);
+  g_clear_pointer (&source->payload, g_bytes_unref);
+  g_free (source);
+}
+
 /* The live drag this offer was made for, or NULL for a copy's offer and for one
  * whose drag has already been called off. */
 static Drag *
@@ -788,7 +868,7 @@ drag_negotiate (Drag *drag)
   g_debug ("nested: drag settled on action 0x%x of source 0x%x and destination 0x%x",
            action, drag->source_actions, drag->dest_actions);
 
-  if (drag->source &&
+  if (drag->source && !data_source_is_host (drag->source) &&
       wl_resource_get_version (drag->source->resource) >= WL_DATA_SOURCE_ACTION_SINCE_VERSION)
     wl_data_source_send_action (drag->source->resource, action);
 
@@ -863,7 +943,9 @@ drag_enter (Drag *drag, DataDevice *device, NestedSurface *surface)
                              wl_fixed_from_double (y), offer_resource);
   g_debug ("nested: dragged onto surface id %u offering %s, id %u",
            wl_resource_get_id (surface->wl_surface),
-           drag->source ? "a client's payload" : "nothing (the drag has no source)",
+           drag->source ? (data_source_is_host (drag->source)
+                           ? "the host's payload" : "a client's payload")
+                        : "nothing (the drag has no source)",
            offer_resource ? wl_resource_get_id (offer_resource) : 0u);
 }
 
@@ -907,10 +989,20 @@ drag_update_destination (Drag *drag)
                               wl_fixed_from_double (x), wl_fixed_from_double (y));
 }
 
+/* @tell_host is FALSE only for the one caller that is itself making a new
+ * inbound drag: telling the host about the old verdict from there would let it
+ * ask for a second drag while the first is still being put together. */
 static void
-drag_destroy (Drag *drag)
+drag_destroy (Drag *drag, gboolean tell_host)
 {
   NestedCompositor *self = drag->compositor;
+  gboolean from_host = drag->source && data_source_is_host (drag->source);
+  /* The destination's own words are the only verdict worth passing on. A page was
+   * measured reading a host drag's payload the moment it was entered and then
+   * letting the drop go with nothing done to it, so a read says nothing about
+   * taking; finish does, because it is only sent for a drop that was kept. */
+  gboolean taken = drag->dropped && drag->concluded;
+  char *mime = g_strdup (drag->accepted_mime);
 
   if (self->drag == drag)
     self->drag = NULL;
@@ -919,6 +1011,16 @@ drag_destroy (Drag *drag)
    * gone there is nobody to hand it to, and the source it came from may already
    * be on its way out. */
   clipboard_transfer_cancel (self->drag_out_transfer);
+
+  /* A payload the host handed over came with this drag and goes with it. A
+   * client's source is the client's to destroy, and this is not the place. */
+  if (from_host)
+    {
+      DataSource *source = drag->source;
+
+      drag->source = NULL;
+      data_source_host_destroy (source);
+    }
 
   /* The icon and the surface it started from outlive the drag: their client
    * destroys them, and a surface that was an icon is not one any more. */
@@ -929,6 +1031,12 @@ drag_destroy (Drag *drag)
   g_clear_object (&drag->dest_surface);
   g_clear_pointer (&drag->accepted_mime, g_free);
   g_free (drag);
+
+  /* Told last: a host that reacts by bringing another drag in must not find the
+   * one it is being told about still the live one. */
+  if (from_host && tell_host)
+    nested_emit_drag_in_end (self, taken, mime);
+  g_free (mime);
 }
 
 static void
@@ -939,13 +1047,13 @@ drag_cancel (Drag *drag)
   if (drag->owns_pointer)
     drag_leave (drag);
 
-  if (drag->source && !drag->concluded)
+  if (drag->source && !data_source_is_host (drag->source) && !drag->concluded)
     {
       drag->concluded = TRUE;
       wl_data_source_send_cancelled (drag->source->resource);
     }
 
-  drag_destroy (drag);
+  drag_destroy (drag, TRUE);
 
   /* Whatever the pointer was over when the drag gave up is news to the page. */
   nested_surfaces_changed (self);
@@ -991,7 +1099,7 @@ drag_drop (Drag *drag)
   drag->dropped = TRUE;
   drag_release_pointer (drag);
 
-  if (drag->source &&
+  if (drag->source && !data_source_is_host (drag->source) &&
       wl_resource_get_version (drag->source->resource) >=
       WL_DATA_SOURCE_DND_DROP_PERFORMED_SINCE_VERSION)
     wl_data_source_send_dnd_drop_performed (drag->source->resource);
@@ -1075,6 +1183,14 @@ nested_compositor_drag_take_out (NestedCompositor *self)
   if (self->drag->handing_out)
     return FALSE;
 
+  if (self->drag->source && data_source_is_host (self->drag->source))
+    {
+      /* The bytes are the host's own already, so there is nothing to read out of
+       * a client here: the pointer walking off the page is a leave, and the drag
+       * stays where it is for the pointer to come back with it. */
+      return FALSE;
+    }
+
   source = self->drag->source;
   if (!source || source->mime_types->len == 0)
     {
@@ -1099,6 +1215,123 @@ nested_compositor_drag_take_out (NestedCompositor *self)
            mime, source->mime_types->len);
 
   return TRUE;
+}
+
+/* ------------------------------------------------------------- a drag arriving */
+
+/* A drag the host picked up outside this window and is now carrying over the
+ * widget. Nothing about it came from a client: the bytes are already in this
+ * process, and the one thing missing is that no client asked for them. So the
+ * compositor becomes the source, introduces an offer to whichever surface the
+ * pointer is over, and the stage-1 negotiation runs the other way round.
+ *
+ * Motion afterwards goes through nested_compositor_notify_pointer_motion(),
+ * which is already the path that hands a live drag to the surface under the
+ * pointer instead of the seat; the end comes from one of the two calls below. */
+gboolean
+nested_compositor_drag_from_host (NestedCompositor *self,
+                                  const char *const *mime_types,
+                                  GBytes *payload,
+                                  gboolean can_move)
+{
+  DataSource *source;
+  Drag *drag;
+  gsize n_types = 0;
+
+  g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), FALSE);
+  g_return_val_if_fail (mime_types != NULL, FALSE);
+  g_return_val_if_fail (payload != NULL, FALSE);
+
+  if (mime_types[0] == NULL || g_bytes_get_size (payload) == 0)
+    {
+      g_debug ("nested: the host offered a drag with nothing in it");
+      return FALSE;
+    }
+
+  if (self->drag)
+    {
+      if (!self->drag->owns_pointer)
+        {
+          /* Dropped and never finished: the destination went quiet after the
+           * drop instead of saying what it did with the payload. The host has a
+           * new drag in hand, so the old one is retired rather than left to
+           * block it. */
+          g_debug ("nested: the drag that was dropped never said it was done");
+          drag_destroy (self->drag, FALSE);
+        }
+      else
+        {
+          g_debug ("nested: a drag already has the pointer, so the host cannot bring in a second");
+          return FALSE;
+        }
+    }
+
+  while (mime_types[n_types])
+    n_types++;
+
+  source = data_source_host_new (self, mime_types, payload);
+
+  drag = g_new0 (Drag, 1);
+  drag->compositor = self;
+  drag->source = source;
+  drag->owns_pointer = TRUE;
+  drag->chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
+
+  /* What the host's own drag is prepared to do. A drop of text out of another
+   * application is nearly always a copy, and MOVE only when the source said the
+   * original may go. */
+  drag->source_actions = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
+                         WL_DATA_DEVICE_MANAGER_DND_ACTION_ASK;
+  if (can_move)
+    drag->source_actions |= WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
+
+  self->drag = drag;
+
+  g_debug ("nested: the host brought a drag in: %" G_GSIZE_FORMAT " bytes of %u type%s",
+           g_bytes_get_size (payload), (guint) n_types, n_types == 1 ? "" : "s");
+
+  /* The pointer is already over something when the host's drag arrives, and a
+   * surface is only told about a drag by being entered: without this the page
+   * never fires a dragenter and its handlers stay shut however far it moves. */
+  drag_update_destination (drag);
+  nested_surfaces_changed (self);
+  nested_flush (self);
+
+  return TRUE;
+}
+
+/* The host let go over the page. What the destination does with the payload
+ * after this is its own: it reads it through the offer it was given and answers
+ * with wl_data_offer.finish, and that is what retires the drag. */
+void
+nested_compositor_drag_from_host_drop (NestedCompositor *self)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  if (!self->drag || !self->drag->source ||
+      !data_source_is_host (self->drag->source))
+    {
+      g_debug ("nested: the host let go, and no drag of its was in flight");
+      return;
+    }
+
+  drag_drop (self->drag);
+  nested_flush (self);
+}
+
+/* The host's drag ended somewhere that is not this window, or was called off
+ * halfway. The page gets the leave its surface is owed and no drop. */
+void
+nested_compositor_drag_from_host_cancel (NestedCompositor *self)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  if (!self->drag || !self->drag->source ||
+      !data_source_is_host (self->drag->source))
+    return;
+
+  drag_cancel (self->drag);
+  nested_flush (self);
 }
 
 NestedSurface *
@@ -1242,7 +1475,7 @@ data_offer_accept (struct wl_client *client, struct wl_resource *resource,
   drag->accepted_mime = mime_type ? g_strdup (mime_type) : NULL;
   drag->refused = mime_type == NULL;
 
-  if (offer->source)
+  if (offer->source && !data_source_is_host (offer->source))
     wl_data_source_send_target (offer->source->resource, mime_type);
 }
 
@@ -1252,6 +1485,25 @@ data_offer_receive (struct wl_client *client, struct wl_resource *resource,
 {
   DataOffer *offer = wl_resource_get_user_data (resource);
   NestedCompositor *self = offer->compositor;
+
+  if (offer->source && data_source_is_host (offer->source))
+    {
+      const char *have = data_source_host_pick (offer->source, mime_type);
+
+      if (!have)
+        {
+          g_debug ("nested: %s asked for, the host's drag carries %s", mime_type,
+                   (const char *) g_ptr_array_index (offer->source->mime_types, 0));
+          close (fd);
+          return;
+        }
+
+      g_debug ("nested: handing the page %" G_GSIZE_FORMAT " bytes of the host's drag",
+               g_bytes_get_size (offer->source->payload));
+
+      clipboard_send_bytes (offer->source->payload, fd);
+      return;
+    }
 
   if (offer->source)
     {
@@ -1323,12 +1575,12 @@ data_offer_finish (struct wl_client *client, struct wl_resource *resource)
 
   g_debug ("nested: a drag concluded: the destination has what it was given");
   drag->concluded = TRUE;
-  if (offer->source &&
+  if (offer->source && !data_source_is_host (offer->source) &&
       wl_resource_get_version (offer->source->resource) >=
       WL_DATA_SOURCE_DND_FINISHED_SINCE_VERSION)
     wl_data_source_send_dnd_finished (offer->source->resource);
 
-  drag_destroy (drag);
+  drag_destroy (drag, TRUE);
 }
 
 static void
@@ -1368,7 +1620,7 @@ data_offer_resource_destroyed (struct wl_resource *resource)
       if (drag->dropped)
         {
           g_debug ("nested: a drag ended without the destination finishing");
-          drag_destroy (drag);
+          drag_destroy (drag, TRUE);
         }
       else
         drag_cancel (drag);
@@ -1429,14 +1681,7 @@ data_source_resource_destroyed (struct wl_resource *resource)
   /* The offers outlive the source: their clients still hold them and will
    * destroy them themselves. Detached, they fall back to the widget
    * clipboard, which still holds what was copied. */
-  while (!wl_list_empty (&source->offers))
-    {
-      DataOffer *offer = wl_container_of (source->offers.next, offer, source_link);
-
-      wl_list_remove (&offer->source_link);
-      wl_list_init (&offer->source_link);
-      offer->source = NULL;
-    }
+  data_source_offers_detach (source);
 
   if (self->selection_source == source)
     {
@@ -1752,7 +1997,7 @@ data_device_shutdown (NestedCompositor *self)
   /* Nothing is sent on the way out: the display is going with these resources,
    * and a drag's surfaces belong to clients that are already gone. */
   if (self->drag)
-    drag_destroy (self->drag);
+    drag_destroy (self->drag, FALSE);
 
   if (self->clipboard_transfer)
     {

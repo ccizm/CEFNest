@@ -17,6 +17,15 @@
  * seat the pointer is gone — and the run then asserts on the mime, the payload
  * and the type list that came back, and on the drag being called off.
  *
+ * --drag-in is the same handover the other way round: this process is the host,
+ * so it hands the compositor bytes and asserts on what comes back the other end.
+ * The client is the destination, and the run checks the verdict the compositor
+ * reports when the drag ends — taken after a drop it read, not taken after a
+ * cancel — that a second drag cannot arrive while the first holds the pointer,
+ * and that a third can arrive once the second has been given up. Whether the
+ * bytes themselves came back right is only knowable by the client that reads
+ * them, so it exits non-zero on a mismatch and client_exited() fails the run.
+ *
  * --gtk-client finishes the run by launching this same binary again as a GTK
  * client of its own compositor. libwayland hands events over as they arrive and
  * a raw client reads what it likes; a toolkit builds state out of the same
@@ -61,6 +70,12 @@ typedef enum {
   STEP_DRAG_OUT_BACK,
   STEP_DRAG_OUT_LEAVE,
   STEP_DRAG_OUT_CHECK,
+  STEP_DRAG_IN,
+  STEP_DRAG_IN_MOTION,
+  STEP_DRAG_IN_SECOND,
+  STEP_DRAG_IN_DROP,
+  STEP_DRAG_IN_CANCEL,
+  STEP_DRAG_IN_CHECK,
   N_STEP_KINDS
 } StepKind;
 
@@ -85,6 +100,25 @@ static const Step script[] = {
   { STEP_DRAG_OUT,       700, 500,  60 },
   { STEP_DRAG_OUT_BACK,  300, 200,  60 },
   { STEP_DRAG_OUT_CHECK,   1,   0, 200 }, /* the payload read has to land first */
+  /* A --drag-in run starts here. The pointer is over the client's surface from
+   * the enter above, so this is the host arriving with a drag of its own: it
+   * moves within the surface, tries to bring a second one in while the first
+   * still holds the pointer, then lets go. a and b of the check are the number
+   * of verdicts wanted so far and whether the last one was a take. */
+  { STEP_DRAG_IN,           0,   0, 150 },
+  { STEP_DRAG_IN_MOTION,  340, 260, 150 },
+  { STEP_DRAG_IN_SECOND,    0,   0, 150 },
+  { STEP_DRAG_IN_DROP,      0,   0, 300 },
+  { STEP_DRAG_IN_CHECK,     1,   1, 150 },
+  /* The host giving its drag back, then picking one up again: a cancel that left
+   * a live drag behind would refuse the third one, so this is the half of the
+   * run that checks the cleanup rather than the wire. */
+  { STEP_DRAG_IN,           0,   0, 150 },
+  { STEP_DRAG_IN_CANCEL,    0,   0, 150 },
+  { STEP_DRAG_IN_CHECK,     2,   0, 150 },
+  { STEP_DRAG_IN,           0,   0, 150 },
+  { STEP_DRAG_IN_DROP,      0,   0, 300 },
+  { STEP_DRAG_IN_CHECK,     3,   1, 150 },
   { STEP_AXIS, WL_POINTER_AXIS_VERTICAL_SCROLL, 100, 60 },
   /* The end of the gesture is a call of its own with no distance, the way GDK
    * reports a touchpad lift. It has to stay a separate step: a stop sent in the
@@ -132,7 +166,9 @@ static const char *step_names[N_STEP_KINDS] = {
   "button-press", "button-release", "axis", "axis-stop", "key-down", "key-up",
   "text-input-state", "preedit", "commit", "delete-surrounding", "stack",
   "dump", "dump-text-input", "dump-composite", "gtk-client", "drag-out",
-  "drag-out-back", "drag-out-leave", "drag-out-check",
+  "drag-out-back", "drag-out-leave", "drag-out-check", "drag-in",
+  "drag-in-motion", "drag-in-second", "drag-in-drop", "drag-in-cancel",
+  "drag-in-check",
 };
 
 #define PREEDIT_TEXT "nihao"
@@ -156,9 +192,18 @@ static gboolean drag_out_mode;
 static gboolean drag_out_failed;
 static int drag_out_seen;
 static int fds_at_drag_out;
+static gboolean drag_in_mode;
+static gboolean drag_in_failed;
+static int drag_in_seen;
+static gboolean drag_in_taken;
+static int drag_in_refused;
+static char drag_in_mime[128];
+static int fds_at_drag_in;
 
 static int  open_fds (void);
 static void check_drag_out (int expected);
+static void check_drag_in (int expected, int expected_taken);
+static gboolean host_drag_in (gboolean can_move);
 
 /* The compositor runs in this process and reports its dmabuf doings through
  * g_log under the "nested" domain. Counting those lines turns a silent shm
@@ -517,6 +562,13 @@ step_is_ours (StepKind kind)
     case STEP_DRAG_OUT_LEAVE:
     case STEP_DRAG_OUT_CHECK:
       return drag_out_mode;
+    case STEP_DRAG_IN:
+    case STEP_DRAG_IN_MOTION:
+    case STEP_DRAG_IN_SECOND:
+    case STEP_DRAG_IN_DROP:
+    case STEP_DRAG_IN_CANCEL:
+    case STEP_DRAG_IN_CHECK:
+      return drag_in_mode;
     default:
       return TRUE;
     }
@@ -648,6 +700,66 @@ run_step (gpointer data)
         break;
 
       check_drag_out (step->a);
+      break;
+    case STEP_DRAG_IN:
+      if (!drag_in_mode)
+        break;
+
+      if (!drag_in_seen)
+        fds_at_drag_in = open_fds ();
+
+      if (!host_drag_in (FALSE))
+        {
+          drag_in_refused++;
+          g_printerr ("selftest: drag-in gate FAILED: the compositor would not "
+                      "take the host's drag\n");
+        }
+      break;
+    case STEP_DRAG_IN_MOTION:
+      if (!drag_in_mode)
+        break;
+
+      /* The same call a widget makes when the cursor moves over it: a drag the
+       * host is carrying in has to be routed to the surface under the pointer by
+       * the seat path, not by a drag-in of its own. */
+      nested_compositor_notify_pointer_motion (compositor, step->a, step->b);
+      break;
+    case STEP_DRAG_IN_SECOND:
+      {
+        gboolean accepted;
+
+        if (!drag_in_mode)
+          break;
+
+        accepted = host_drag_in (TRUE);
+        if (accepted)
+          {
+            g_printerr ("selftest: drag-in gate FAILED: a second drag arrived "
+                        "while the first still held the pointer\n");
+            drag_in_failed = TRUE;
+          }
+        else
+          g_print ("selftest: the second drag was refused, which is the answer "
+                   "a held pointer owes it\n");
+      }
+      break;
+    case STEP_DRAG_IN_DROP:
+      if (!drag_in_mode)
+        break;
+
+      nested_compositor_drag_from_host_drop (compositor);
+      break;
+    case STEP_DRAG_IN_CANCEL:
+      if (!drag_in_mode)
+        break;
+
+      nested_compositor_drag_from_host_cancel (compositor);
+      break;
+    case STEP_DRAG_IN_CHECK:
+      if (!drag_in_mode)
+        break;
+
+      check_drag_in (step->a, step->b);
       break;
     case STEP_GTK_CLIENT:
       if (!gtk_client_mode)
@@ -811,6 +923,119 @@ check_drag_out (int expected)
              drag_out_seen);
 }
 
+/* ------------------------------------------------------------ --drag-in */
+
+/* The host's side of an inbound drag, which is what a real one would be: bytes
+ * already in this process, and the two text names a drop of plain text carries.
+ * The destination this run has is the shm client, and a page was measured taking
+ * the short of the two names — so that is the one the verdict has to name. */
+#define DRAG_IN_MIME    "text/plain"
+#define DRAG_IN_PAYLOAD "drag-in-payload"
+
+static const char *drag_in_types[] = { "text/plain;charset=utf-8",
+                                       "text/plain", NULL };
+
+static gboolean
+host_drag_in (gboolean can_move)
+{
+  GBytes *payload;
+  gboolean accepted;
+
+  payload = g_bytes_new (DRAG_IN_PAYLOAD, strlen (DRAG_IN_PAYLOAD));
+  accepted = nested_compositor_drag_from_host (compositor, drag_in_types,
+                                               payload, can_move);
+  /* The compositor keeps its own reference for as long as the drag lives, so
+   * this one is the run's to give back whether or not it was taken. */
+  g_bytes_unref (payload);
+
+  return accepted;
+}
+
+static void
+drag_in_verdict (NestedCompositor *compositor, gboolean taken, const char *mime,
+                 gpointer data)
+{
+  (void) compositor;
+  (void) data;
+
+  drag_in_seen++;
+  drag_in_taken = taken;
+  g_snprintf (drag_in_mime, sizeof drag_in_mime, "%s", mime ? mime : "(none)");
+
+  g_print ("selftest: drag-in-end #%d %s, %s\n", drag_in_seen, taken ? "taken" : "given back",
+           drag_in_mime);
+}
+
+/* One verdict per drag that ended, which is the only report the host gets: the
+ * destination read what it was handed, or it did not. */
+static void
+check_drag_in (int expected, int expected_taken)
+{
+  int fds_now = open_fds ();
+  gboolean failed = FALSE;
+
+  if (drag_in_seen != expected)
+    {
+      g_printerr ("selftest: drag-in gate FAILED: %d verdict(s), wanted %d\n",
+                  drag_in_seen, expected);
+      failed = TRUE;
+    }
+
+  if (drag_in_refused)
+    {
+      g_printerr ("selftest: drag-in gate FAILED: %d arrival(s) the compositor "
+                  "refused\n", drag_in_refused);
+      failed = TRUE;
+    }
+
+  if (drag_in_seen >= expected)
+    {
+      if (drag_in_taken != (gboolean) expected_taken)
+        {
+          g_printerr ("selftest: drag-in gate FAILED: the last drag ended "
+                      "taken=%d, wanted taken=%d\n", drag_in_taken, expected_taken);
+          failed = TRUE;
+        }
+
+      /* Only a taken drag is owed a type: a cancel leaves nothing for the
+       * destination to have accepted. */
+      if (expected_taken && strcmp (drag_in_mime, DRAG_IN_MIME) != 0)
+        {
+          g_printerr ("selftest: drag-in gate FAILED: taken as '%s', wanted '%s'\n",
+                      drag_in_mime, DRAG_IN_MIME);
+          failed = TRUE;
+        }
+    }
+
+  /* The drag has to be gone by the time the verdict arrives, or the next one
+   * from the host has nothing to arrive into. */
+  {
+    char **live = nested_compositor_drag_get_types (compositor);
+
+    if (g_strv_length (live) > 0)
+      {
+        g_printerr ("selftest: drag-in gate FAILED: the drag outlived its verdict, "
+                    "still offering %s\n", g_strjoinv ("|", live));
+        failed = TRUE;
+      }
+
+    g_strfreev (live);
+  }
+
+  if (fds_now > fds_at_drag_in)
+    {
+      g_printerr ("selftest: drag-in gate FAILED: the drags left %d descriptor(s) "
+                  "behind\n", fds_now - fds_at_drag_in);
+      failed = TRUE;
+    }
+
+  if (failed)
+    drag_in_failed = TRUE;
+  else
+    g_print ("selftest: drag-in gate ok, %d verdict(s) and the drag is gone\n",
+             drag_in_seen);
+}
+
 static void
 fullscreen_request_seen (NestedCompositor *compositor, gboolean enter, gpointer data)
 {
@@ -849,6 +1074,7 @@ main (int argc, char *argv[])
       gtk_client_mode = gtk_client_mode || !strcmp (argv[i], "--gtk-client");
       dmabuf_mode = dmabuf_mode || !strcmp (argv[i], "--dmabuf");
       drag_out_mode = drag_out_mode || !strcmp (argv[i], "--drag-out");
+      drag_in_mode = drag_in_mode || !strcmp (argv[i], "--drag-in");
     }
 
   dump_path = argc > 1 ? argv[1] : (char *) "/tmp/seat-selftest.png";
@@ -899,6 +1125,11 @@ main (int argc, char *argv[])
    * other mode of this test runs. */
   if (drag_out_mode)
     g_signal_connect (compositor, "drag-out", G_CALLBACK (drag_out_handed_over), NULL);
+  /* The verdict of an inbound drag is the only thing this process gets to know
+   * about it, and a host has to answer its own outer GdkDrop with that verdict,
+   * so listening is half of what the mode checks. */
+  if (drag_in_mode)
+    g_signal_connect (compositor, "drag-in-end", G_CALLBACK (drag_in_verdict), NULL);
   for (int i = 3; i < argc; i++)
     if (!strcmp (argv[i], "--fullscreen"))
       fullscreen_gate = 1;
@@ -995,7 +1226,8 @@ main (int argc, char *argv[])
                     fs_enter_seen, fs_exit_seen);
     }
 
-  return (gtk_client_failed || client_failed || drag_out_failed || dmabuf_refusals ||
+  return (gtk_client_failed || client_failed || drag_out_failed || drag_in_failed ||
+          dmabuf_refusals ||
           (fullscreen_gate && !(fs_enter_seen && fs_exit_seen)) ||
           (dmabuf_mode && dmabuf_advertised == 1 && !dmabuf_imports)) ? 1 : 0;
 }

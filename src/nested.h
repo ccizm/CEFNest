@@ -72,6 +72,32 @@ gboolean          nested_compositor_drag_take_out   (NestedCompositor *self);
  * the caller owns, or an empty array when no drag is live. A host uses this to
  * decide before ::drag-out names the one type that actually came across. */
 char            **nested_compositor_drag_get_types  (NestedCompositor *self);
+/* The other direction: a drag the host picked up somewhere else and is now
+ * carrying over the widget. @mime_types is the %NULL-terminated list the host's
+ * own drop offers and @payload the bytes it holds for the best one of them, so
+ * the host has to have read it before the drag arrives — which is what
+ * gdk_drop_prepare_async() is for. The compositor becomes the source, enters
+ * whichever surface the pointer is over with an offer of those types, and lets
+ * the page negotiate the rest exactly as it negotiates its own drags: motion
+ * then goes through nested_compositor_notify_pointer_motion(), and the end comes
+ * from nested_compositor_drag_from_host_drop() or ..._cancel().
+ *
+ * Returns FALSE when nothing came of it: a drag already has the pointer, or the
+ * payload is empty. A page that accepts a type it then cannot read is the same
+ * kind of failure as a copy of the wrong name, and answering the read with no
+ * bytes is how that is left. */
+gboolean          nested_compositor_drag_from_host    (NestedCompositor *self,
+                                                       const char *const *mime_types,
+                                                       GBytes *payload,
+                                                       gboolean can_move);
+/* The host let go over the page: the destination is told through
+ * wl_data_device.drop and reads the payload from there. Whether it kept the
+ * payload is not decided here — only its wl_data_offer.finish says that, and
+ * that is what ::drag-in-end reports. */
+void              nested_compositor_drag_from_host_drop (NestedCompositor *self);
+/* The host's drag ended outside this window, or was called off: the page gets a
+ * leave and no drop. */
+void              nested_compositor_drag_from_host_cancel (NestedCompositor *self);
 /* Paces client frame callbacks with the embedding widget's display cycle: pass
  * gtk_widget_get_frame_clock() on map and NULL on unmap, like set_clipboard().
  * While attached, a client waiting for a frame is told to draw after a cycle

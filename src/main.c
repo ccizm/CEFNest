@@ -1301,6 +1301,18 @@ demo_drag_out (NestedCompositor *compositor, const char *mime, GBytes *bytes,
   g_signal_connect (drag, "ended", G_CALLBACK (demo_out_drag_end), NULL);
 }
 
+/* The other direction's report: a host that carried a drag in has to answer its
+ * own outer GdkDrop with what the page did with it, and this is the only moment
+ * it is told. A page with no drop handler takes the bytes and says nothing, and
+ * that arrives here as not taken. */
+static void
+demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime,
+                  gpointer data)
+{
+  g_print ("demo: drop-in verdict: %s, %s\n", taken ? "taken" : "given back",
+           mime ? mime : "(no type)");
+}
+
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "hover <x> <y>",
@@ -1316,8 +1328,9 @@ demo_drag_out (NestedCompositor *compositor, const char *mime, GBytes *bytes,
  * is tagged with its own line number, which is what comes back on
  * ::script-result, so a result can be matched to the step that asked for it.
  * The page steps need a helper session; "hover", "click", "drag", "wheel",
- * "shot", "dump", "surfaces" and "close" work against any client, so the same
- * script drives the nested compositor without Chromium. */
+ * "shot", "dump", "surfaces", "drop-in", "drop-in-hold", "drop-in-move",
+ * "drop-in-drop" and "close" work against any client, so the same script drives
+ * the nested compositor without Chromium. */
 typedef struct {
   GPtrArray *steps;
   guint index;
@@ -1389,6 +1402,97 @@ script_drag_motion (gpointer data)
   g_free (drag);
 
   return G_SOURCE_REMOVE;
+}
+
+/* What a text drag arriving from outside travels under: the two names stage 1
+ * measured on a page's own drag, charset first, because a destination offered
+ * both asks for that one. */
+#define DEMO_DROP_IN_MIMES "text/plain;charset=utf-8,text/plain"
+#define DEMO_DROP_IN_TEXT "from-host"
+
+typedef struct {
+  NestedCompositor *compositor;
+  double x, y, step_x, step_y;
+  int left;
+  unsigned int let_go : 1;
+} ScriptDropIn;
+
+static gboolean
+script_drop_in_motion (gpointer data)
+{
+  ScriptDropIn *job = data;
+
+  job->x += job->step_x;
+  job->y += job->step_y;
+
+  /* The seat's own path: with a drag in flight it hands the position to the
+   * surface underneath instead of to wl_pointer, which is what a host's drag
+   * does too, since the outer compositor has the cursor. */
+  nested_compositor_notify_pointer_motion (job->compositor, job->x, job->y);
+
+  if (--job->left > 0)
+    return G_SOURCE_CONTINUE;
+
+  if (job->let_go)
+    nested_compositor_drag_from_host_drop (job->compositor);
+
+  g_object_unref (job->compositor);
+  g_free (job);
+
+  return G_SOURCE_REMOVE;
+}
+
+/* The host carrying a drag in, driven from the script instead of from a real
+ * GdkDrop: same three entry points a drop target would call, with the payload
+ * named on the line. The outer leg — a pointer that has to be really pressed in
+ * another window — is what a script cannot give, so this is how the direction
+ * gets measured at all (docs/drag-loop.md). */
+static void
+script_drop_in (double x0, double y0, double x1, double y1, const char *payload,
+                const char *mimes, gboolean let_go)
+{
+  NestedCompositor *compositor = chromium_view_get_compositor (demo.view);
+  char **types;
+  GBytes *bytes;
+  gboolean offered;
+
+  if (!compositor)
+    {
+      g_warning ("demo: no nested compositor to drop onto");
+      return;
+    }
+
+  types = g_strsplit (mimes, ",", -1);
+  bytes = g_bytes_new (payload, strlen (payload));
+
+  /* The cursor is already where the drag arrives, so the position goes in
+   * first: entering a surface is what tells the page a drag exists, and the
+   * compositor can only pick that surface if the pointer is over it. */
+  nested_compositor_set_pointer_active (compositor, TRUE);
+  nested_compositor_notify_pointer_motion (compositor, x0, y0);
+
+  offered = nested_compositor_drag_from_host (compositor,
+                                              (const char *const *) types,
+                                              bytes, FALSE);
+  g_printerr ("demo: drop-in %s at %.0f,%.0f: %s\n", types[0], x0, y0,
+              offered ? "offered" : "refused");
+
+  if (offered)
+    {
+      ScriptDropIn *job = g_new0 (ScriptDropIn, 1);
+
+      job->compositor = g_object_ref (compositor);
+      job->x = x0;
+      job->y = y0;
+      job->step_x = (x1 - x0) / DEMO_DRAG_STEPS;
+      job->step_y = (y1 - y0) / DEMO_DRAG_STEPS;
+      job->left = DEMO_DRAG_STEPS;
+      job->let_go = let_go;
+      g_timeout_add (DEMO_DRAG_INTERVAL, script_drop_in_motion, job);
+    }
+
+  g_bytes_unref (bytes);
+  g_strfreev (types);
 }
 
 static void
@@ -1691,6 +1795,64 @@ script_run_next (void)
           drag->button = (uint32_t) button;
           drag->hold = hold;
           g_timeout_add (DEMO_DRAG_INTERVAL, script_drag_motion, drag);
+          continue;
+        }
+      else if (!strncmp (line, "drop-in ", 8) || !strncmp (line, "drop-in-hold ", 13))
+        {
+          gboolean hold = !strncmp (line, "drop-in-hold ", 13);
+          const char *args = line + (hold ? 13 : 8);
+          double x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+          char text[128] = "", mime_list[256] = "";
+
+          if (sscanf (args, "%lf %lf %lf %lf %127s %255s", &x0, &y0, &x1, &y1,
+                      text, mime_list) < 4)
+            {
+              g_warning ("demo: %s wants '<x0> <y0> <x1> <y1> [text] [mime,mime,...]', got '%s'",
+                         hold ? "drop-in-hold" : "drop-in", line);
+              continue;
+            }
+
+          script_drop_in (x0, y0, x1, y1,
+                          text[0] ? text : DEMO_DROP_IN_TEXT,
+                          mime_list[0] ? mime_list : DEMO_DROP_IN_MIMES,
+                          !hold);
+          continue;
+        }
+      else if (!strncmp (line, "drop-in-move ", 13))
+        {
+          double x = 0, y = 0;
+
+          if (sscanf (line + 13, "%lf %lf", &x, &y) < 2)
+            {
+              g_warning ("demo: drop-in-move wants '<x> <y>', got '%s'", line);
+              continue;
+            }
+
+          compositor = chromium_view_get_compositor (demo.view);
+          if (!compositor)
+            {
+              g_warning ("demo: no nested compositor to move over");
+              continue;
+            }
+
+          nested_compositor_notify_pointer_motion (compositor, x, y);
+          continue;
+        }
+      else if (!strcmp (line, "drop-in-drop") || !strcmp (line, "drop-in-cancel"))
+        {
+          gboolean dropping = line[8] == 'd';
+
+          compositor = chromium_view_get_compositor (demo.view);
+          if (!compositor)
+            {
+              g_warning ("demo: no nested compositor to let go on");
+              continue;
+            }
+
+          if (dropping)
+            nested_compositor_drag_from_host_drop (compositor);
+          else
+            nested_compositor_drag_from_host_cancel (compositor);
           continue;
         }
       else if (!strcmp (line, "surfaces"))
@@ -2031,6 +2193,9 @@ activate (GApplication *application, gpointer data)
        * handler gets — says so with CEFNEST_DRAG_OUT=off. */
       if (g_strcmp0 (g_getenv ("CEFNEST_DRAG_OUT"), "off") != 0)
         g_signal_connect (compositor, "drag-out", G_CALLBACK (demo_drag_out), NULL);
+
+      g_signal_connect (compositor, "drag-in-end",
+                        G_CALLBACK (demo_drag_in_end), NULL);
     }
 
   box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);

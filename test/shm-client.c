@@ -9,7 +9,10 @@
  * docs/empty-request-slot.md. With --drag-out it starts a drag from the left
  * button press and offers the mime list a real page's text drag was measured
  * with, so the handover of a drag that leaves the window has a source to read
- * without a browser. */
+ * without a browser. With --drag-in it is the other half: the destination of a
+ * drag the host carries in, which accepts a type, reads the payload twice the
+ * way a page was measured to, and exits non-zero if the bytes are not the ones
+ * it was handed. */
 #define _GNU_SOURCE
 
 #include <errno.h>
@@ -139,6 +142,27 @@ static int drag_out_reads;     /* send requests answered on the drag source */
 static char drag_out_read_mime[128];
 static struct wl_data_source *drag_source;
 static const char drag_text[] = "drag-out-payload";
+
+/* A drag the host carries in, which is the other direction: here the compositor
+ * is the source and this client has to be the destination a page would be. The
+ * three requests that make it one are the measured shape of what a real page
+ * does — set_actions and accept on entering, receive to take the bytes, finish
+ * to say it is done with them — and the read happens twice, because a page was
+ * measured asking for the payload before the pointer let go and again after.
+ * Whether the bytes that came back are the ones the host put in is only knowable
+ * here, so a mismatch exits non-zero and seat-selftest treats that as its own
+ * failure. The payload is deliberately not --drag-out's: a run that mixed the
+ * two directions up says so in its own log. */
+#define DRAG_IN_MIME    "text/plain"
+#define DRAG_IN_PAYLOAD "drag-in-payload"
+
+static int use_drag_in;
+static struct wl_data_offer *drag_in_offer;
+static char drag_in_accepted_mime[128]; /* the type this destination accepted */
+static int drag_in_reads;           /* receives answered by the compositor */
+static int drag_in_eager_pending;   /* the page-shaped read, before the drop */
+static int drag_in_read_pending;    /* the destination-shaped read, after it */
+static int drag_in_failed;          /* bytes came back that were not the ones */
 
 /* Text input (zwp_text_input_v3). --text-input makes the client a field the
  * compositor can compose into: it reports surrounding text as soon as the text
@@ -1919,9 +1943,11 @@ data_device_selection (void *data, struct wl_data_device *device,
 }
 
 /* This client is its own destination: the surface the drag started on is the
- * only one the nested compositor has to drag over. It is a passive one — no
- * accept, no receive — which is the shape the in-page loop has to work with
- * anyway, and it means a run that reaches a drop can say so here. */
+ * only one the nested compositor has to drag over. For --drag-out it is a
+ * passive one — no accept, no receive — which is the shape the in-page loop has
+ * to work with anyway, and it means a run that reaches a drop can say so here.
+ * For --drag-in it is an active one, because the drag has no destination unless
+ * this client agrees to be one. */
 static void
 data_device_enter (void *data, struct wl_data_device *device, uint32_t serial,
                    struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y,
@@ -1929,6 +1955,54 @@ data_device_enter (void *data, struct wl_data_device *device, uint32_t serial,
 {
   fprintf (stderr, "client: %d: dragged onto a surface at %.1f,%.1f serial=%u\n",
            getpid(), wl_fixed_to_double (x), wl_fixed_to_double (y), serial);
+
+  if (!use_drag_in || !offer)
+    return;
+
+  /* The mime list arrived with the offer, before this event, so the type to
+   * take is already known. A page takes the short one of the two text names, and
+   * asking for the one it was listed is the only shape that can be checked. */
+  drag_in_offer = offer;
+  drag_in_accepted_mime[0] = '\0';
+  drag_in_reads = 0;
+  drag_in_eager_pending = 0;
+  drag_in_read_pending = 0;
+  drag_in_failed = 0;
+
+  if (wl_data_offer_get_version (offer) >= WL_DATA_OFFER_SET_ACTIONS_SINCE_VERSION)
+    wl_data_offer_set_actions (offer,
+                               WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
+                               WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE,
+                               WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+
+  for (int i = 0; i < n_selection_mimes; i++)
+    if (!strcmp (selection_mimes[i], DRAG_IN_MIME))
+      {
+        snprintf (drag_in_accepted_mime, sizeof drag_in_accepted_mime, "%s",
+                  DRAG_IN_MIME);
+        break;
+      }
+
+  if (!drag_in_accepted_mime[0] && n_selection_mimes > 0)
+    snprintf (drag_in_accepted_mime, sizeof drag_in_accepted_mime, "%s",
+              selection_mimes[0]);
+
+  if (!drag_in_accepted_mime[0])
+    {
+      fprintf (stderr, "client: %d: the drag arrived with no type to take\n",
+               getpid ());
+      drag_in_failed = 1;
+      return;
+    }
+
+  /* The serial this enter carries is what the accept has to cite. */
+  wl_data_offer_accept (offer, serial, drag_in_accepted_mime);
+  fprintf (stderr, "client: %d: the drag is taken as %s, %d type(s) listed\n",
+           getpid(), drag_in_accepted_mime, n_selection_mimes);
+
+  /* First of the two reads: the payload asked for while the pointer is still
+   * held over the destination, which is what a page was measured doing. */
+  drag_in_eager_pending = 1;
 }
 
 static void
@@ -1944,12 +2018,40 @@ static void
 data_device_leave (void *data, struct wl_data_device *device)
 {
   fprintf (stderr, "client: %d: the drag left the surface\n", getpid());
+
+  if (!use_drag_in || !drag_in_offer)
+    return;
+
+  /* A leave that is not followed by a drop is the host taking its own drag back
+   * somewhere else. Nothing was owed and nothing was read, so the offer goes the
+   * way the protocol says it does at exactly this point. */
+  drag_in_eager_pending = 0;
+  drag_in_read_pending = 0;
+  fprintf (stderr, "client: %d: the drag was given back after %d read(s)\n",
+           getpid(), drag_in_reads);
+  wl_data_offer_destroy (drag_in_offer);
+  drag_in_offer = NULL;
 }
 
 static void
 data_device_drop (void *data, struct wl_data_device *device)
 {
   fprintf (stderr, "client: %d: the drag was dropped here\n", getpid());
+
+  if (!use_drag_in)
+    return;
+
+  if (!drag_in_offer)
+    {
+      fprintf (stderr, "client: %d: the drag-in gate FAILED: dropped with "
+                       "nothing offered to take\n", getpid ());
+      drag_in_failed = 1;
+      return;
+    }
+
+  /* Second of the two reads, and the one a destination that waits for the
+   * pointer to let go does. The finish that follows it is what ends the drag. */
+  drag_in_read_pending = 1;
 }
 
 static void
@@ -2106,6 +2208,100 @@ do_drag_out (uint32_t serial)
   wl_data_device_start_drag (data_device, source, surface, NULL, serial);
   fprintf (stderr, "client: %d: started a drag of 3 types, serial=%u, payload '%s'\n",
            getpid (), serial, drag_text);
+}
+
+/* Taking the payload the compositor is carrying in. The shape is do_paste's —
+ * make a pipe, hand its write end over, drain the socket so the request really
+ * reaches the compositor, then read until the last writer goes — with one
+ * difference that matters: this is a drag, so the offer has to be finished once
+ * the bytes have been looked at, and a mismatch has to end the run. */
+static void
+do_drag_in_read (const char *when)
+{
+  char buf[4096];
+  size_t len = 0;
+  ssize_t n;
+  int fds[2];
+
+  if (!drag_in_offer || !drag_in_accepted_mime[0])
+    return;
+
+  if (pipe (fds) != 0)
+    {
+      drag_in_failed = 1;
+      return;
+    }
+
+  wl_data_offer_receive (drag_in_offer, drag_in_accepted_mime, fds[1]);
+
+  while (wl_display_flush (display) < 0 && errno == EAGAIN)
+    {
+      struct pollfd writable = { .fd = wl_display_get_fd (display),
+                                 .events = POLLOUT };
+
+      if (poll (&writable, 1, 2000) <= 0)
+        break;
+    }
+
+  close (fds[1]);
+
+  while ((n = read (fds[0], buf + len, sizeof buf - 1 - len)) > 0)
+    len += (size_t) n;
+  close (fds[0]);
+
+  buf[len] = '\0';
+  drag_in_reads++;
+
+  if (len != strlen (DRAG_IN_PAYLOAD) || memcmp (buf, DRAG_IN_PAYLOAD, len) != 0)
+    {
+      fprintf (stderr, "client: %d: the drag-in gate FAILED: %s it read %zu "
+                       "bytes of %s: '%s', wanted '%s'\n", getpid(), when, len,
+                       drag_in_accepted_mime, buf, DRAG_IN_PAYLOAD);
+      drag_in_failed = 1;
+      return;
+    }
+
+  fprintf (stderr, "client: %d: %s it read %zu bytes of %s: '%s'\n",
+           getpid(), when, len, drag_in_accepted_mime, buf);
+}
+
+/* Both ends of a destination's side of a drag: say the bytes were right and
+ * hand the offer back, or leave the run to fail. Exiting here is the report —
+ * seat-selftest owns the compositor and treats a client that leaves non-zero as
+ * the compositor getting something wrong. */
+static void
+do_drag_in_conclude (void)
+{
+  if (!drag_in_offer)
+    return;
+
+  if (drag_in_failed)
+    {
+      fprintf (stderr, "client: %d: the drag-in gate FAILED: the host's payload "
+                       "did not come back\n", getpid ());
+      exit (1);
+    }
+
+  if (drag_in_reads < 1)
+    {
+      fprintf (stderr, "client: %d: the drag-in gate FAILED: nothing was read "
+                       "off the offer\n", getpid ());
+      drag_in_failed = 1;
+      exit (1);
+    }
+
+  /* A destination that drops and stays silent is a destination that kept the
+   * payload: the protocol's only way of saying that is this version 3 request,
+   * and it is also what retires the drag on the compositor's side. */
+  if (wl_data_offer_get_version (drag_in_offer) >= WL_DATA_OFFER_FINISH_SINCE_VERSION)
+    wl_data_offer_finish (drag_in_offer);
+
+  fprintf (stderr, "client: %d: drag-in gate ok, %d read(s) of %s and the "
+                   "offer is finished\n", getpid(), drag_in_reads,
+           drag_in_accepted_mime);
+
+  wl_data_offer_destroy (drag_in_offer);
+  drag_in_offer = NULL;
 }
 
 /* The compositor does not hand a client back its own selection, so one
@@ -2656,6 +2852,8 @@ main (int argc, char *argv[])
         use_dnd_requests = 1;
       else if (!strcmp (argv[i], "--drag-out"))
         use_drag_out = 1;
+      else if (!strcmp (argv[i], "--drag-in"))
+        use_drag_in = 1;
       else if (!strcmp (argv[i], "--paste"))
         use_paste = 1;
       else if (!strcmp (argv[i], "--text-input"))
@@ -2765,6 +2963,8 @@ main (int argc, char *argv[])
     fprintf (stderr, "client: no wl_data_device_manager, the v3 requests do not exist\n");
   if (use_drag_out && !data_manager)
     fprintf (stderr, "client: no wl_data_device_manager, no drag can be started\n");
+  if (use_drag_in && !data_manager)
+    fprintf (stderr, "client: no wl_data_device_manager, no drag can be taken\n");
   if (use_text_input && !text_input_manager)
     fprintf (stderr, "client: no zwp_text_input_manager_v3, composition impossible\n");
 
@@ -2820,6 +3020,20 @@ main (int argc, char *argv[])
         {
           paste_pending = 0;
           do_paste ();
+        }
+
+      /* Same reason for the two halves of a drag taken in from the host: the
+       * read blocks, so it goes out here where nothing is being answered. */
+      if (drag_in_eager_pending)
+        {
+          drag_in_eager_pending = 0;
+          do_drag_in_read ("entering the surface, before the pointer let go,");
+        }
+      if (drag_in_read_pending)
+        {
+          drag_in_read_pending = 0;
+          do_drag_in_read ("after the pointer let go,");
+          do_drag_in_conclude ();
         }
     }
 
