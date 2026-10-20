@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cefnest find gate</title>
+</head>
+<body style="font: 16px sans-serif; margin: 0">
+<!-- The counts test/find-gate.sh asserts are counts of these words, so the
+     page has to stay boring: one word per paragraph, no duplicates hiding in an
+     attribute or a script. Seven lowercase "mango" and one capital "Mango" make
+     eight for a case-insensitive search and seven for a case-sensitive one.
+     "belowthefold" appears exactly once, 3000 px down the page, which is what
+     makes the scroll question answerable: if Chromium brings the match into
+     view by itself, the host has no use for a match rectangle. -->
+<h1>Find gate</h1>
+<p>mango</p>
+<p>mango</p>
+<div style="height: 3000px">spacer: keeps the matches below it out of view</div>
+<p>mango</p>
+<p>mango</p>
+<p>mango</p>
+<p>mango</p>
+<p>Mango</p>
+<p>belowthefold</p>
+<p>mango</p>
+</body>
+</html>

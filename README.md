@@ -38,7 +38,7 @@ Three pieces, and each only does one job:
 | --- | --- | --- |
 | `NestedCompositor` | `src/nested.c` + `src/nested-{seat,dmabuf,xdg,cursor,text-input,data-device}.c` | the compositor: globals, surfaces, damage, input, clipboard |
 | `ChromiumView` | `src/chromium-view.c` | the widget: hands its GdkSurface's input to the compositor, paints the composition |
-| `ChromiumSession` | `src/chromium-session.c` | the control plane: starts and stops the helper, tracks page state, runs JavaScript |
+| `ChromiumSession` | `src/chromium-session.c` | the control plane: starts and stops the helper, tracks page state, runs JavaScript, brokers downloads and find |
 
 Globals the compositor advertises, at the versions in `src/nested-internal.h`:
 `wl_compositor`, `wl_shm`, `wl_seat` (8, so pointer and keyboard can carry
@@ -110,7 +110,7 @@ of it is reproducible runs:
 | --- | --- |
 | `CHROMIUM_HELPER` | set (any value containing `/`) to enter session mode; the default is the path compiled in `src/meson.build` |
 | `CHROMIUM_URL` | page to open |
-| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `wheel`, `download-accept <path>`, `download-reject`, `close`, `quit` — see `test/*.session` |
+| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `close`, `quit` — see `test/*.session` |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_WINDOW` | `fullscreen` or `maximize`, for deterministic geometry |
 | `CHROMIUM_CLIPSET` / `CHROMIUM_CLIPWATCH` | seed the host clipboard, and bridge it into the page |
@@ -192,6 +192,18 @@ in one write, a localhost download finishes before the script gets a chance to
 reject it, so the assertion would pass on a race instead of on the cancel path.
 `docs/download-path.md` §6 has the matrix.
 
+`test/find-gate.sh` is the find half, same manual-gate convention. Six runs —
+four against `test/fake-helper.py`, two against real Chromium on
+`test/find-page.html`, 34 assertions — and the point of the fake runs is that
+they replay the *measured* reply shape rather than the header's wording: a
+request answers with one or more counting updates and then a final one, the
+identifier moves per request and not per search, a matchless search answers once.
+The two real runs count the same page both folded (8) and case-sensitively (7),
+which is how the assertion proves `match_case` reached Blink instead of being
+filtered on the host side, and they read `scrollTop` twice — before and after a
+step — because the measurement that says a search does not move the page while a
+step scrolls the match in is the whole reason no match rectangle is on the wire.
+
 ## Using it as a library
 
 ```c
@@ -211,7 +223,8 @@ and the mute state landing), `::ready` (the helper answered its handshake),
 status, error code, message), `::script-result` (id, ok, JSON value, message),
 `::download-begin` (id, url, suggested name, mime type, total bytes),
 `::download-progress` (id, received, total, percent, speed), `::download-end`
-(id, `complete`/`cancelled`/`interrupted`, path, received), `::closed` (the
+(id, `complete`/`cancelled`/`interrupted`, path, received), `::find-result`
+(search id, count, active ordinal, final), `::closed` (the
 helper is gone and will not come back).
 `chromium_session_set_muted ()` silences the page — its sound leaves the helper
 through an unsandboxed audio process and lands on the host's speakers, and the
@@ -221,6 +234,14 @@ A download is a question, not a command: nothing reaches the disk until the host
 answers `::download-begin` with `chromium_session_accept_download (session, id,
 path)` or refuses it with `chromium_session_reject_download (session, id)`, and
 an unanswered one leaves no file at all (`docs/download-path.md`).
+A search is the other shape of the same problem:
+`chromium_session_find (session, pattern, forward, match_case, next)` answers
+nothing and `::find-result` is the only reply, so the host renders a total when
+and only when `final` arrives (`chromium_session_stop_finding ()` to end it, and
+it replies even more silently — nothing). The demo wires both to a find bar that
+opens with Ctrl+F and closes with Esc; the key controller runs in the capture
+phase, because a `GtkEntry` would otherwise take Esc before the view forwards it
+(`docs/find-path.md`).
 `docs/control-channel.md` is the full command and event
 list, and the record of the commands decided against.
 
@@ -245,6 +266,7 @@ They are the record of *why* the code is shaped like this:
 | `audio-path.md` | where the page's sound actually goes: an unsandboxed audio service, straight to the host's speakers, and what muting it measures |
 | `protocol-ceilings.md` | what real clients bind against the nested compositor, and the measured verdict on every protocol and version ceiling left un-advertised |
 | `download-path.md` | the parked `OnBeforeDownload` gate, who decides the path, and the three CEF download behaviours only a measurement can tell you |
+| `find-path.md` | a command that answers nothing, the reply shape only a measurement gives (one identifier per request, one to three updates per request), and what actually scrolls the page |
 
 ## Known limitations
 
@@ -272,6 +294,11 @@ They are the record of *why* the code is shaped like this:
   carries them yet. Of the three end states, `interrupted` is the one
   `test/download-gate.sh` cannot reach: the local server keeps answering until
   Chromium gives up on its own (`docs/download-path.md`).
+- **Find walks matches one at a time.** CEF's `Find` has no "jump to match N",
+  and a brand-new search selects nothing at all (the active ordinal is 0), so a
+  host that wants the fifth match sends five steps. Measured once in three runs,
+  the first step reported the third match instead — the ordinal is Blink's own
+  ordering and the gate deliberately does not pin it (`docs/find-path.md`).
 - **The page's sound bypasses the widget entirely.** Audio lives in an
   unsandboxed `audio.mojom.AudioService` utility and reaches the host's speakers
   as an ordinary desktop app; the nested compositor never sees it, and GNOME's

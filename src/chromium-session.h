@@ -80,6 +80,28 @@ void               chromium_session_accept_download (ChromiumSession *self,
 void               chromium_session_reject_download (ChromiumSession *self,
                                                    int id);
 
+/* In-page search. chromium_session_find () starts a search or steps through the
+ * one already running: the pattern goes over every time (next=TRUE means "the
+ * next / previous match of this same search"), because the helper keeps no find
+ * state and a step cannot be about a search the host has forgotten. The answer
+ * is not this call but the signal: ::find-result (identifier, count,
+ * active_ordinal, final). Measured against real Chromium (docs/find-path.md):
+ * every request takes a fresh identifier, so it groups the replies to one
+ * request rather than counting searches; a request that finds matches answers
+ * twice, a counting update and then the same numbers with @final TRUE; a request
+ * that finds nothing answers once, count 0 with @final TRUE, because CEF 154 has
+ * no separate no-match flag. A new search reports @active_ordinal 0 — nothing is
+ * the active match yet — and a step reports which of the count it landed on.
+ * chromium_session_stop_finding () ends the search and answers nothing;
+ * @clear_selection=TRUE also drops the highlight Chromium put on the match. */
+void               chromium_session_find          (ChromiumSession *self,
+                                                   const char *pattern,
+                                                   gboolean forward,
+                                                   gboolean match_case,
+                                                   gboolean next);
+void               chromium_session_stop_finding   (ChromiumSession *self,
+                                                   gboolean clear_selection);
+
 const char        *chromium_session_get_helper_path (ChromiumSession *self);
 const char        *chromium_session_get_uri         (ChromiumSession *self);
 const char        *chromium_session_get_title       (ChromiumSession *self);

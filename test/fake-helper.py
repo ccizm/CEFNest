@@ -26,6 +26,15 @@ for download-accept or download-reject. Accepted files are written to exactly th
 path the host named, one KiB per 50 ms tick, so the progress events have somewhere
 to come from; a rejected or never-answered download leaves no file at all.
 
+Find is answered against one fixed sentence — "cefnest fake helper page" — so a
+gate can assert exact counts without a browser: "find e" is six matches, "find
+PAGE" is one with match_case off and zero with it on, "find zzz" is zero. The
+reply shape is the one measured against real Chromium in docs/find-path.md: every
+request takes a fresh identifier, a request that finds something answers with one
+or more counting updates and then the same numbers marked final, a request that
+finds nothing answers once, and a brand-new search reports ordinal 0 until the
+host steps to a match. find-stop sends nothing back.
+
 Run it as the helper:
 
   CHROMIUM_HELPER=$(pwd)/test/fake-helper.py \\
@@ -143,6 +152,66 @@ def tick_downloads():
         del downloads[download_id]
 
 
+# The page a scripted search runs against. The counts a gate asserts are
+# occurrences in this text: "find e" is six because this string has six e's.
+FAKE_PAGE_TEXT = "cefnest fake helper page"
+
+# One search the fake is holding. CEF's own counter turns out to move per request
+# — a step takes a fresh number just as a new search does — so every update about
+# one request shares it.
+find_state = {"identifier": 0, "matches": [], "ordinal": 0}
+
+
+def fake_find(pattern, match_case, forward, step):
+    # The shape is the one measured against real Chromium (docs/find-path.md):
+    # every request — a new search and a step alike — gets a fresh identifier, a
+    # request that finds something answers with at least one counting update and
+    # then the same numbers marked final, a request that finds nothing answers
+    # once, and a new search reports ordinal 0 because no match is the active one
+    # until the host steps.
+    find_state["identifier"] += 1
+    before = find_state["ordinal"]
+
+    if not step:
+        haystack = FAKE_PAGE_TEXT if match_case else FAKE_PAGE_TEXT.lower()
+        needle = pattern if match_case else pattern.lower()
+        matches = []
+        at = haystack.find(needle) if needle else -1
+        while at >= 0:
+            matches.append(at)
+            at = haystack.find(needle, at + 1)
+        find_state["matches"] = matches
+        find_state["ordinal"] = 0
+    elif find_state["matches"]:
+        last = len(find_state["matches"])
+        if forward:
+            find_state["ordinal"] = (find_state["ordinal"] + 1
+                                     if find_state["ordinal"] < last else 1)
+        else:
+            find_state["ordinal"] = (find_state["ordinal"] - 1
+                                     if find_state["ordinal"] > 1 else last)
+
+    def update(is_final, ordinal=None):
+        send({"event": "find-result", "identifier": find_state["identifier"],
+              "count": len(find_state["matches"]),
+              "active_ordinal": (find_state["ordinal"] if ordinal is None
+                                 else ordinal),
+              "final": is_final})
+
+    # Measured once, on a previous-step taken straight after a new search: real
+    # Chromium reported the not-yet-active ordinal 0 first and only then the
+    # wrapped-to-the-end one, so that request answered three times. A host that
+    # assumed two updates would be wrong, so the fake can do it too.
+    extra_counting = (step and not forward and before == 0
+                      and bool(find_state["matches"]))
+
+    if find_state["matches"]:
+        if extra_counting:
+            update(False, 0)
+        update(False)
+    update(True)
+
+
 while True:
     # A 50 ms timeout is what lets an accepted download advance while the fake
     # waits for the next command: the real helper's ticks come from Chromium.
@@ -166,6 +235,26 @@ while True:
         wanted = command.get("on")
         muted = (not muted) if wanted is None else bool(wanted)
         send({"event": "muted", "muted": muted})
+        continue
+
+    if command.get("cmd") == "find":
+        pattern = command.get("pattern", "")
+        if not pattern:
+            # The real helper refuses this rather than reading it as "stop",
+            # so that find-stop stays the only way to end a search.
+            send({"event": "status", "message": "find-needs-pattern"})
+            continue
+        fake_find(pattern, bool(command.get("match_case")),
+                  bool(command.get("forward", True)), bool(command.get("next")))
+        continue
+
+    if command.get("cmd") == "find-stop":
+        # Nothing comes back, which is what StopFinding is: the search ends and
+        # no count is reported for it. What a step means *after* a stop was not
+        # measured against the real browser, so the fake does not invent an
+        # answer either — it drops the matches, and a gate must not ask.
+        find_state["matches"] = []
+        find_state["ordinal"] = 0
         continue
 
     if command.get("cmd") == "download-accept":

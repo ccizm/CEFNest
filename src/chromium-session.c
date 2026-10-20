@@ -28,6 +28,7 @@ enum {
   SIG_DOWNLOAD_BEGIN,
   SIG_DOWNLOAD_PROGRESS,
   SIG_DOWNLOAD_END,
+  SIG_FIND_RESULT,
   SIG_CLOSED,
   N_SIGNALS
 };
@@ -323,6 +324,21 @@ handle_event (ChromiumSession *self, const char *line)
                      event_string (object, "state"),
                      event_string (object, "path"),
                      event_bytes (object, "received_bytes"));
+      return;
+    }
+
+  if (!strcmp (event, "find-result"))
+    {
+      /* Measured shape: a request that finds matches answers twice — a counting
+       * update, then the same numbers with final set — and a request that finds
+       * nothing answers once, count 0 with final set, since CEF 154 has no
+       * separate no-match flag. @identifier is fresh for every request, so it
+       * pairs the two updates of one request rather than naming a search. */
+      g_signal_emit (self, signals[SIG_FIND_RESULT], 0,
+                     (int) json_object_get_int_member (object, "identifier"),
+                     (int) json_object_get_int_member (object, "count"),
+                     (int) json_object_get_int_member (object, "active_ordinal"),
+                     json_object_get_boolean_member (object, "final"));
       return;
     }
 
@@ -884,6 +900,54 @@ chromium_session_reject_download (ChromiumSession *self, int id)
   send_json (self, root);
 }
 
+void
+chromium_session_find (ChromiumSession *self, const char *pattern,
+                       gboolean forward, gboolean match_case, gboolean next)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  /* Chromium reads an empty search text as "stop searching". That is a separate
+   * command here, so a host that means to stop says so instead of sending a
+   * pattern that looks like a typo. */
+  g_return_if_fail (pattern != NULL && *pattern != '\0');
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "find");
+  command_add_string (builder, "pattern", pattern);
+  json_builder_set_member_name (builder, "forward");
+  json_builder_add_boolean_value (builder, forward != FALSE);
+  json_builder_set_member_name (builder, "match_case");
+  json_builder_add_boolean_value (builder, match_case != FALSE);
+  /* The pattern rides along on a step as well: the helper keeps no find state,
+   * so what a host asks for next is always the search it is currently in. */
+  json_builder_set_member_name (builder, "next");
+  json_builder_add_boolean_value (builder, next != FALSE);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_stop_finding (ChromiumSession *self, gboolean clear_selection)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "find-stop");
+  json_builder_set_member_name (builder, "clear");
+  json_builder_add_boolean_value (builder, clear_selection != FALSE);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
 const char *
 chromium_session_get_helper_path (ChromiumSession *self)
 {
@@ -984,6 +1048,10 @@ chromium_session_class_init (ChromiumSessionClass *klass)
     g_signal_new ("download-end", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 4,
                   G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT64);
+  signals[SIG_FIND_RESULT] =
+    g_signal_new ("find-result", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 4,
+                  G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_BOOLEAN);
   signals[SIG_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);

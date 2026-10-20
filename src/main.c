@@ -24,6 +24,10 @@ typedef struct {
   GtkWidget *back;
   GtkWidget *forward;
   GtkWidget *downloads;
+  GtkWidget *find_bar;
+  GtkWidget *find_entry;
+  GtkWidget *find_case;
+  GtkWidget *find_label;
 } Demo;
 
 static Demo demo;
@@ -532,6 +536,177 @@ build_download_panel (GtkBox *box)
   gtk_box_append (box, demo.downloads);
 }
 
+/* ------------------------------------------------------------------ *
+ * Find                                                               *
+ * ------------------------------------------------------------------ *
+ *
+ * The bar is the host's half of an in-page search: it says what to look for
+ * and which way, and every fact about how many matches there are comes back
+ * from Chromium on ::find-result. The pattern is remembered here rather than
+ * in the helper, so a step is a repeat of the request the bar just made. */
+
+static char *find_pattern;
+static gboolean find_match_case;
+
+static void
+find_bar_search (gboolean forward, gboolean next)
+{
+  if (!demo.session || !find_pattern || !*find_pattern)
+    {
+      g_warning ("demo: find has no pattern to search for");
+      return;
+    }
+
+  chromium_session_find (demo.session, find_pattern, forward, find_match_case, next);
+  g_printerr ("demo: find pattern=%s forward=%d match_case=%d next=%d\n",
+              find_pattern, forward, find_match_case, next);
+}
+
+static void
+find_set_pattern (const char *text)
+{
+  g_free (find_pattern);
+  find_pattern = g_strdup (text ? text : "");
+}
+
+static void
+find_entry_activate (GtkEntry *entry, gpointer data)
+{
+  find_set_pattern (gtk_editable_get_text (GTK_EDITABLE (entry)));
+  find_match_case = gtk_check_button_get_active (GTK_CHECK_BUTTON (demo.find_case));
+  find_bar_search (TRUE, FALSE);
+}
+
+static void
+find_next_clicked (GtkButton *button, gpointer data)
+{
+  find_bar_search (TRUE, TRUE);
+}
+
+static void
+find_prev_clicked (GtkButton *button, gpointer data)
+{
+  find_bar_search (FALSE, TRUE);
+}
+
+static void
+find_bar_close (void)
+{
+  if (demo.session)
+    chromium_session_stop_finding (demo.session, TRUE);
+  g_printerr ("demo: find stop clear=1\n");
+
+  if (demo.find_bar)
+    gtk_widget_set_visible (demo.find_bar, FALSE);
+  if (demo.find_label)
+    gtk_label_set_text (GTK_LABEL (demo.find_label), "");
+}
+
+static void
+find_close_clicked (GtkButton *button, gpointer data)
+{
+  find_bar_close ();
+}
+
+static gboolean
+find_key_pressed (GtkEventControllerKey *controller, guint keyval,
+                  guint keycode, GdkModifierType state, gpointer data)
+{
+  /* Capture phase, on purpose: Esc inside the page is what the helper reads as
+   * "close the browser" (docs/session-lifecycle.md), so a find bar that wants
+   * the key has to take it before the view forwards it. */
+  if ((state & GDK_CONTROL_MASK) && (keyval == GDK_KEY_f || keyval == GDK_KEY_F))
+    {
+      if (!demo.find_bar || !demo.session)
+        return FALSE;
+      gtk_widget_set_visible (demo.find_bar, TRUE);
+      gtk_widget_grab_focus (demo.find_entry);
+      return TRUE;
+    }
+
+  if (keyval == GDK_KEY_Escape && demo.find_bar &&
+      gtk_widget_get_visible (demo.find_bar))
+    {
+      find_bar_close ();
+      return TRUE;
+    }
+
+  return FALSE;
+}
+
+static void
+session_find_result (ChromiumSession *session, int identifier, int count,
+                     int active_ordinal, gboolean is_final, gpointer data)
+{
+  g_autofree char *text = NULL;
+
+  g_printerr ("demo: find result id=%d count=%d ordinal=%d final=%d\n",
+              identifier, count, active_ordinal, is_final);
+
+  if (!demo.find_label)
+    return;
+
+  if (!is_final)
+    text = count ? g_strdup_printf ("已找到 %d 处…", count) : g_strdup ("查找中…");
+  else if (!count)
+    text = g_strdup ("无匹配");
+  else if (!active_ordinal)
+    /* Measured: a new search selects nothing, so the number to show here is the
+     * total, not "第 0 / N 处" (docs/find-path.md §2.3). */
+    text = g_strdup_printf ("已找到 %d 处", count);
+  else
+    text = g_strdup_printf ("第 %d / %d 处", active_ordinal, count);
+
+  gtk_label_set_text (GTK_LABEL (demo.find_label), text);
+}
+
+static void
+build_find_bar (GtkBox *box)
+{
+  GtkWidget *button;
+  GtkWidget *entry;
+
+  demo.find_bar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  demo.find_entry = entry = gtk_entry_new ();
+  demo.find_case = gtk_check_button_new_with_label ("区分大小写");
+  demo.find_label = gtk_label_new ("");
+
+  gtk_entry_set_placeholder_text (GTK_ENTRY (entry), "在页面中查找 / Find in page");
+  gtk_editable_set_width_chars (GTK_EDITABLE (entry), 24);
+  g_signal_connect (entry, "activate", G_CALLBACK (find_entry_activate), NULL);
+
+  button = gtk_button_new_with_label ("上一个");
+  g_signal_connect (button, "clicked", G_CALLBACK (find_prev_clicked), NULL);
+  gtk_box_append (GTK_BOX (demo.find_bar), button);
+
+  button = gtk_button_new_with_label ("下一个");
+  g_signal_connect (button, "clicked", G_CALLBACK (find_next_clicked), NULL);
+  gtk_box_append (GTK_BOX (demo.find_bar), button);
+
+  gtk_box_append (GTK_BOX (demo.find_bar), demo.find_case);
+  gtk_box_append (GTK_BOX (demo.find_bar), entry);
+
+  gtk_label_set_xalign (GTK_LABEL (demo.find_label), 0.0);
+  gtk_widget_set_hexpand (demo.find_label, TRUE);
+  gtk_box_append (GTK_BOX (demo.find_bar), demo.find_label);
+
+  button = gtk_button_new_from_icon_name ("window-close-symbolic");
+  gtk_widget_set_tooltip_text (button, "结束查找 / Stop finding (Esc)");
+  g_signal_connect (button, "clicked", G_CALLBACK (find_close_clicked), NULL);
+  gtk_box_append (GTK_BOX (demo.find_bar), button);
+
+  gtk_widget_set_margin_start (demo.find_bar, 8);
+  gtk_widget_set_margin_end (demo.find_bar, 8);
+  gtk_widget_set_margin_top (demo.find_bar, 4);
+  gtk_widget_set_margin_bottom (demo.find_bar, 4);
+  /* Nothing to type into until the host asks for a search. */
+  gtk_widget_set_visible (demo.find_bar, FALSE);
+
+  /* Above the page: a find bar that pushes the viewport down is the convention
+   * every browser settled on. */
+  gtk_box_prepend (box, demo.find_bar);
+}
+
 static void
 session_closed (ChromiumSession *session, gpointer data)
 {
@@ -638,6 +813,8 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_download_progress), NULL);
   g_signal_connect (demo.session, "download-end",
                     G_CALLBACK (session_download_end), NULL);
+  g_signal_connect (demo.session, "find-result",
+                    G_CALLBACK (session_find_result), NULL);
   g_signal_connect (demo.session, "closed", G_CALLBACK (session_closed), NULL);
 
   if (!chromium_session_start (demo.session, initial_url (), &error))
@@ -758,8 +935,11 @@ dump_view (gpointer data)
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "hover <x> <y>",
  * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
- * "wheel <dx> <dy>", "mute", "unmute", "close", "quit". This is how a headless
- * run proves navigation, history and repaint all work together, and "close" is
+ * "wheel <dx> <dy>", "mute", "unmute", "download-accept <path>",
+ * "download-reject", "find <pattern>", "find-case <pattern>", "find-next",
+ * "find-prev", "find-stop",
+ * "close", "quit". This is how a headless run proves navigation, history and
+ * repaint all work together, and "close" is
  * how it proves the way out of the window stops the helper with it. A "js" step
  * is tagged with its own line number, which is what comes back on
  * ::script-result, so a result can be matched to the step that asked for it.
@@ -856,7 +1036,8 @@ script_run_next (void)
                             !strcmp (line, "reload") || !strcmp (line, "reload-hard") ||
                             !strcmp (line, "stop") || !strcmp (line, "mute") ||
                             !strcmp (line, "unmute") ||
-                            !strncmp (line, "download-", 9)))
+                            !strncmp (line, "download-", 9) ||
+                            !strncmp (line, "find", 4)))
         {
           g_warning ("demo: '%s' needs a Chromium helper session", line);
           continue;
@@ -953,6 +1134,53 @@ script_run_next (void)
               continue;
             }
           download_reject (row);
+          continue;
+        }
+      else if (!strncmp (line, "find ", 5))
+        {
+          /* The step owns the pattern the way the bar does: what it types
+           * becomes what a following find-next steps through. */
+          const char *pattern = line + 5;
+
+          if (!*pattern)
+            {
+              g_warning ("demo: find wants a pattern, got '%s'", line);
+              continue;
+            }
+          find_set_pattern (pattern);
+          find_match_case = FALSE;
+          find_bar_search (TRUE, FALSE);
+          continue;
+        }
+      else if (!strncmp (line, "find-case ", 10))
+        {
+          /* The bar's 区分大小写 checkbox, written out: a scripted run has no
+           * pointer to click it with, and the flag has to be reachable. */
+          const char *pattern = line + 10;
+
+          if (!*pattern)
+            {
+              g_warning ("demo: find-case wants a pattern, got '%s'", line);
+              continue;
+            }
+          find_set_pattern (pattern);
+          find_match_case = TRUE;
+          find_bar_search (TRUE, FALSE);
+          continue;
+        }
+      else if (!strcmp (line, "find-next"))
+        {
+          find_bar_search (TRUE, TRUE);
+          continue;
+        }
+      else if (!strcmp (line, "find-prev"))
+        {
+          find_bar_search (FALSE, TRUE);
+          continue;
+        }
+      else if (!strcmp (line, "find-stop"))
+        {
+          find_bar_close ();
           continue;
         }
       else if (!strncmp (line, "hover ", 6))
@@ -1236,6 +1464,13 @@ forget_widgets (void)
   demo.back = NULL;
   demo.forward = NULL;
   demo.downloads = NULL;
+  demo.find_bar = NULL;
+  demo.find_entry = NULL;
+  demo.find_case = NULL;
+  demo.find_label = NULL;
+  /* A pattern outliving its session would make the next find-next step a search
+   * on a page that never asked for it. */
+  g_clear_pointer (&find_pattern, g_free);
 }
 
 static gboolean
@@ -1305,8 +1540,19 @@ activate (GApplication *application, gpointer data)
     {
       /* The rows live in the window box rather than the header: a name and two
        * buttons need more room than a toolbar has. */
+      build_find_bar (GTK_BOX (box));
       build_download_panel (GTK_BOX (box));
       build_toolbar (GTK_HEADER_BAR (header));
+
+      /* Ctrl+F belongs to the window, not to the page: the widget forwards
+       * every key it is given, so the bar has to take this one first. */
+      {
+        GtkEventController *keys = gtk_event_controller_key_new ();
+
+        gtk_event_controller_set_propagation_phase (keys, GTK_PHASE_CAPTURE);
+        g_signal_connect (keys, "key-pressed", G_CALLBACK (find_key_pressed), NULL);
+        gtk_widget_add_controller (GTK_WIDGET (demo.window), keys);
+      }
     }
   else
     {

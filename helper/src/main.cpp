@@ -43,6 +43,7 @@
 #include "include/cef_display_handler.h"
 #include "include/cef_download_handler.h"
 #include "include/cef_download_item.h"
+#include "include/cef_find_handler.h"
 #include "include/cef_keyboard_handler.h"
 #include "include/cef_life_span_handler.h"
 #include "include/cef_load_handler.h"
@@ -444,6 +445,45 @@ class HelperDownloadHandler : public CefDownloadHandler {
   IMPLEMENT_REFCOUNTING(HelperDownloadHandler);
 };
 
+/* ------------------------------------------------------------------ *
+ * Find                                                               *
+ * ------------------------------------------------------------------ *
+ *
+ * In-page search is one request and more than one answer when it finds
+ * something: measured on real Chromium, a request with matches sends a counting
+ * update and then the same numbers marked final, and a request with no matches
+ * sends only the final one. The pattern travels with every request, so the
+ * helper holds no find state at all — a step is the same text with next=true,
+ * and nothing here can go stale the way a parked download callback can. */
+
+class HelperFindHandler : public CefFindHandler {
+ public:
+  void OnFindResult(CefRefPtr<CefBrowser> browser,
+                    int identifier,
+                    int count,
+                    const CefRect& selectionRect,
+                    int activeMatchOrdinal,
+                    bool finalUpdate) override {
+    CEF_REQUIRE_UI_THREAD();
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("find-result");
+    // Measured: the identifier goes up for every request, a step as much as a
+    // new search, and both updates about one request carry the same number. So
+    // it groups the replies a request can produce, not the searches a page has
+    // run (docs/find-path.md has the transcript).
+    dict->SetInt("identifier", identifier);
+    dict->SetInt("count", count);
+    dict->SetInt("active_ordinal", activeMatchOrdinal);
+    dict->SetBool("final", finalUpdate);
+    // selectionRect is deliberately not on the wire: the browser scrolls the
+    // match it selects into view on its own, and a host that cannot draw inside
+    // the page has no use for a window coordinate (docs/find-path.md has the
+    // measurement, including the part where a new search does not move at all).
+    Emit(dict);
+  }
+
+  IMPLEMENT_REFCOUNTING(HelperFindHandler);
+};
+
 
 // ExecuteJavaScript has no return value, so the code is wrapped: the page
 // evaluates it, turns the result into JSON itself, and hands that one text to
@@ -595,6 +635,44 @@ void HandleCommand(const std::string& line) {
     CefRefPtr<CefDictionaryValue> dict = NewEvent("muted");
     dict->SetBool("muted", host->IsAudioMuted());
     Emit(dict);
+    return;
+  }
+
+  if (name == "find") {
+    CefRefPtr<CefBrowserHost> host = g_browser->GetHost();
+    if (!host) {
+      EmitStatus("no-host");
+      return;
+    }
+    const std::string pattern = command->GetString("pattern").ToString();
+    if (pattern.empty()) {
+      /* CEF reads an empty search text as "stop searching", which is what
+       * find-stop is for; passing it through would give two names for one
+       * command and no way for the host to tell them apart. */
+      EmitStatus("find-needs-pattern");
+      return;
+    }
+    const bool forward =
+        command->HasKey("forward") ? command->GetBool("forward") : true;
+    const bool match_case =
+        command->HasKey("match_case") ? command->GetBool("match_case") : false;
+    const bool next =
+        command->HasKey("next") ? command->GetBool("next") : false;
+    host->Find(pattern, forward, match_case, next);
+    // Nothing answered here: the results are find-result events, and the first
+    // one can wait for the whole page to be scanned.
+    return;
+  }
+
+  if (name == "find-stop") {
+    CefRefPtr<CefBrowserHost> host = g_browser->GetHost();
+    if (!host) {
+      EmitStatus("no-host");
+      return;
+    }
+    const bool clear =
+        command->HasKey("clear") ? command->GetBool("clear") : true;
+    host->StopFinding(clear);
     return;
   }
 
@@ -788,6 +866,7 @@ class HelperClient : public CefClient,
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override {
     return download_handler_;
   }
+  CefRefPtr<CefFindHandler> GetFindHandler() override { return find_handler_; }
 
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
                                 CefRefPtr<CefFrame> frame,
@@ -958,6 +1037,7 @@ class HelperClient : public CefClient,
 
  private:
   CefRefPtr<CefDownloadHandler> download_handler_{new HelperDownloadHandler};
+  CefRefPtr<CefFindHandler> find_handler_{new HelperFindHandler};
 };
 
 class HelperBrowserViewDelegate : public CefBrowserViewDelegate {

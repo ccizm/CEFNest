@@ -8,6 +8,10 @@
 > 2026-10-21 更新（任务 #34–#38）：下载做了。它是 §4 那张表里唯一一条**因为协议形状不够**
 > 而被判"不做"的功能，这次把形状补上了，所以 §3、§4、§5 都跟着改。细节在
 > `docs/download-path.md`，这一篇只讲通道。
+>
+> 2026-10-21 更新（任务 #40–#45）：页内查找也做了。它当初被判"不做"的理由同样成立——命中数
+> 和当前第几处都是回调，不是一问一答——解法也和下载同一类：**命令不发回答，回答是一条事件**。
+> §3、§4、§5、§6 又跟着改了一遍，实测到的四条语义在 `docs/find-path.md`。
 
 ## 1. 缺的那一条为什么必须是一条信号
 
@@ -64,7 +68,7 @@ demo: renderer exited status=1 error=9 9
 
 ## 3. 现在通道上有的东西
 
-命令 10 条，事件 14 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
+命令 12 条，事件 15 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
 
 | 方向 | 名字 | 载荷 |
 | --- | --- | --- |
@@ -74,6 +78,8 @@ demo: renderer exited status=1 error=9 9
 | host → helper | `mute` | `on`（缺省 = 翻转） |
 | host → helper | `download-accept` | `id`、`path`（绝对路径，父目录得宿主自己建） |
 | host → helper | `download-reject` | `id`（拒绝未开始的、取消在飞的，同一条） |
+| host → helper | `find` | `pattern`、`forward`、`match_case`、`next`（**没有 ack**，答案是 `find-result`） |
+| host → helper | `find-stop` | `clear`（缺省 true：连高亮一起撤） |
 | helper → host | `ready` | `cef`、`pid`、`url` |
 | helper → host | `address` | `url`（只有真正提交的导航才发） |
 | helper → host | `title` | `title` |
@@ -86,6 +92,7 @@ demo: renderer exited status=1 error=9 9
 | helper → host | `download-begin` | `id`、`url`、`suggested_name`、`mime_type`、`total_bytes` |
 | helper → host | `download-progress` | `id`、`received_bytes`、`total_bytes`、`percent`、`speed` |
 | helper → host | `download-end` | `id`、`state`（`complete`/`cancelled`/`interrupted`）、`path`、`received_bytes` |
+| helper → host | `find-result` | `identifier`、`count`、`active_ordinal`、`final`（没有命中矩形，理由见 `docs/find-path.md` §2.4） |
 | helper → host | `status` `closed` | 文本 / 无 |
 
 字节数一律走 JSON 的 double：`CefDictionaryValue` **只有 `SetInt(int)`，没有 64 位 setter**，
@@ -96,9 +103,15 @@ demo: renderer exited status=1 error=9 9
 递增**，实测一次跑下来见到 13、21），宿主用同一个 `id` 回答。形状与判据的冲突怎么解决、
 进度为什么按整百分节流、取消之后 `path` 为什么是空的，都写在 `docs/download-path.md`。
 
+`find` / `find-result` 是同一类问题的第二种解法：`find` **连挂着的问题都不发**，发出去就完，
+命中数全部从 `find-result` 回来。一次请求可以答不止一条（还在数的那几条 `final=false`），
+`identifier` 实测**每次请求 +1** 而不是每次搜索 +1，起点还是 0——它只用来把一次请求的多条
+回答归到一起。四种只可实测的行为写在 `docs/find-path.md` §2。
+
 `ChromiumSession` 的信号：`::changed`、`::ready`、`::load-end`、`::load-error`、
 `::renderer-exited`、`::script-result`、`::download-begin`、`::download-progress`、
-`::download-end`（最后三条新）、`::closed`。`::changed` 现在也会随 `muted` 事件落地。
+`::download-end`、`::find-result`（最后四条新）、`::closed`。`::changed` 现在也会随
+`muted` 事件落地。
 
 `load-error` 和 `renderer-exited` 都是 3 个参数，`renderer-exited` 那两个 int 一个是 CEF 的
 枚举、一个是平台错误码——刻意不合并成一条"出错了"信号：一个是"这一页没来"，另一个是
@@ -112,21 +125,23 @@ demo: renderer exited status=1 error=9 9
 
 | 想要的功能 | CEF 那边 | 决定 | 为什么 |
 | --- | --- | --- | --- |
-| 页内查找 | `CefBrowserHost::Find` + `CefFindHandler`（命中数、高亮位置都是回调） | **不做**，先记着 | 一问一答装不下"总共 N 处，当前第 M 处"；要做得先给通道加相关任务的 id 空间，和 `js-result` 那套是两码事 |
+| 页内查找 | `CefBrowserHost::Find` + `CefFindHandler`（命中数、高亮位置都是回调） | **已做**（2026-10-21） | 当初的理由仍然对：一问一答装不下"总共 N 处、当前第 M 处"。解法是不硬塞——`find` 不发回答，命中情况全部走 `find-result` 事件，一次请求可以来好几条（`final` 才是答案到了）。宿主侧要的状态只有"数到几、第几"，`selectionRect` 不上线：`docs/find-path.md` §2.4 量到浏览器自己会把**选中的**那条滚进视野，而宿主画不进页面 |
 | 页面缩放 | `SetZoomLevel` / `GetZoomLevel` | **不做** | 代价最小的一条，但宿主此刻没有理由需要它：控件尺寸变了 Chromium 自己会重排。等真出现"字号设置"的产品需求再加 |
 | 静音 / 音量 | `SetAudioMuted` / `IsAudioMuted` | **mute 已做**，音量不做 | `docs/audio-path.md` 把路径量掉了：页面出的声住在一个不沙箱的 `audio.mojom.AudioService` utility 里、直达宿主桌面，组件自己的开关只有这一个；它一次请求、无需回答，符合判据。音量是桌面混音器已经管着的事，不再画第二遍 |
 | 下载 | `CefDownloadHandler::OnBeforeDownload` + 进度 + 取消 | **已做**（2026-10-21） | 当初判"不做"的理由是对的：它不是一问一答。解法不是硬塞进一问一答，而是给通道加一个**挂着不答的问答**——`OnBeforeDownload` 把 CEF 的门禁回调停在 helper 里，发一条 `download-begin` 就返回，答案由宿主在方便的时候用 `download-accept`/`download-reject` 送回来。宿主不答，文件就不落盘。细节见 `docs/download-path.md` |
 | DevTools | `ShowDevTools` | **不做** | 那是第二个顶层窗口；嵌套合成器现在只合成一个 toplevel + 它的 popup（#21），要开就是 `xdg_toplevel` 的第二实例，属于协议侧的决定 |
-| 历史列表 | `CefNavigationEntryVisitor` | **不做** | 现在只有 `can_go_back/forward` 两个布尔；列表是查询型（要 id 空间），同"页内查找" |
+| 历史列表 | `CefNavigationEntryVisitor` | **不做** | 现在只有 `can_go_back/forward` 两个布尔；列表是一次查询要一串回答，形状和页内查找同一类——那一条的做法（`id` + `final`）现在可以直接照抄，但还没有宿主提这个要求 |
 | 清缓存 / 清 cookie | `ClearCache`、`CefCookieManager` | **不做** | 得先定义三档（缓存 / cookie / localStorage）分别意味着什么，这是隐私策略不是 API |
 | 打印 / 存 PDF | `PrintToPdf` | **不做** | 形状和下载是同一套（挂住的回调 + `id` + 落盘路径），照抄就行；但 `docs/download-path.md` 那三条实测还没给它，不做没有证据的功能 |
 | 自定义 UA | `CefRequestContext` | **不做** | 走环境变量比走命令合适：它是一次性设定，不该中途变 |
 
-反过来，**这 10 条够用**的证据还是这套组件的全部交互：导航（`load`/`back`/`forward`/
+反过来，**这 12 条够用**的证据还是这套组件的全部交互：导航（`load`/`back`/`forward`/
 `reload`/`stop`）、任意脚本（`js` 一条顶十条，页内状态、标题、当前 URL 都能自己读）、退出
-（`quit`）、加上现在这条有进度要回话的（`download-*`）。要加的新命令得先说明它不能用 `js`
-表达——上面那张表里除了 DevTools，其余几条其实都能用 `js` 大致凑出来，只是凑得不干净；
-下载**不能**凑，因为它落盘、要宿主给路径，而 `js` 那条通道一个字一个字都在页面里。
+（`quit`）、加上现在这两条有进度要回话的（`download-*`、`find-*`）。要加的新命令得先说明它
+不能用 `js` 表达——上面那张表里除了 DevTools，其余几条其实都能用 `js` 大致凑出来，只是凑得
+不干净；下载**不能**凑，因为它落盘、要宿主给路径，而 `js` 那条通道一个字一个字都在页面里。
+查找也**不该**凑：Blink 的命中序号、跨帧的"第 M 处"、以及把命中滚进视野那套行为都在页面 JS
+外面，用 `js` 自己实现等于在页面里再写一个查找，它会和页面自己的滚动、选区抢东西。
 
 ## 5. 验证
 
@@ -158,13 +173,20 @@ demo: renderer exited status=1 error=9 9
 `docs/download-path.md` §4。它开真窗口，所以和 `test/*.session` 一样是手跑门禁，
 不进 `meson test`。
 
+`find` / `find-stop` / `find-result` 这一组同样是先量的：`test/find-gate.sh` 六次运行
+（四次假 helper、两次真 Chromium）、34 条断言，钉住 identifier 每请求递增、一条请求可以答
+两到三条、无匹配只答一条、`match_case` 真的过线（8 对 7）、`find-stop` 静默，以及"搜索不动
+页面、步进才滚进视野"。假 helper 那一半复刻的是**实测形状**而不是头文件措辞，所以两边能对上
+号；四条语义和一次没归因的 flake 写在 `docs/find-path.md` §2、§4。
+
 `meson test -C builddir` 10/10 照旧全过（那套测的是 compositor 侧，不碰控制通道）。
 
 ## 6. 还没做的
 
 * **一条命令都没有应答机制**。`js` 有 `id`，其余命令发出去就完了；宿主不知道 `load` 有没有
-  被吃到（`address`/`load-end` 是间接证据）。要不要给每条命令配一个 `ok`，等 §4 里出现
-  需要它的那条再说。
+  被吃到（`address`/`load-end` 是间接证据）。`find` 是**故意**不发 ack 的——它的回答全是事件，
+  再配一条 `ok` 只会让宿主以为是两个答案。参数不合法（空 `pattern`、空 `path`）现在统一回一条
+  `status`，那是日志不是回执。要不要给每条命令配一个 `ok`，等 §4 里出现需要它的那条再说。
 * **utility 进程（网络、音频）掉了没人报**。CEF 只为渲染进程发这个回调，§2 实测过杀另一个
   是没有声音的。音频现在确认就住在一个 `Seccomp=0` 的 `audio.mojom.AudioService` utility
   里（`docs/audio-path.md`），宿主能看到的兜底只有 `::closed`。
@@ -176,3 +198,8 @@ demo: renderer exited status=1 error=9 9
   半路断连才行），断网、证书错误、磁盘写满是同一支的三个来源，`test/download-gate.sh`
   现在一个都不制造。事件形状是好的（`state=interrupted`、`path` 由 CEF 决定），只是
   还没有证据说它在真机上一定按这个形状到。
+* **查找只能一步步走**。CEF 的 `Find` 没有"跳到第 N 处"，`docs/find-path.md` §2.1 还量到
+  步进报的序号偶尔会偏（三次里有一次第一步报 3 而不是 1）。所以宿主想要"第 5 处"，就得发
+  五次步进，而且不能假定落在哪一条上——这是 Blink 的内部顺序，不是通道契约。
+* **有一次真机 find 门禁一条事件都没收到**，逐字复现和之后的运行全都正常（`docs/find-path.md`
+  §4）。没有第二次复现，不下结论；如果它再现，先查 helper 的收尾时序，别先改协议。
