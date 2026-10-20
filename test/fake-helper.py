@@ -35,6 +35,19 @@ or more counting updates and then the same numbers marked final, a request that
 finds nothing answers once, and a brand-new search reports ordinal 0 until the
 host steps to a match. find-stop sends nothing back.
 
+A URL containing "menu" sends a context-menu event, which is how the host's menu
+layer is driven without a browser. menu=<name> picks the model — "link", "edit",
+"selection" and "empty" are the ones docs/context-menu.md measured against real
+Chromium, "mixed" is invented to carry a check, a radio, a submenu and two labels
+that GTK has to escape — and x= / y= place it. menu=auto also closes the request
+itself about half a second later, which is the shape of CEF dismissing a menu the
+host never answered. The real helper's two answers (context-menu-select and
+context-menu-dismiss) have no reply at all, so the fake writes what it received on
+stderr instead — the demo's stderr is shared, and that is the only way a gate can
+see a command cross the wire. A select with nothing pending is answered with the
+no-context-menu status the real helper sends; a dismiss with nothing pending is
+silent, exactly as there.
+
 Run it as the helper:
 
   CHROMIUM_HELPER=$(pwd)/test/fake-helper.py \\
@@ -212,12 +225,83 @@ def fake_find(pattern, match_case, forward, step):
     update(True)
 
 
+# The models docs/context-menu.md measured out of a real CEF 154, spelled the way
+# they arrive on the channel: a separator carries no label and is always enabled,
+# and the labels keep the "(&B)" mnemonic spelling CEF uses.
+def menu_item(item_id, label, enabled=True, type="command", checked=False):
+    return {"id": item_id, "label": label, "type": type, "enabled": enabled,
+            "checked": checked}
+
+
+MENU_SEP = menu_item(-1, "", type="separator")
+
+MENU_MODELS = {
+    # A link, an image and a plain page all answer this same model: CEF's default
+    # has nothing link- or image-specific in it.
+    "link": [menu_item(100, "返回(&B)", False), menu_item(101, "前进(&F)", False),
+             MENU_SEP, menu_item(131, "打印(&P)…"), menu_item(132, "查看网页源代码(&V)")],
+    # An editable with the caret in it and nothing selected.
+    "edit": [menu_item(110, "撤消(&U)", False), menu_item(111, "重做(&R)", False),
+             MENU_SEP, menu_item(112, "剪切(&T)", False),
+             menu_item(113, "复制(&C)", False), menu_item(114, "粘贴(&P)"),
+             menu_item(115, "粘贴为纯文本"), MENU_SEP, menu_item(117, "全选(&A)")],
+    # A selection in ordinary page text: copy, and nothing else.
+    "selection": [menu_item(113, "复制(&C)")],
+    # Not measured: the shapes the default model never shows but the protocol can
+    # carry, including two labels GTK has to escape.
+    "mixed": [menu_item(200, "拼写检查(&S)", type="check", checked=True),
+              menu_item(201, "简体中文", type="radio", checked=True),
+              menu_item(26500, "复制 & 粘贴"), menu_item(26501, "下划线_测试"),
+              menu_item(26502, "", type="submenu")],
+    "empty": [],
+    # Separators only: no rows at all once they are turned into sections.
+    "seps": [MENU_SEP, MENU_SEP],
+}
+
+# The link model again, for the run that wants the request closed over by the
+# helper rather than answered by the host.
+MENU_MODELS["auto"] = MENU_MODELS["link"]
+
+# The one request the fake is holding for the host, and when it closes it itself.
+menu = {"pending": False, "dismiss_at": None}
+
+
+def begin_context_menu(url):
+    model = query("menu", url, "link")
+    items = MENU_MODELS.get(model)
+    if items is None:
+        send({"event": "status", "message": "unknown-menu-model"})
+        return
+
+    send({"event": "context-menu",
+          "x": int(query("x", url, "140")),
+          "y": int(query("y", url, "40")),
+          "items": [dict(item) for item in items]})
+    menu["pending"] = True
+    # "auto" stands in for CEF closing a request the host never answered.
+    menu["dismiss_at"] = time.monotonic() + 0.5 if model == "auto" else None
+
+
+def tick_menu():
+    if menu["dismiss_at"] and time.monotonic() >= menu["dismiss_at"]:
+        menu["dismiss_at"] = None
+        if not menu["pending"]:
+            return
+        menu["pending"] = False
+        send({"event": "context-menu-dismissed"})
+
+
+def log(text):
+    print("fake: " + text, file=sys.stderr, flush=True)
+
+
 while True:
     # A 50 ms timeout is what lets an accepted download advance while the fake
     # waits for the next command: the real helper's ticks come from Chromium.
     ready, _, _ = select.select([sock], [], [], 0.05)
     if not ready:
         tick_downloads()
+        tick_menu()
         continue
 
     line = channel.readline()
@@ -255,6 +339,27 @@ while True:
         # answer either — it drops the matches, and a gate must not ask.
         find_state["matches"] = []
         find_state["ordinal"] = 0
+        continue
+
+    if command.get("cmd") == "context-menu-select":
+        if not menu["pending"]:
+            # What the real helper says when the host answers a request that is
+            # already gone; the callback slot is empty over there too.
+            send({"event": "status", "message": "no-context-menu"})
+            continue
+        menu["pending"] = False
+        # Continue() has no reply of its own, so the only trace a gate can assert
+        # on is the fake saying what it was handed.
+        log("context-menu-select id=%s flags=%s" %
+            (command.get("id"), command.get("flags", 0)))
+        continue
+
+    if command.get("cmd") == "context-menu-dismiss":
+        if not menu["pending"]:
+            # Silent here because Cancel() on an empty slot is silent there.
+            continue
+        menu["pending"] = False
+        log("context-menu-dismiss")
         continue
 
     if command.get("cmd") == "download-accept":
@@ -318,6 +423,9 @@ while True:
 
     if "download" in url:
         begin_download(url)
+
+    if "menu" in url:
+        begin_context_menu(url)
 
     if crash_after:
         crashed_at = time.monotonic() + crash_after

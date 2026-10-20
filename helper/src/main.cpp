@@ -40,6 +40,7 @@
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
 #include "include/cef_command_line.h"
+#include "include/cef_context_menu_handler.h"
 #include "include/cef_display_handler.h"
 #include "include/cef_download_handler.h"
 #include "include/cef_download_item.h"
@@ -484,6 +485,103 @@ class HelperFindHandler : public CefFindHandler {
   IMPLEMENT_REFCOUNTING(HelperFindHandler);
 };
 
+/* ------------------------------------------------------------------ *
+ * Context menu                                                       *
+ * ------------------------------------------------------------------ *
+ *
+ * The menu Chromium draws for itself is a widget of its own style, in a surface
+ * of its own, and the embedding app knows nothing about it. RunContextMenu is
+ * CEF's documented way out: the model stays Cef's — every item it offers still
+ * works, because Continue() hands the id back to the library's own command
+ * handling — and only the drawing moves to the host.
+ *
+ * What goes over the wire is the model and the point, nothing else. The
+ * CefContextMenuParams (link url, media state, edit flags) are deliberately
+ * left in this process: the model is already the answer to them, and a host
+ * that draws the model needs no second copy of the question. */
+
+// One menu at a time, like CEF's own. The callback owns the whole request: when
+// it goes out of scope unanswered the menu is treated as dismissed, which is the
+// documented behaviour and the safe one for a host that stops replying.
+CefRefPtr<CefRunContextMenuCallback> g_menu_callback;
+
+const char* MenuItemTypeName(cef_menu_item_type_t type) {
+  switch (type) {
+    case MENUITEMTYPE_COMMAND:
+      return "command";
+    case MENUITEMTYPE_CHECK:
+      return "check";
+    case MENUITEMTYPE_RADIO:
+      return "radio";
+    case MENUITEMTYPE_SEPARATOR:
+      return "separator";
+    case MENUITEMTYPE_SUBMENU:
+      return "submenu";
+    default:
+      return "none";
+  }
+}
+
+class HelperContextMenuHandler : public CefContextMenuHandler {
+ public:
+  bool RunContextMenu(CefRefPtr<CefBrowser> browser,
+                      CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefContextMenuParams> params,
+                      CefRefPtr<CefMenuModel> model,
+                      CefRefPtr<CefRunContextMenuCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    // Whatever the host left unanswered is over before this one starts; the ref
+    // going away is how CEF is told so.
+    g_menu_callback = callback;
+
+    CefRefPtr<CefListValue> items = CefListValue::Create();
+    int written = 0;
+    for (size_t i = 0; i < model->GetCount(); ++i) {
+      if (!model->IsVisibleAt(i))
+        continue;
+
+      CefRefPtr<CefDictionaryValue> item = CefDictionaryValue::Create();
+      item->SetInt("id", model->GetCommandIdAt(i));
+      item->SetString("label", model->GetLabelAt(i).ToString());
+      item->SetString("type", MenuItemTypeName(model->GetTypeAt(i)));
+      item->SetBool("enabled", model->IsEnabledAt(i));
+      item->SetBool("checked", model->IsCheckedAt(i));
+      items->SetDictionary(written++, item);
+    }
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("context-menu");
+    // The coordinates are the click's own, relative to the render view — which
+    // for this widget is the surface the host already feeds the pointer to.
+    dict->SetInt("x", params->GetXCoord());
+    dict->SetInt("y", params->GetYCoord());
+    dict->SetList("items", items);
+    Emit(dict);
+
+    fprintf(stderr, "helper: context menu with %d items at %d,%d\n", written,
+            params->GetXCoord(), params->GetYCoord());
+
+    // True: this helper will not draw anything and the host owes the answer.
+    return true;
+  }
+
+  void OnContextMenuDismissed(CefRefPtr<CefBrowser> browser,
+                              CefRefPtr<CefFrame> frame) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    // Only a menu this helper still holds a request for can be dismissed by
+    // CEF; after the host's own answer the callback is gone and this is the
+    // library closing up shop, which the host already knows about.
+    if (!g_menu_callback)
+      return;
+
+    g_menu_callback = nullptr;
+    Emit(NewEvent("context-menu-dismissed"));
+  }
+
+  IMPLEMENT_REFCOUNTING(HelperContextMenuHandler);
+};
+
 
 // ExecuteJavaScript has no return value, so the code is wrapped: the page
 // evaluates it, turns the result into JSON itself, and hands that one text to
@@ -723,6 +821,34 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
+  if (name == "context-menu-select") {
+    if (!g_menu_callback) {
+      /* The host answered a menu that is already gone — it lost a race with a
+       * second right click, or answered after its own window closed. Nothing to
+       * continue, and saying so is the whole reply. */
+      EmitStatus("no-context-menu");
+      return;
+    }
+    CefRefPtr<CefRunContextMenuCallback> callback;
+    callback.swap(g_menu_callback);
+    const int flags = command->HasKey("flags") ? command->GetInt("flags") : 0;
+    callback->Continue(command->GetInt("id"),
+                       static_cast<cef_event_flags_t>(flags));
+    return;
+  }
+
+  if (name == "context-menu-dismiss") {
+    if (!g_menu_callback)
+      return;
+    CefRefPtr<CefRunContextMenuCallback> callback;
+    callback.swap(g_menu_callback);
+    // Cancel() is the answer that closes the request without a command; CEF
+    // still calls OnContextMenuDismissed afterwards, by which time the
+    // callback is gone and nothing more is emitted.
+    callback->Cancel();
+    return;
+  }
+
   if (name == "js") {
     const std::string code = command->GetString("code").ToString();
     if (code.empty()) {
@@ -867,6 +993,9 @@ class HelperClient : public CefClient,
     return download_handler_;
   }
   CefRefPtr<CefFindHandler> GetFindHandler() override { return find_handler_; }
+  CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override {
+    return context_menu_handler_;
+  }
 
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
                                 CefRefPtr<CefFrame> frame,
@@ -1038,6 +1167,8 @@ class HelperClient : public CefClient,
  private:
   CefRefPtr<CefDownloadHandler> download_handler_{new HelperDownloadHandler};
   CefRefPtr<CefFindHandler> find_handler_{new HelperFindHandler};
+  CefRefPtr<CefContextMenuHandler> context_menu_handler_{
+      new HelperContextMenuHandler};
 };
 
 class HelperBrowserViewDelegate : public CefBrowserViewDelegate {

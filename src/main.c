@@ -660,6 +660,40 @@ session_find_result (ChromiumSession *session, int identifier, int count,
   gtk_label_set_text (GTK_LABEL (demo.find_label), text);
 }
 
+/* ------------------------------------------------------------------ *
+ * Context menu                                                       *
+ * ------------------------------------------------------------------ *
+ *
+ * The demo only reports the model Chromium built and leaves the drawing to the
+ * session: a host that put up its own menu here would hide whether the default
+ * one reaches the screen at all.
+ *
+ * Returning FALSE is how a handler hands the drawing back; the value it returns
+ * is what lands in the emission's return location, not an argument it is given. */
+
+static gboolean
+session_context_menu (ChromiumSession *session, int x, int y, GList *items,
+                      gpointer data)
+{
+  GList *l;
+  int n = 0;
+
+  for (l = items; l; l = l->next, n++)
+    {
+      ChromiumMenuItem *item = l->data;
+
+      /* One line per row, id included: a scripted run answers a menu by its
+       * command id, so this is where it finds out which ids exist. */
+      g_printerr ("demo: menu row %d id=%d type=%s enabled=%d checked=%d label=%s\n",
+                  n, item->id, item->type, item->enabled, item->checked,
+                  item->label);
+    }
+
+  g_printerr ("demo: context menu at %d,%d with %d rows\n", x, y, n);
+
+  return FALSE;
+}
+
 static void
 build_find_bar (GtkBox *box)
 {
@@ -815,6 +849,8 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_download_end), NULL);
   g_signal_connect (demo.session, "find-result",
                     G_CALLBACK (session_find_result), NULL);
+  g_signal_connect (demo.session, "context-menu",
+                    G_CALLBACK (session_context_menu), NULL);
   g_signal_connect (demo.session, "closed", G_CALLBACK (session_closed), NULL);
 
   if (!chromium_session_start (demo.session, initial_url (), &error))
@@ -938,7 +974,7 @@ dump_view (gpointer data)
  * "drag-hold <x0> <y0> <x1> <y1> [button]", "release [button]", "surfaces",
  * "wheel <dx> <dy>", "mute", "unmute", "download-accept <path>",
  * "download-reject", "find <pattern>", "find-case <pattern>", "find-next",
- * "find-prev", "find-stop",
+ * "find-prev", "find-stop", "menu-pick <id>", "menu-dismiss",
  * "close", "quit". This is how a headless run proves navigation, history and
  * repaint all work together, and "close" is
  * how it proves the way out of the window stops the helper with it. A "js" step
@@ -1044,7 +1080,8 @@ script_run_next (void)
                             !strcmp (line, "stop") || !strcmp (line, "mute") ||
                             !strcmp (line, "unmute") ||
                             !strncmp (line, "download-", 9) ||
-                            !strncmp (line, "find", 4)))
+                            !strncmp (line, "find", 4) ||
+                            !strncmp (line, "menu-", 5)))
         {
           g_warning ("demo: '%s' needs a Chromium helper session", line);
           continue;
@@ -1188,6 +1225,27 @@ script_run_next (void)
       else if (!strcmp (line, "find-stop"))
         {
           find_bar_close ();
+          continue;
+        }
+      else if (!strncmp (line, "menu-pick ", 10))
+        {
+          /* The command id from the "menu row" lines, because a script has no
+           * pointer to aim at a row and CEF's id is what carries the choice. */
+          int id = 0;
+
+          if (1 != sscanf (line + 10, "%d", &id))
+            {
+              g_warning ("demo: menu-pick wants a command id, got '%s'", line);
+              continue;
+            }
+          chromium_session_context_menu_select (demo.session, id);
+          g_printerr ("demo: menu pick id=%d\n", id);
+          continue;
+        }
+      else if (!strcmp (line, "menu-dismiss"))
+        {
+          chromium_session_context_menu_dismiss (demo.session);
+          g_printerr ("demo: menu dismiss\n");
           continue;
         }
       else if (!strncmp (line, "hover ", 6))

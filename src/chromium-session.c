@@ -29,6 +29,7 @@ enum {
   SIG_DOWNLOAD_PROGRESS,
   SIG_DOWNLOAD_END,
   SIG_FIND_RESULT,
+  SIG_CONTEXT_MENU,
   SIG_CLOSED,
   N_SIGNALS
 };
@@ -36,6 +37,9 @@ static guint signals[N_SIGNALS];
 
 static void chromium_session_dispose  (GObject *object);
 static void chromium_session_finalize (GObject *object);
+
+static void handle_context_menu         (ChromiumSession *self, JsonObject *object);
+static void handle_context_menu_dismissed (ChromiumSession *self);
 
 struct _ChromiumSession {
   GObject parent_instance;
@@ -61,6 +65,13 @@ struct _ChromiumSession {
   gboolean running;
   gboolean stopping;
   gboolean closed_emitted;
+
+  /* The context menu the helper last asked about: pending until the host answers
+   * it, and the two widgets that draw it while this side is the one that does. */
+  gboolean menu_pending;
+  GtkWidget *menu_popover;
+  GSimpleActionGroup *menu_actions;
+  guint menu_release_source;
 };
 
 G_DEFINE_TYPE (ChromiumSession, chromium_session, G_TYPE_OBJECT)
@@ -207,10 +218,22 @@ handle_event (ChromiumSession *self, const char *line)
 
   if (!strcmp (event, "loading"))
     {
+      gboolean loading = json_object_get_boolean_member (object, "loading");
+      gboolean can_go_back = json_object_get_boolean_member (object, "can_go_back");
+      gboolean can_go_forward = json_object_get_boolean_member (object, "can_go_forward");
+
+      /* Measured: a menu this side owns is not closed when the page navigates —
+       * no context-menu-dismissed arrives, the popover stays up over the new
+       * page, and the unanswered request also swallows the next right click. So
+       * the menu goes away with the page it was asked about. */
+      if (loading && self->menu_pending)
+        {
+          g_debug ("session: context menu dismissed by a navigation");
+          chromium_session_context_menu_dismiss (self);
+        }
+
       chromium_session_set_state (self, NULL, NULL,
-                                  json_object_get_boolean_member (object, "loading"),
-                                  json_object_get_boolean_member (object, "can_go_back"),
-                                  json_object_get_boolean_member (object, "can_go_forward"));
+                                  loading, can_go_back, can_go_forward);
       return;
     }
 
@@ -342,6 +365,24 @@ handle_event (ChromiumSession *self, const char *line)
       return;
     }
 
+  if (!strcmp (event, "context-menu"))
+    {
+      /* The helper drew nothing and keeps nothing: this side owes the answer to
+       * the one request Chromium has open, so a host that neither picks nor
+       * dismisses gets the default menu rather than a frozen right button. */
+      handle_context_menu (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "context-menu-dismissed"))
+    {
+      /* The page moved or CEF dropped the request itself. Nothing to answer, but
+       * the menu on screen has to come down: it would otherwise go on picking
+       * against a request that no longer exists. */
+      handle_context_menu_dismissed (self);
+      return;
+    }
+
   if (!strcmp (event, "status"))
     {
       g_message ("session: helper status: %s",
@@ -355,7 +396,10 @@ handle_event (ChromiumSession *self, const char *line)
       return;
     }
 
-  g_warning ("session: unknown event '%s'", event);
+  /* The raw line rather than just the name: an event this version does not
+   * know is the normal state of a helper newer than its host, and the only way
+   * to find out what arrived is to see it. */
+  g_warning ("session: unknown event: %s", line);
 }
 
 static void
@@ -521,6 +565,380 @@ send_command (ChromiumSession *self, const char *cmd)
 
   root = json_builder_get_root (builder);
   send_json (self, root);
+}
+
+/* ------------------------------------------------------------------ *
+ * The page's context menu                                            *
+ *                                                                    *
+ * CEF builds the model and this side draws it, which is the whole of *
+ * what makes the menu native: the items, what they say and whether   *
+ * they are enabled are all Chromium's decision about the node under  *
+ * the pointer, and Continue() runs Chromium's own command handling   *
+ * for whichever one is picked.                                       *
+ *                                                                    *
+ * Answering is not optional. Chromium keeps one menu request open and  *
+ * will not build a second model until the first is done, so a menu    *
+ * nobody answers costs every later right click as well. That is why   *
+ * this file draws a menu of its own when the host does not claim the  *
+ * signal.                                                            *
+ * ------------------------------------------------------------------ */
+
+static void
+menu_item_free (gpointer data)
+{
+  ChromiumMenuItem *item = data;
+
+  g_free ((char *) item->label);
+  g_free ((char *) item->type);
+  g_free (item);
+}
+
+/* CEF spells a mnemonic "(&B)" and a GMenu label spells it "_B"; left alone, the
+ * ampersand form prints literally next to the word. */
+static char *
+menu_label (const char *cef_label)
+{
+  GString *out = g_string_new (NULL);
+  const char *p;
+
+  for (p = cef_label; p && *p; p++)
+    {
+      if (*p == '_')
+        g_string_append (out, "__");      /* a real underscore, said twice */
+      else if (*p == '&' && p[1] == '(' && g_ascii_isalnum (p[2]) && p[3] == ')')
+        {
+          g_string_append_printf (out, "(_%c)", p[2]);
+          p += 3;
+        }
+      else
+        g_string_append_c (out, *p);
+    }
+
+  return g_string_free (out, FALSE);
+}
+
+static void menu_release      (ChromiumSession *self);
+static void menu_release_soon (ChromiumSession *self);
+static void menu_popover_closed (GtkPopover *popover, gpointer data);
+
+/* Put the menu's widgets back. The popover is reached both from the answer path
+ * and from its own ::closed, so this has to survive being called twice. */
+static void
+menu_release (ChromiumSession *self)
+{
+  GtkWidget *popover = self->menu_popover;
+
+  self->menu_popover = NULL;
+
+  if (self->menu_release_source > 0)
+    {
+      g_source_remove (self->menu_release_source);
+      self->menu_release_source = 0;
+      g_object_unref (self);      /* the reference menu_release_soon () took */
+    }
+
+  if (popover)
+    {
+      /* This side is the one putting the menu down, so the answer to the helper is
+       * already decided and ::closed must not also send one. */
+      g_signal_handlers_disconnect_by_func (popover,
+                                            G_CALLBACK (menu_popover_closed), self);
+      if (GTK_IS_WIDGET (gtk_widget_get_parent (popover)))
+        gtk_widget_unparent (popover);
+      g_object_unref (popover);
+    }
+
+  g_clear_object (&self->menu_actions);
+}
+
+/* Not from inside the popover's own ::closed, and not from inside the activate of
+ * an action this menu owns: both would free the widget GTK is still emitting on,
+ * so the teardown waits for one idle. */
+static void
+menu_release_later (gpointer data)
+{
+  ChromiumSession *self = data;
+
+  self->menu_release_source = 0;
+  menu_release (self);
+  g_object_unref (self);
+}
+
+static void
+menu_release_soon (ChromiumSession *self)
+{
+  if (self->menu_release_source > 0 || (!self->menu_popover && !self->menu_actions))
+    return;
+
+  self->menu_release_source =
+    g_timeout_add_once (0, menu_release_later, g_object_ref (self));
+}
+
+static void
+menu_popover_closed (GtkPopover *popover, gpointer data)
+{
+  ChromiumSession *self = data;
+
+  /* Escape, a click outside, or the window going away: all three are a
+   * dismissal as far as CEF is concerned, and the only way it learns. */
+  if (self->menu_pending)
+    {
+      self->menu_pending = FALSE;
+      send_command (self, "context-menu-dismiss");
+    }
+
+  menu_release_soon (self);
+}
+
+static void
+menu_action_activate (GSimpleAction *action, GVariant *parameter, gpointer data)
+{
+  ChromiumSession *self = data;
+  int command = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (action), "cefnest-command"));
+
+  chromium_session_context_menu_select (self, command);
+}
+
+/* A popover on Wayland is its own surface, so a grab of the view never shows it.
+ * This is how a run finds out that the menu really got an allocation rather than
+ * being built and dropped. */
+static void
+menu_report_size (gpointer data)
+{
+  GtkWidget *popover = data;
+
+  if (GTK_IS_WIDGET (popover))
+    g_debug ("session: context menu mapped=%d size=%dx%d",
+             gtk_widget_get_mapped (popover),
+             gtk_widget_get_width (popover), gtk_widget_get_height (popover));
+
+  g_object_unref (popover);
+}
+
+static void
+session_menu_show (ChromiumSession *self, int x, int y, GList *items)
+{
+  GList *l;
+  GMenu *menu;
+  GMenu *section;
+  GtkWidget *popover;
+  GdkRectangle point;
+  char name[32];
+  guint index = 0;
+  if (!self->view)
+    {
+      /* Nothing to draw over. Saying so with a dismissal is what keeps the
+       * helper's one open request from eating the next right click too. */
+      g_debug ("session: no view to draw a context menu over");
+      chromium_session_context_menu_dismiss (self);
+      menu_release (self);
+      return;
+    }
+
+  self->menu_actions = g_simple_action_group_new ();
+  menu = g_menu_new ();
+  /* Items between two separators become one section, because a section break is
+   * how a GtkPopoverMenu draws a line. */
+  section = g_menu_new ();
+
+  for (l = items; l; l = l->next, index++)
+    {
+      ChromiumMenuItem *item = l->data;
+      g_autofree char *label = NULL;
+      GSimpleAction *action;
+
+      if (!strcmp (item->type, "separator"))
+        {
+          if (g_menu_model_get_n_items (G_MENU_MODEL (section)) > 0)
+            {
+              g_menu_append_section (menu, NULL, G_MENU_MODEL (section));
+              g_object_unref (section);
+              section = g_menu_new ();
+            }
+          continue;
+        }
+
+      g_snprintf (name, sizeof (name), "cmd-%u", index);
+      label = menu_label (item->label);
+
+      action = g_simple_action_new (name, NULL);
+      g_simple_action_set_enabled (action, item->enabled);
+      g_object_set_data (G_OBJECT (action), "cefnest-command",
+                         GINT_TO_POINTER (item->id));
+      g_signal_connect (action, "activate", G_CALLBACK (menu_action_activate), self);
+      g_action_map_add_action (G_ACTION_MAP (self->menu_actions), G_ACTION (action));
+      g_object_unref (action);
+
+      /* A stateless action, even for a check or radio item: the mark CEF would
+       * have shown is the menu's own state, and this menu is rebuilt from a new
+       * model after every command anyway. */
+      {
+        g_autofree char *detailed = g_strdup_printf ("menu.%s", name);
+        GMenuItem *row = g_menu_item_new (label, NULL);
+
+        g_menu_item_set_detailed_action (row, detailed);
+        g_menu_append_item (section, row);
+        g_object_unref (row);
+      }
+    }
+
+  if (g_menu_model_get_n_items (G_MENU_MODEL (section)) > 0)
+    g_menu_append_section (menu, NULL, G_MENU_MODEL (section));
+  g_object_unref (section);
+
+  if (g_menu_model_get_n_items (G_MENU_MODEL (menu)) == 0)
+    {
+      /* An empty menu is not a menu; dismissing is what frees the request. */
+      g_object_unref (menu);
+      chromium_session_context_menu_dismiss (self);
+      menu_release (self);
+      return;
+    }
+
+  popover = gtk_popover_menu_new_from_model (G_MENU_MODEL (menu));
+  g_object_unref (menu);
+
+  /* The view owns it as a child; this side keeps a reference of its own because
+   * it has to be able to put it down from three different places. */
+  gtk_widget_set_parent (popover, GTK_WIDGET (self->view));
+  self->menu_popover = g_object_ref (popover);
+
+  gtk_widget_insert_action_group (popover, "menu", G_ACTION_GROUP (self->menu_actions));
+
+  point.x = x;
+  point.y = y;
+  point.width = 1;
+  point.height = 1;
+  gtk_popover_set_pointing_to (GTK_POPOVER (popover), &point);
+  gtk_popover_set_position (GTK_POPOVER (popover), GTK_POS_BOTTOM);
+  gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
+  g_signal_connect (popover, "closed", G_CALLBACK (menu_popover_closed), self);
+
+  gtk_popover_popup (GTK_POPOVER (popover));
+  g_debug ("session: context menu with %u items drawn at %d,%d", index, x, y);
+  g_timeout_add_once (300, menu_report_size, g_object_ref (popover));
+}
+
+static void
+handle_context_menu (ChromiumSession *self, JsonObject *object)
+{
+  GList *items = NULL;
+  gboolean handled = FALSE;
+  int x, y;
+
+  if (self->menu_pending)
+    {
+      /* Chromium should not have asked twice. Put the old one down without
+       * answering it — the reply would land on this request instead. */
+      g_debug ("session: a second context menu arrived before the first was answered");
+      self->menu_pending = FALSE;
+      menu_release (self);
+    }
+
+  x = (int) json_object_get_int_member (object, "x");
+  y = (int) json_object_get_int_member (object, "y");
+
+  if (json_object_has_member (object, "items") &&
+      json_node_get_node_type (json_object_get_member (object, "items")) == JSON_NODE_ARRAY)
+    {
+      JsonArray *array = json_object_get_array_member (object, "items");
+      guint i;
+
+      for (i = 0; i < json_array_get_length (array); i++)
+        {
+          JsonObject *row = json_array_get_object_element (array, i);
+          ChromiumMenuItem *item;
+
+          if (!row)
+            continue;
+
+          item = g_new0 (ChromiumMenuItem, 1);
+          item->id = (int) json_object_get_int_member (row, "id");
+          item->label = g_strdup (event_string (row, "label"));
+          item->type = g_strdup (event_string (row, "type"));
+          item->enabled = json_object_has_member (row, "enabled") ?
+                            json_object_get_boolean_member (row, "enabled") : TRUE;
+          item->checked = json_object_has_member (row, "checked") ?
+                            json_object_get_boolean_member (row, "checked") : FALSE;
+          items = g_list_append (items, item);
+        }
+    }
+
+  self->menu_pending = TRUE;
+  g_signal_emit (self, signals[SIG_CONTEXT_MENU], 0, x, y, items, &handled);
+
+  g_debug ("session: context menu at %d,%d with %u rows, host took it: %d",
+           x, y, g_list_length (items), handled);
+
+  if (!handled)
+    session_menu_show (self, x, y, items);
+
+  g_list_free_full (items, menu_item_free);
+}
+
+static void
+handle_context_menu_dismissed (ChromiumSession *self)
+{
+  /* CEF closed the request itself — the page navigated, or its own code decided.
+   * Nothing goes back: the answer slot is already empty over there. */
+  if (!self->menu_pending)
+    return;
+
+  g_debug ("session: the helper closed the context menu");
+  self->menu_pending = FALSE;
+
+  if (self->menu_popover)
+    gtk_popover_popdown (GTK_POPOVER (self->menu_popover));
+  else
+    menu_release (self);
+}
+
+void
+chromium_session_context_menu_select (ChromiumSession *self, int id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  if (!self->menu_pending)
+    {
+      g_debug ("session: no context menu to answer");
+      return;
+    }
+
+  self->menu_pending = FALSE;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "context-menu-select");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+
+  if (self->menu_popover)
+    gtk_popover_popdown (GTK_POPOVER (self->menu_popover));
+  else
+    menu_release (self);
+}
+
+void
+chromium_session_context_menu_dismiss (ChromiumSession *self)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  if (!self->menu_pending)
+    return;
+
+  self->menu_pending = FALSE;
+  send_command (self, "context-menu-dismiss");
+
+  if (self->menu_popover)
+    gtk_popover_popdown (GTK_POPOVER (self->menu_popover));
+  else
+    menu_release (self);
 }
 
 static void
@@ -1052,6 +1470,13 @@ chromium_session_class_init (ChromiumSessionClass *klass)
     g_signal_new ("find-result", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 4,
                   G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_BOOLEAN);
+  /* The items list is a GList of ChromiumMenuItem * that belongs to the session
+   * for the duration of the emission: a host that wants one kept has to copy it.
+   * A handler that draws the menu answers TRUE; FALSE leaves it to the session. */
+  signals[SIG_CONTEXT_MENU] =
+    g_signal_new ("context-menu", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_BOOLEAN, 3,
+                  G_TYPE_INT, G_TYPE_INT, G_TYPE_POINTER);
   signals[SIG_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
@@ -1094,6 +1519,11 @@ chromium_session_dispose (GObject *object)
 
   close_listener (self);
   drop_connection (self);
+
+  /* The menu is the view's child, so it goes with the view; asking is already
+   * off, and its ::closed must not answer a helper that is going away. */
+  self->menu_pending = FALSE;
+  menu_release (self);
 
   g_clear_object (&self->cancellable);
   g_clear_object (&self->view);

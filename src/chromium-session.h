@@ -102,6 +102,42 @@ void               chromium_session_find          (ChromiumSession *self,
 void               chromium_session_stop_finding   (ChromiumSession *self,
                                                    gboolean clear_selection);
 
+/* The page's context menu. Chromium builds the model — every item it offers,
+ * with the edit state, media and navigation already taken into account — and
+ * this component draws it. ::context-menu (x, y, items) arrives first: @x and @y
+ * are the click's own coordinates inside the page, in the same logical pixels the
+ * pointer is fed in, and @items is a GList of ChromiumMenuItem owned by the
+ * session for the duration of the emission only.
+ *
+ * A handler that draws the menu itself returns TRUE, and then it owns the answer:
+ * exactly one of the two calls below has to follow. The answer is the handler's
+ * own return value — a gboolean signal keeps the last handler's — not a parameter
+ * it is handed. Returning FALSE — or connecting nothing at all — lets the session
+ * pop up its own GtkPopoverMenu over the view, which is what a host that only
+ * wants a working right-click menu gets for free. Either way the answer is the
+ * same two calls, and they are also how a host that drew the menu hands the
+ * choice back.
+ *
+ * The helper holds one menu request at a time and Chromium will not open a second
+ * until the first is answered, so a menu that is neither selected nor dismissed
+ * costs every later right click as well.
+ *
+ * Item ids are CEF's own (100 back, 117 select all, 132 view source, …); @type is
+ * "command", "check", "radio", "separator", "submenu" or "none", and a separator
+ * carries no label. The labels keep CEF's "(&B)" mnemonic spelling, which the
+ * session's menu turns into a GTK mnemonic. */
+typedef struct {
+  int          id;
+  const char  *label;
+  const char  *type;
+  gboolean     enabled;
+  gboolean     checked;
+} ChromiumMenuItem;
+
+void               chromium_session_context_menu_select (ChromiumSession *self,
+                                                   int id);
+void               chromium_session_context_menu_dismiss (ChromiumSession *self);
+
 const char        *chromium_session_get_helper_path (ChromiumSession *self);
 const char        *chromium_session_get_uri         (ChromiumSession *self);
 const char        *chromium_session_get_title       (ChromiumSession *self);

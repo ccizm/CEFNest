@@ -12,6 +12,11 @@
 > 2026-10-21 更新（任务 #40–#45）：页内查找也做了。它当初被判"不做"的理由同样成立——命中数
 > 和当前第几处都是回调，不是一问一答——解法也和下载同一类：**命令不发回答，回答是一条事件**。
 > §3、§4、§5、§6 又跟着改了一遍，实测到的四条语义在 `docs/find-path.md`。
+>
+> 2026-10-21 更新（任务 #56）：上下文菜单也做了。它是第三种形状：前两条要补的是"回答装不进
+> 一问一答"，这一条要补的是**一个必须由宿主作答、否则右键就再也问不出第二个问题**的请求。
+> `RunContextMenu` 把 CEF 的模型交给宿主画，答案必须回来。实测到的那条硬约束（helper 那边
+> 同一时刻只持有**一个**没答的菜单）写在 `docs/context-menu.md` §2。
 
 ## 1. 缺的那一条为什么必须是一条信号
 
@@ -68,7 +73,7 @@ demo: renderer exited status=1 error=9 9
 
 ## 3. 现在通道上有的东西
 
-命令 12 条，事件 15 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
+命令 14 条，事件 17 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
 
 | 方向 | 名字 | 载荷 |
 | --- | --- | --- |
@@ -80,6 +85,8 @@ demo: renderer exited status=1 error=9 9
 | host → helper | `download-reject` | `id`（拒绝未开始的、取消在飞的，同一条） |
 | host → helper | `find` | `pattern`、`forward`、`match_case`、`next`（**没有 ack**，答案是 `find-result`） |
 | host → helper | `find-stop` | `clear`（缺省 true：连高亮一起撤） |
+| host → helper | `context-menu-select` | `id`、`flags`（可选，API 上没开）（**`context-menu` 必须被答**：helper 同时只持有一个请求，不答就再也问不出第二个） |
+| host → helper | `context-menu-dismiss` | 无（`Cancel()`：关掉而不执行任何命令，这条回答的意思是"什么也没选"） |
 | helper → host | `ready` | `cef`、`pid`、`url` |
 | helper → host | `address` | `url`（只有真正提交的导航才发） |
 | helper → host | `title` | `title` |
@@ -93,6 +100,8 @@ demo: renderer exited status=1 error=9 9
 | helper → host | `download-progress` | `id`、`received_bytes`、`total_bytes`、`percent`、`speed` |
 | helper → host | `download-end` | `id`、`state`（`complete`/`cancelled`/`interrupted`）、`path`、`received_bytes` |
 | helper → host | `find-result` | `identifier`、`count`、`active_ordinal`、`final`（没有命中矩形，理由见 `docs/find-path.md` §2.4） |
+| helper → host | `context-menu` | `x`、`y`、`items`（每项 `id`、`label`、`type`、`enabled`、`checked`；只发 `IsVisibleAt` 为真的行） |
+| helper → host | `context-menu-dismissed` | 无（**只在 helper 还握着那个回调时发**：宿主自己答过之后 CEF 关菜单也算 dismiss，那一条被滤掉了） |
 | helper → host | `status` `closed` | 文本 / 无 |
 
 字节数一律走 JSON 的 double：`CefDictionaryValue` **只有 `SetInt(int)`，没有 64 位 setter**，
@@ -108,10 +117,24 @@ demo: renderer exited status=1 error=9 9
 `identifier` 实测**每次请求 +1** 而不是每次搜索 +1，起点还是 0——它只用来把一次请求的多条
 回答归到一起。四种只可实测的行为写在 `docs/find-path.md` §2。
 
+`context-menu` 是第三种：它**必须**被回答，而且回答它的那两条命令不带任何回答。前两条要补的
+是"回答装不进一问一答"，这一条要补的是"这个问题答不了"——CEF 的 `CefRunContextMenuCallback`
+是宿主拿菜单的唯一途径，而 `docs/context-menu.md` §2 量到 Chromium 那边**同时只允许一个没答的
+请求**：连点五次右键，只有第一次把菜单送到通道上，后四次全被页面自己的 `contextmenu` 吃掉，
+直到宿主回了那一个。所以"不答"在这里不是安静，是把右键弄坏了。定下的规则是**会话永远会答**：
+宿主不接管就画 CEF 给的默认菜单，宿主接管了则由宿主的 `select`/`dismiss` 作答，宿主既没接管
+又答不了（没有 view、或模型里一条命令都没有）时会话自己 `dismiss`。
+
 `ChromiumSession` 的信号：`::changed`、`::ready`、`::load-end`、`::load-error`、
 `::renderer-exited`、`::script-result`、`::download-begin`、`::download-progress`、
-`::download-end`、`::find-result`（最后四条新）、`::closed`。`::changed` 现在也会随
-`muted` 事件落地。
+`::download-end`、`::find-result`、`::context-menu`（最后五条新）、`::closed`。`::changed`
+现在也会随 `muted` 事件落地。
+
+`::context-menu` 是这套信号里**唯一一个有返回值的**：`gboolean`，handler 返回 TRUE 表示"菜单
+我自己画，答案我来负责"，返回 FALSE 表示"交给会话画默认菜单"。答案取的是 handler 的返回值
+——GType 为 `G_TYPE_BOOLEAN` 且没注册累加器的信号，累加的就是最后一个 handler 的返回值，
+`g_signal_emit` 那个 `&handled` 位置**不会**传进 handler（它声明成出参写进去就是段错误，
+`docs/context-menu.md` §7 记了这次的现场）。
 
 `load-error` 和 `renderer-exited` 都是 3 个参数，`renderer-exited` 那两个 int 一个是 CEF 的
 枚举、一个是平台错误码——刻意不合并成一条"出错了"信号：一个是"这一页没来"，另一个是
@@ -134,14 +157,18 @@ demo: renderer exited status=1 error=9 9
 | 清缓存 / 清 cookie | `ClearCache`、`CefCookieManager` | **不做** | 得先定义三档（缓存 / cookie / localStorage）分别意味着什么，这是隐私策略不是 API |
 | 打印 / 存 PDF | `PrintToPdf` | **不做** | 形状和下载是同一套（挂住的回调 + `id` + 落盘路径），照抄就行；但 `docs/download-path.md` 那三条实测还没给它，不做没有证据的功能 |
 | 自定义 UA | `CefRequestContext` | **不做** | 走环境变量比走命令合适：它是一次性设定，不该中途变 |
+| 上下文菜单 | `CefContextMenuHandler::RunContextMenu` + `CefMenuModel` + `CefRunContextMenuCallback` | **已做**（2026-10-21） | 判据到这里已经不够用了：`download-*` 是"挂着等回答"，`find-*` 是"不发回答"，而 `context-menu` 是**必须回答**——CEF 只有这一条路把菜单交给宿主，`RunContextMenu` 返回 true 之后画与不画、答与不答全在宿主手上，而实测（`docs/context-menu.md` §2）证明 Chromium 同时只允许一个没答的请求，不答就等于把右键弄坏。形状是最省的一种：模型（`items` 五条属性）+ 坐标上线，答案下去，中间没有任何进度。`CefContextMenuParams` 留在 helper：模型本身已经是它的回答，`link URL` 这类"宿主想加自己的行"的信息是下一个增量，不是这次没有量的部分 |
 
-反过来，**这 12 条够用**的证据还是这套组件的全部交互：导航（`load`/`back`/`forward`/
+反过来，**这 14 条够用**的证据还是这套组件的全部交互：导航（`load`/`back`/`forward`/
 `reload`/`stop`）、任意脚本（`js` 一条顶十条，页内状态、标题、当前 URL 都能自己读）、退出
-（`quit`）、加上现在这两条有进度要回话的（`download-*`、`find-*`）。要加的新命令得先说明它
-不能用 `js` 表达——上面那张表里除了 DevTools，其余几条其实都能用 `js` 大致凑出来，只是凑得
-不干净；下载**不能**凑，因为它落盘、要宿主给路径，而 `js` 那条通道一个字一个字都在页面里。
-查找也**不该**凑：Blink 的命中序号、跨帧的"第 M 处"、以及把命中滚进视野那套行为都在页面 JS
-外面，用 `js` 自己实现等于在页面里再写一个查找，它会和页面自己的滚动、选区抢东西。
+（`quit`）、加上现在这几条要回话的（`download-*`、`find-*`、`context-menu-*`）。要加的新命令
+得先说明它不能用 `js` 表达——上面那张表里除了 DevTools，其余几条其实都能用 `js` 大致凑出来，
+只是凑得不干净；下载**不能**凑，因为它落盘、要宿主给路径，而 `js` 那条通道一个字一个字都在
+页面里。查找也**不该**凑：Blink 的命中序号、跨帧的"第 M 处"、以及把命中滚进视野那套行为都在
+页面 JS 外面，用 `js` 自己实现等于在页面里再写一个查找，它会和页面自己的滚动、选区抢东西。
+右键菜单也凑不了：`contextmenu` 事件里拿不到 CEF 那份模型（复制/剪切/粘贴那几条是编辑器状态
+决定的，页面 JS 看不见 `IsEnabled`），更要紧的是它落不下去——Chromium 自己的菜单是一个 xdg_popup
+（`docs/context-menu.md` §1），宿主想让它消失只有回调这一条路。
 
 ## 5. 验证
 
@@ -181,12 +208,27 @@ demo: renderer exited status=1 error=9 9
 
 `meson test -C builddir` 10/10 照旧全过（那套测的是 compositor 侧，不碰控制通道）。
 
+`context-menu` 这一组也是先量再做，量出来的三条都进了门禁：`test/menu-gate.sh` 八次运行
+（六次假 helper、两次真 Chromium）、47 条断言。假 helper 那一半复刻的是 §2 那个"同时只有一个
+没答的请求"，以及一份真机量到的模型（链接 5 行、可编辑区 9 行、有选区 1 行，分隔符的 `id` 是
+-1），所以"没接管就画默认菜单""接管之后答案只有一条""不答就再也问不出下一个"这些都能不开
+浏览器钉住。真 Chromium 那一半钉的是通道的两端：`menu-pick 117` 之后页面里
+`selectionEnd - selectionStart` 是 18，也就是 CEF 自己的全选命令真的在 Blink 里跑了；导航那次
+钉的是会话替宿主兜住的那条路（`context menu dismissed by a navigation`），因为实测一次没答的
+菜单**不会**被新导航 dismiss，popover 会跟着新页面一直挂着。菜单画在 `ChromiumView` 上——它
+自己就是一个 xdg_popup 子面（`docs/context-menu.md` §1 量的正是这一点），所以 `shot` 抓不到它，
+真机那半的"画出来了"证据用的是会话自己那条 `context menu mapped=1 size=` 调试行。
+
 ## 6. 还没做的
 
 * **一条命令都没有应答机制**。`js` 有 `id`，其余命令发出去就完了；宿主不知道 `load` 有没有
   被吃到（`address`/`load-end` 是间接证据）。`find` 是**故意**不发 ack 的——它的回答全是事件，
   再配一条 `ok` 只会让宿主以为是两个答案。参数不合法（空 `pattern`、空 `path`）现在统一回一条
   `status`，那是日志不是回执。要不要给每条命令配一个 `ok`，等 §4 里出现需要它的那条再说。
+  现在得补一句：这个判据在 `context-menu` 上**不成立**了。它反过来是一条必须回答的问题，"没有
+  ack"不再是安全默认，所以会话侧给它加了一条不变量：**`context-menu` 请求一定活到一个答案**
+  （要么宿主的 `select`/`dismiss`，要么会话自己 dismiss）。`no-such-download` 那种"日志而不是
+  回执"在这里也用了——宿主答一个已经结束的菜单，helper 只回 `status`。
 * **utility 进程（网络、音频）掉了没人报**。CEF 只为渲染进程发这个回调，§2 实测过杀另一个
   是没有声音的。音频现在确认就住在一个 `Seccomp=0` 的 `audio.mojom.AudioService` utility
   里（`docs/audio-path.md`），宿主能看到的兜底只有 `::closed`。
@@ -203,3 +245,11 @@ demo: renderer exited status=1 error=9 9
   五次步进，而且不能假定落在哪一条上——这是 Blink 的内部顺序，不是通道契约。
 * **有一次真机 find 门禁一条事件都没收到**，逐字复现和之后的运行全都正常（`docs/find-path.md`
   §4）。没有第二次复现，不下结论；如果它再现，先查 helper 的收尾时序，别先改协议。
+* **上下文菜单上线的是模型，不是问题**。`CefContextMenuParams` 一个字都没过线，所以宿主现在只能
+  *重画* CEF 给的菜单，不能*扩充*它：「复制链接地址」「图片另存为」需要 `link_url` / `src_url`，
+  而 §4 那张表里量到的默认模型对链接、图片、空白页是**同一份 5 行**（libcef 就给这些，多的行是
+  cefsimple 自己加的）。把 params 上线是这一条剩下的全部实质工作，形状不难（一次查询、无回答），
+  但得先有宿主真的需要加行——`docs/context-menu.md` §3 把这条判据写在了那里。
+* **一条挂起的菜单请求在 helper 退出时会怎么样，没测**。`context-menu-select` 发不出去、宿主那边
+  `menu_pending` 还立着、session 已经关了。这是 §6 第一条（没有 ack）真正疼的地方：宿主没法知道自己
+  的回答有没有吃到。等 `docs/session-lifecycle.md` 那侧有结论一起看。

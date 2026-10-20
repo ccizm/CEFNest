@@ -38,7 +38,7 @@ Three pieces, and each only does one job:
 | --- | --- | --- |
 | `NestedCompositor` | `src/nested.c` + `src/nested-{seat,dmabuf,xdg,cursor,text-input,data-device}.c` | the compositor: globals, surfaces, damage, input, clipboard |
 | `ChromiumView` | `src/chromium-view.c` | the widget: hands its GdkSurface's input to the compositor, paints the composition |
-| `ChromiumSession` | `src/chromium-session.c` | the control plane: starts and stops the helper, tracks page state, runs JavaScript, brokers downloads and find |
+| `ChromiumSession` | `src/chromium-session.c` | the control plane: starts and stops the helper, tracks page state, runs JavaScript, brokers downloads, find, and the page's context menu |
 
 Globals the compositor advertises, at the versions in `src/nested-internal.h`:
 `wl_compositor`, `wl_shm`, `wl_seat` (8, so pointer and keyboard can carry
@@ -110,7 +110,7 @@ of it is reproducible runs:
 | --- | --- |
 | `CHROMIUM_HELPER` | set (any value containing `/`) to enter session mode; the default is the path compiled in `src/meson.build` |
 | `CHROMIUM_URL` | page to open |
-| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `close`, `quit` — see `test/*.session` |
+| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `close`, `quit` — see `test/*.session` |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_WINDOW` | `fullscreen` or `maximize`, for deterministic geometry |
 | `CHROMIUM_CLIPSET` / `CHROMIUM_CLIPWATCH` | seed the host clipboard, and bridge it into the page |
@@ -218,6 +218,20 @@ It pipes stderr through `tee` because GLib's writer drops DEBUG messages when
 stderr is a plain file, and the compositor's own trace is half of what is
 asserted.
 
+`test/menu-gate.sh` is the context-menu half, eight runs — six against
+`test/fake-helper.py`, two against real Chromium on `test/menu-page.html` — and
+47 assertions. The fake half replays the constraint that decided the whole
+design: Chromium holds **one** unanswered menu request, so five right clicks with
+no answer produce one event and a page that saw all five. That is why the session
+always answers — a default menu when the host does not take the signal, a dismiss
+when there is no view or no command row to draw, and a dismiss on a navigation,
+because a navigation measured as *not* closing a request the host owns. The real
+half proves the round trip rather than the drawing: `menu-pick 117` is CEF's own
+全选, and the page reads back `selectionEnd - selectionStart == 18`, so the
+command ran in Blink and not in the host. Asserting that a menu appeared uses the
+session's `context menu mapped=1 size=` line, not a `shot` — on Wayland the
+popover is a surface of its own, outside the widget the grab covers.
+
 ## Using it as a library
 
 ```c
@@ -238,8 +252,9 @@ status, error code, message), `::script-result` (id, ok, JSON value, message),
 `::download-begin` (id, url, suggested name, mime type, total bytes),
 `::download-progress` (id, received, total, percent, speed), `::download-end`
 (id, `complete`/`cancelled`/`interrupted`, path, received), `::find-result`
-(search id, count, active ordinal, final), `::closed` (the
-helper is gone and will not come back).
+(search id, count, active ordinal, final), `::context-menu` (the click's x, y and
+the model as a `GList` of rows — returning TRUE means the host draws it),
+`::closed` (the helper is gone and will not come back).
 `chromium_session_set_muted ()` silences the page — its sound leaves the helper
 through an unsandboxed audio process and lands on the host's speakers, and the
 stream stays open while muted, so the desktop mixer cannot see the switch
@@ -256,6 +271,15 @@ it replies even more silently — nothing). The demo wires both to a find bar th
 opens with Ctrl+F and closes with Esc; the key controller runs in the capture
 phase, because a `GtkEntry` would otherwise take Esc before the view forwards it
 (`docs/find-path.md`).
+A right click is the third shape, and the only one that must be answered: CEF hands
+over its menu model and expects exactly one reply, and while that reply is
+outstanding the browser will not ask again — five unanswered right clicks are one
+event. `::context-menu` returns TRUE to take the menu over, and then exactly one of
+`chromium_session_context_menu_select (session, id)` (runs CEF's own command for
+that id — 全选 measured as selecting in the page) or
+`chromium_session_context_menu_dismiss (session)` has to follow. Return FALSE, or
+connect nothing, and the session draws the model itself as a `GtkPopoverMenu` over
+the view, so a right click is never a dead gesture (`docs/context-menu.md`).
 `docs/control-channel.md` is the full command and event
 list, and the record of the commands decided against.
 
@@ -282,6 +306,7 @@ They are the record of *why* the code is shaped like this:
 | `download-path.md` | the parked `OnBeforeDownload` gate, who decides the path, and the three CEF download behaviours only a measurement can tell you |
 | `find-path.md` | a command that answers nothing, the reply shape only a measurement gives (one identifier per request, one to three updates per request), and what actually scrolls the page |
 | `drag-loop.md` | the in-page drag choreography, the measured proof that a `wl_data_device.enter` reaches the page, what the destination actually accepts, and why the fd relay is not what carries a same-page payload |
+| `context-menu.md` | the one constraint that decided the whole design (Chromium holds a single unanswered menu request), what CEF's default model really contains — the same five rows for a link, an image and a blank page — and `Continue(id)` proven inside the page |
 
 ## Known limitations
 
@@ -318,6 +343,15 @@ They are the record of *why* the code is shaped like this:
   host that wants the fifth match sends five steps. Measured once in three runs,
   the first step reported the third match instead — the ordinal is Blink's own
   ordering and the gate deliberately does not pin it (`docs/find-path.md`).
+- **The context menu is redrawn, not extended.** A right click now comes to the host
+  as a model and goes back as a command id, and CEF's own action runs — but
+  `CefContextMenuParams` stays in the helper, so a host cannot yet add the rows that
+  need it: 复制链接地址 needs `link_url`, 图片另存为 needs `src_url`. Measured, that
+  costs little today: libcef's default model is the same five rows for a link, an
+  image and a blank page, and the nine rows for an editable field are all there
+  (`docs/context-menu.md` has the table). Check and radio marks are not drawn and a
+  submenu row does not open — the menu is rebuilt from a fresh model after every
+  command, so a mark would have nothing to remember.
 - **The page's sound bypasses the widget entirely.** Audio lives in an
   unsandboxed `audio.mojom.AudioService` utility and reaches the host's speakers
   as an ordinary desktop app; the nested compositor never sees it, and GNOME's

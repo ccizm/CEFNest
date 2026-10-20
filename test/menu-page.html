@@ -1,0 +1,68 @@
+<!doctype html>
+<!-- menu-page.html is the fixture for the context menu. Everything worth
+     right-clicking sits at a fixed, known position so a scripted click lands on
+     it whatever the host's own chrome is: a link, an image, an editable box and
+     a paragraph with a selection in it. The page records every contextmenu event
+     it sees, because the question this page answers is "does the click reach the
+     page, and where does the page say the click was". -->
+<html>
+<head><title>MENU-PAGE</title></head>
+<body style="margin:0;font:16px sans-serif;background:#fff;color:#036">
+<a id="link" href="https://example.invalid/target"
+   style="position:fixed;left:20px;top:20px;width:240px;height:40px;display:block;background:#eef;border:1px solid #369;line-height:40px;text-align:center">
+  the link</a>
+<img id="image" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR42mM4YWODFTEMLQkAZZlQAS/gME0AAAAASUVORK5CYII="
+     alt="the image" width="200" height="100"
+     style="position:fixed;left:20px;top:80px;border:1px solid #369">
+<textarea id="edit" rows="4" cols="24"
+          style="position:fixed;left:20px;top:220px;font:16px sans-serif">editable text here</textarea>
+<p id="text" style="position:fixed;left:340px;top:20px;width:300px">
+  selected words are here for the copy item</p>
+<pre id="log" style="position:fixed;left:20px;bottom:20px;width:520px;margin:0;pointer-events:none"></pre>
+<script>
+  window.menuLog = [];
+
+  document.addEventListener('contextmenu', function (ev) {
+    window.menuLog.push('contextmenu@' + (ev.target ? ev.target.id : '?') +
+                        ' ' + Math.round(ev.clientX) + ',' + Math.round(ev.clientY));
+    document.getElementById('log').textContent = window.menuLog.join(' | ');
+    document.title = 'MENU-' + window.menuLog.length;
+  });
+
+  /* The mouse buttons are logged next to contextmenu because the two are told
+   * apart on purpose: Blink reports a button it was handed, while the context
+   * menu event only arrives if the browser process asked the page to build a
+   * menu. */
+  ['mousedown', 'mouseup'].forEach(function (kind) {
+    document.addEventListener(kind, function (ev) {
+      window.menuLog.push(kind + ev.button + '@' + (ev.target ? ev.target.id : '?'));
+      document.getElementById('log').textContent = window.menuLog.join(' | ');
+    });
+  });
+
+  window.selectText = function () {
+    var p = document.getElementById('text');
+    var r = document.createRange();
+    r.selectNodeContents(p);
+    var s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(r);
+    return String(s);
+  };
+
+  window.selectEdit = function () {
+    var t = document.getElementById('edit');
+    t.focus();
+    t.setSelectionRange(0, 8);
+    return t.value.slice(t.selectionStart, t.selectionEnd);
+  };
+
+  window.clicks = 0;
+  document.getElementById('link').addEventListener('click', function () {
+    window.clicks++;
+    window.menuLog.push('click-link');
+    document.getElementById('log').textContent = window.menuLog.join(' | ');
+  });
+</script>
+</body>
+</html>
