@@ -23,6 +23,13 @@ void            nested_surface_get_paint_rect (NestedSurface *self,
 const char     *nested_surface_get_app_id     (NestedSurface *self);
 const char     *nested_surface_get_title      (NestedSurface *self);
 gboolean        nested_surface_is_mapped      (NestedSurface *self);
+/* Where the surface is drawn, in the embedding widget's logical pixels. A
+ * toplevel fills the widget and sits at 0,0; a popup is placed by the rules it
+ * handed the compositor in its xdg_positioner, so its origin is somewhere on
+ * top of the surface it hangs off. */
+void            nested_surface_get_position   (NestedSurface *self,
+                                               int           *x,
+                                               int           *y);
 
 #define NESTED_TYPE_COMPOSITOR (nested_compositor_get_type ())
 G_DECLARE_FINAL_TYPE (NestedCompositor, nested_compositor, NESTED, COMPOSITOR, GObject)
@@ -56,6 +63,12 @@ void              nested_compositor_set_frame_clock (NestedCompositor *self,
                                                      GdkFrameClock *clock);
 NestedSurface    *nested_compositor_get_surface     (NestedCompositor *self);
 uint64_t          nested_compositor_get_frame_count (NestedCompositor *self);
+/* Everything the widget has to draw, bottommost first: the primary toplevel
+ * and the popups placed over it. Each entry is a reference the caller owns, so
+ * release the list with g_list_free_full (list, g_object_unref). Surfaces that
+ * are not mapped, have no pixels yet, or hang off a different toplevel are left
+ * out, so the stack is exactly what is on screen. */
+GList            *nested_compositor_get_paint_stack (NestedCompositor *self);
 
 /* The nested compositor has no devices of its own: the embedding widget owns
  * the real pointer and keyboard and forwards their events here. Coordinates

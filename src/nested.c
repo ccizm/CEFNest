@@ -92,6 +92,7 @@ static gboolean surface_apply_viewport (NestedSurface *self,
                                         struct wl_resource *resource,
                                         int natural_width, int natural_height);
 static void  surface_update_local_size (NestedSurface *self);
+static gboolean surface_is_painted (NestedSurface *self);
 static void  compositor_send_scale (NestedCompositor *self);
 
 void
@@ -154,6 +155,8 @@ nested_surface_init (NestedSurface *self)
   wl_list_init (&self->frame_callbacks);
   wl_list_init (&self->pending_user.link);
   wl_list_init (&self->fractional_links);
+  wl_list_init (&self->popup_children);
+  wl_list_init (&self->popup_link);
   self->pending_user.surface = self;
 
   /* Negative means unset: no crop, no destination size, so the surface keeps
@@ -178,6 +181,16 @@ nested_surface_dispose (GObject *object)
       wl_list_remove (&self->pending_user.link);
       wl_list_init (&self->pending_user.link);
       self->pending_user.buffer = NULL;
+    }
+
+  /* Out of the parent's draw order before anything else can look at it. A
+   * parent cannot be disposed while a child still refers to it, so the list it
+   * removes itself from is always live. */
+  if (self->popup_parent)
+    {
+      wl_list_remove (&self->popup_link);
+      wl_list_init (&self->popup_link);
+      g_clear_object (&self->popup_parent);
     }
 
   if (self->in_list)
@@ -275,6 +288,31 @@ nested_surface_is_mapped (NestedSurface *self)
   return self->mapped;
 }
 
+void
+nested_surface_get_position (NestedSurface *self, int *x, int *y)
+{
+  g_return_if_fail (NESTED_IS_SURFACE (self));
+
+  if (x)
+    *x = 0;
+  if (y)
+    *y = 0;
+
+  /* A popup hangs off a parent, and that parent may itself be a popup over
+   * another. The widget wants the position in its own space, so walk down the
+   * chain adding every placement; the toplevel at the bottom of it has none.
+   * A popup whose parent has gone outlives it as an object but is never drawn,
+   * so the chain always ends at a toplevel. */
+  while (self)
+    {
+      if (x)
+        *x += self->popup_x;
+      if (y)
+        *y += self->popup_y;
+      self = self->popup_parent;
+    }
+}
+
 static NestedSurface *
 nested_surface_new (NestedCompositor *nested, struct wl_resource *resource)
 {
@@ -320,11 +358,13 @@ static void
 surface_clear_content (NestedSurface *self)
 {
   gboolean was_primary;
+  gboolean was_painted;
 
   if (!self->texture && !self->mapped)
     return;
 
   was_primary = self->nested && self == self->nested->primary;
+  was_painted = surface_is_painted (self);
 
   g_clear_object (&self->texture);
   self->width = 0;
@@ -335,6 +375,9 @@ surface_clear_content (NestedSurface *self)
 
   if (was_primary)
     nested_update_primary (self->nested);
+  else if (was_painted)
+    /* A popup that stops painting leaves pixels and a pointer target behind. */
+    nested_surfaces_changed (self->nested);
 }
 
 /* ------------------------------------------------------------------ *
@@ -723,6 +766,15 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
       (self->width != previous_width || self->height != previous_height))
     repaint = TRUE;
 
+  /* A popup is placed against this surface's window geometry, and a commit is
+   * where this surface's size becomes real. The geometry itself is worked over
+   * by xdg_surface.set_window_geometry, so only a size change has to re-place
+   * the children here — otherwise a steady 60Hz parent would re-write the whole
+   * popup tree once a frame. */
+  if (!wl_list_empty (&self->popup_children) &&
+      (self->width != previous_width || self->height != previous_height))
+    xdg_popups_replace (self);
+
   /* A client may have named this surface in wl_pointer.set_cursor before
    * attaching to it, so this is where the cursor it asked for becomes real. */
   if (nested)
@@ -747,6 +799,19 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
           nested->frame_count++;
           g_signal_emit (nested, signals[SIGNAL_FRAME], 0);
         }
+    }
+  else if (self->is_popup)
+    {
+      /* Painted over the toplevel, so its frames are the widget's business too
+       * — but they are not the page's own frames, and the pointer may have
+       * moved onto it with this commit. */
+      if (surface_is_painted (self))
+        {
+          if (repaint)
+            nested_surfaces_changed (nested);
+        }
+      else
+        nested_update_primary (nested);
     }
   else
     nested_update_primary (nested);
@@ -773,9 +838,11 @@ surface_resource_destroyed (struct wl_resource *resource)
 {
   NestedSurface *self = wl_resource_get_user_data (resource);
   NestedCompositor *nested = self->nested;
+  gboolean was_painted;
 
   self->wl_surface = NULL;
   surface_set_pending (self, NULL);
+  was_painted = surface_is_painted (self);
   self->mapped = FALSE;
 
   seat_clear_focus (nested, self);
@@ -784,6 +851,8 @@ surface_resource_destroyed (struct wl_resource *resource)
 
   if (nested && self == nested->primary)
     nested_update_primary (nested);
+  else if (nested && was_painted)
+    nested_surfaces_changed (nested);
 
   g_object_unref (self);
 }
@@ -1415,6 +1484,115 @@ nested_start_frame_clock (NestedCompositor *self)
     self->frame_timer_id = g_timeout_add (16, frame_clock_tick, self);
 }
 
+/* ------------------------------------------------------------------ *
+ * The surface tree                                                   *
+ *                                                                    *
+ * A client's toplevel fills the widget and its popups are placed on   *
+ * top of it by the rules they hand over in an xdg_positioner. Drawing *
+ * and hit-testing both have to walk that tree, so it is flattened     *
+ * here into a stack, bottommost first, and everything else reads the  *
+ * stack instead of the list of every surface the client made.         *
+ * ------------------------------------------------------------------ */
+
+/* Whether the surface reaches the screen at all: it needs pixels, and the
+ * toplevel it ultimately hangs off has to be the one being shown. */
+static gboolean
+surface_is_painted (NestedSurface *self)
+{
+  NestedSurface *root = self;
+
+  if (!self->nested || !self->mapped || !self->texture)
+    return FALSE;
+
+  while (root->popup_parent)
+    root = root->popup_parent;
+
+  return root == self->nested->primary;
+}
+
+static void
+surface_stack_append (NestedSurface *self, GList **stack)
+{
+  NestedSurface *child;
+
+  if (!surface_is_painted (self))
+    return;
+
+  *stack = g_list_append (*stack, g_object_ref (self));
+
+  wl_list_for_each (child, &self->popup_children, popup_link)
+    surface_stack_append (child, stack);
+}
+
+/* The topmost painted surface under a point in the widget's logical pixels.
+ * Searching from the top of the stack down is what makes a click land on the
+ * menu the client opened rather than on the page underneath it. */
+NestedSurface *
+nested_compositor_surface_at (NestedCompositor *self, double x, double y)
+{
+  GList *stack = nested_compositor_get_paint_stack (self);
+  GList *l;
+  NestedSurface *found = NULL;
+
+  for (l = g_list_last (stack); l; l = l->prev)
+    {
+      NestedSurface *surface = l->data;
+      int left, above;
+
+      nested_surface_get_position (surface, &left, &above);
+
+      if (x >= left && y >= above && x < left + surface->width &&
+          y < above + surface->height)
+        {
+          found = surface;
+          break;
+        }
+    }
+
+  g_list_free_full (stack, g_object_unref);
+
+  return found;
+}
+
+/* The surface the keys belong to. A popup that asked for a grab is a client's
+ * own idea of a modal — a context menu, a <select> list — and its code waits
+ * for keys on that surface, so the topmost of those wins over the page. With
+ * none of them grabbed, keys go to the toplevel as they always have. */
+NestedSurface *
+nested_compositor_keyboard_target (NestedCompositor *self)
+{
+  GList *stack = nested_compositor_get_paint_stack (self);
+  GList *l;
+  NestedSurface *target = self->primary;
+
+  for (l = g_list_last (stack); l; l = l->prev)
+    {
+      NestedSurface *surface = l->data;
+
+      if (surface->is_popup && surface->popup_grabbed)
+        {
+          target = surface;
+          break;
+        }
+    }
+
+  g_list_free_full (stack, g_object_unref);
+
+  return target;
+}
+
+/* Call this when the widget has to look at the surfaces differently: a popup
+ * mapped, moved or stopped painting. The pointer and keyboard may belong to a
+ * different surface now, and the picture has changed. */
+void
+nested_surfaces_changed (NestedCompositor *self)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  seat_retarget (self);
+  g_signal_emit (self, signals[SIGNAL_FRAME], 0);
+}
+
 void
 nested_update_primary (NestedCompositor *self)
 {
@@ -1763,6 +1941,19 @@ nested_compositor_get_surface (NestedCompositor *self)
 {
   g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), NULL);
   return self->primary;
+}
+
+GList *
+nested_compositor_get_paint_stack (NestedCompositor *self)
+{
+  GList *stack = NULL;
+
+  g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), NULL);
+
+  if (self->primary)
+    surface_stack_append (self->primary, &stack);
+
+  return stack;
 }
 
 uint64_t

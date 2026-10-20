@@ -1,7 +1,9 @@
 /* Minimal client used to validate the nested compositor: it draws a moving
  * pattern with a red border, so a stale, blank or wrongly sized frame is
  * obvious just by looking at the GTK window. With --dmabuf the same picture is
- * uploaded through a GBM buffer and zwp_linux_dmabuf_v1 instead of wl_shm. */
+ * uploaded through a GBM buffer and zwp_linux_dmabuf_v1 instead of wl_shm.
+ * With --popup it also opens a menu and a submenu over itself, so placement,
+ * hit-testing and dismissal can be checked against the rules it chose. */
 #define _GNU_SOURCE
 
 #include <errno.h>
@@ -64,6 +66,8 @@ static void buffer_destroy (Buffer *buffer);
 static void buffer_create_shm (Buffer *buffer, int w, int h);
 static void buffer_create_all_deferred (void);
 static void imports_settled (void);
+static void popups_open (void);
+static void popup_reposition (void);
 
 static struct wl_display *display;
 static struct wl_compositor *compositor;
@@ -135,6 +139,16 @@ static struct wl_surface *cursor_surface;
 static struct wl_buffer *cursor_buffer;
 static int cursor_asks;
 
+/* Popups (xdg_popup). --popup opens a context-menu-sized surface and a submenu
+ * over the client's own toplevel, each placed by positioner rules whose answer
+ * a screenshot can be checked against; the menu asks for a seat grab, so it is
+ * also how keyboard routing and popup_done dismissal get exercised.
+ * --popup-reposition then moves the menu with a second set of rules. */
+static int use_popup;
+static int use_popup_reposition;
+static int popups_opened;
+static int popup_repositioned;
+
 /* What zwp_linux_dmabuf_feedback_v1 told us: the device the compositor wants
  * buffers on, and its (format, modifier) pairs in preference order. */
 #define FEEDBACK_MAX_PAIRS 16
@@ -162,6 +176,13 @@ static double pointer_y;
 static double scroll_x;
 static double scroll_y;
 static int pointer_inside;
+/* Which of our surfaces the pointer is over: the toplevel or one of the popups
+ * drawn on top of it. Motion events do not name a surface, so the enter does
+ * and this is what routes them. */
+static struct wl_surface *pointer_surface;
+/* The surface the keyboard is over, which after a seat grab is the popup the
+ * client opened rather than the toplevel. */
+static struct wl_surface *keyboard_surface;
 static unsigned int button_mask;
 static uint32_t last_keysym;
 static int motion_events;
@@ -639,6 +660,21 @@ frame_done (void *data, struct wl_callback *callback, uint32_t time)
         fprintf (stderr, "client: no data device, cannot copy\n");
     }
 
+  /* Open the popups once the toplevel has been configured and is drawing: the
+   * rules are stated against its window geometry, so placing them before the
+   * configure would only prove the compositor can guess. */
+  if (use_popup && !popups_opened && width >= 400 && frames > 3)
+    {
+      popups_opened = 1;
+      popups_open ();
+    }
+
+  if (use_popup_reposition && popups_opened && !popup_repositioned && frames > 30)
+    {
+      popup_repositioned = 1;
+      popup_reposition ();
+    }
+
   if (mapped)
     draw ();
 }
@@ -813,6 +849,362 @@ ask_cursor (void)
 }
 
 /* ------------------------------------------------------------------ *
+ * popups (xdg_popup)                                                 *
+ * ------------------------------------------------------------------ */
+
+#define N_POPUPS 2
+
+/* The menu is placed by the rules the compositor has to read literally: the
+ * anchor rectangle's bottom-left corner is the point, and BOTTOM_RIGHT gravity
+ * means the child extends down and right from it. So the answer is the point
+ * itself — (150, 100+20) = (150, 120). The submenu asks for the top-right of its
+ * own rectangle, (200+10, 10) = (210, 10) in menu space, but a nested popup is
+ * constrained to the window geometry of whatever it hangs off — here the menu's
+ * 200x120 — so SLIDE_X pulls it back to (210 - (210+140-200)) = (60, 10). A
+ * submenu that would stick out past the right of its parent is shown inside it,
+ * which is what a real toolkit does with a menu too close to the screen edge. */
+struct _Popup {
+  const char *name;
+  struct _Popup *parent;
+  struct wl_surface *surface;
+  struct xdg_surface *xdg_surface;
+  struct xdg_popup *popup;
+  struct wl_buffer *buffer;
+  void *data;
+  int stride;
+  int width, height;      /* the size the configure reported */
+  int32_t x, y;           /* top-left the configure reported, in parent space */
+  int configured;         /* a popup configure with a usable size arrived */
+  int closed;
+  int wants_grab;
+  int grabbed;
+  int pointer_inside;
+  double pointer_x, pointer_y;
+  uint32_t base;
+  uint32_t edge;
+  uint32_t mark;
+};
+
+static struct _Popup popups[N_POPUPS];
+
+static const struct xdg_popup_listener popup_listener;
+static const struct xdg_surface_listener popup_xdg_surface_listener;
+
+static void
+popup_close (struct _Popup *popup)
+{
+  int i;
+
+  if (!popup->surface)
+    return;
+
+  fprintf (stderr, "client: popup %s torn down\n", popup->name);
+
+  /* A submenu cannot outlive the menu it is drawn against. */
+  for (i = 0; i < N_POPUPS; i++)
+    if (popups[i].parent == popup)
+      popup_close (&popups[i]);
+
+  xdg_popup_destroy (popup->popup);
+  xdg_surface_destroy (popup->xdg_surface);
+  wl_surface_destroy (popup->surface);
+
+  if (popup->buffer)
+    wl_buffer_destroy (popup->buffer);
+  if (popup->data)
+    munmap (popup->data, (size_t) popup->stride * popup->height);
+
+  memset (popup, 0, sizeof *popup);
+  popup->closed = 1;
+}
+
+static void
+popup_rect (struct _Popup *popup, int x, int y, int w, int h, uint32_t color)
+{
+  int px, py;
+
+  for (py = y; py < y + h; py++)
+    {
+      uint32_t *row;
+
+      if (py < 0 || py >= popup->height)
+        continue;
+
+      row = (uint32_t *) popup->data + (size_t) py * (popup->stride / 4);
+
+      for (px = x; px < x + w; px++)
+        if (px >= 0 && px < popup->width)
+          row[px] = color;
+    }
+}
+
+static void
+popup_paint (struct _Popup *popup)
+{
+  int x, y;
+
+  if (!popup->data)
+    return;
+
+  for (y = 0; y < popup->height; y++)
+    {
+      uint32_t *row = (uint32_t *) popup->data + (size_t) y * (popup->stride / 4);
+
+      for (x = 0; x < popup->width; x++)
+        row[x] = (x < 3 || y < 3 || x >= popup->width - 3 || y >= popup->height - 3)
+                 ? popup->edge : popup->base;
+    }
+
+  /* The grab band says which popup asked for the seat, so a screenshot shows
+   * where the keyboard is supposed to go without reading the log. */
+  if (popup->grabbed)
+    popup_rect (popup, 3, 3, popup->width - 6, 8, 0x00ffffffu);
+
+  if (popup->pointer_inside)
+    {
+      popup_rect (popup, (int) popup->pointer_x - 40, (int) popup->pointer_y - 2,
+                  80, 4, popup->mark);
+      popup_rect (popup, (int) popup->pointer_x - 2, (int) popup->pointer_y - 40,
+                  4, 80, popup->mark);
+    }
+
+  /* A held button turns the background green, as on the toplevel. */
+  if (button_mask)
+    popup_rect (popup, popup->width - 24, popup->height - 24, 16, 16, 0x0000ff00u);
+}
+
+static void
+popup_draw (struct _Popup *popup)
+{
+  if (!popup->surface || !popup->buffer)
+    return;
+
+  popup_paint (popup);
+
+  wl_surface_attach (popup->surface, popup->buffer, 0, 0);
+  wl_surface_damage_buffer (popup->surface, 0, 0, popup->width, popup->height);
+  wl_surface_commit (popup->surface);
+}
+
+static void
+popup_draw_all (void)
+{
+  int i;
+
+  for (i = 0; i < N_POPUPS; i++)
+    if (popups[i].surface)
+      popup_draw (&popups[i]);
+}
+
+static struct _Popup *
+popup_for_surface (struct wl_surface *surface)
+{
+  int i;
+
+  for (i = 0; i < N_POPUPS; i++)
+    if (popups[i].surface && popups[i].surface == surface)
+      return &popups[i];
+
+  return NULL;
+}
+
+/* The serial a grab may cite is the one from the last pointer enter, so a popup
+ * opened before the pointer arrived waits for it rather than naming serial 0. */
+static void
+popup_issue_grabs (void)
+{
+  int i;
+
+  if (!seat || !enter_serial)
+    return;
+
+  for (i = 0; i < N_POPUPS; i++)
+    if (popups[i].popup && popups[i].wants_grab && !popups[i].grabbed)
+      {
+        popups[i].grabbed = 1;
+        xdg_popup_grab (popups[i].popup, seat, enter_serial);
+        fprintf (stderr, "client: popup %s grabbed the seat with serial %u\n",
+                 popups[i].name, enter_serial);
+      }
+}
+
+static void
+popup_buffer_create (struct _Popup *popup)
+{
+  struct wl_shm_pool *pool;
+  int fd;
+
+  /* Shm only: what this client is testing is placement and routing, not the
+   * buffer transport the toplevel already covers. */
+  if (popup->buffer)
+    wl_buffer_destroy (popup->buffer);
+  if (popup->data)
+    munmap (popup->data, (size_t) popup->stride * popup->height);
+
+  popup->buffer = NULL;
+  popup->data = NULL;
+  popup->stride = popup->width * 4;
+  popup->data = map_pool (popup->stride * popup->height, &fd);
+
+  pool = wl_shm_create_pool (shm, fd, popup->stride * popup->height);
+  popup->buffer = wl_shm_pool_create_buffer (pool, 0, popup->width, popup->height,
+                                             popup->stride, WL_SHM_FORMAT_XRGB8888);
+  wl_shm_pool_destroy (pool);
+  close (fd);
+}
+
+static void
+popup_create (struct _Popup *popup, const char *name, struct _Popup *parent,
+              int32_t rect_x, int32_t rect_y, int32_t rect_w, int32_t rect_h,
+              int32_t size_w, int32_t size_h, uint32_t anchor, uint32_t gravity,
+              int32_t offset_x, int32_t offset_y, uint32_t constraint, int grab)
+{
+  struct xdg_positioner *positioner;
+  struct xdg_surface *parent_xdg = parent ? parent->xdg_surface : xdg_surface;
+
+  positioner = xdg_wm_base_create_positioner (wm_base);
+  xdg_positioner_set_size (positioner, size_w, size_h);
+  xdg_positioner_set_anchor_rect (positioner, rect_x, rect_y, rect_w, rect_h);
+  xdg_positioner_set_anchor (positioner, anchor);
+  xdg_positioner_set_gravity (positioner, gravity);
+  xdg_positioner_set_offset (positioner, offset_x, offset_y);
+  xdg_positioner_set_constraint_adjustment (positioner, constraint);
+
+  popup->name = name;
+  popup->parent = parent;
+  popup->wants_grab = grab;
+  popup->surface = wl_compositor_create_surface (compositor);
+  popup->xdg_surface = xdg_wm_base_get_xdg_surface (wm_base, popup->surface);
+  xdg_surface_add_listener (popup->xdg_surface, &popup_xdg_surface_listener, popup);
+  popup->popup = xdg_surface_get_popup (popup->xdg_surface, parent_xdg, positioner);
+  xdg_popup_add_listener (popup->popup, &popup_listener, popup);
+
+  xdg_positioner_destroy (positioner);
+
+  fprintf (stderr, "client: popup %s created over %s, asking for %dx%d\n",
+           name, parent ? parent->name : "the toplevel", size_w, size_h);
+
+  /* The first commit is what maps the surface; the grab has to precede it. */
+  popup_issue_grabs ();
+  wl_surface_commit (popup->surface);
+}
+
+static void
+popups_open (void)
+{
+  popups[0].base = 0x004040c0u;  /* blue menu */
+  popups[0].edge = 0x00ffffffu;
+  popups[0].mark = 0x0000ffffu;
+  popups[1].base = 0x0040c040u;  /* green submenu */
+  popups[1].edge = 0x00ffff00u;
+  popups[1].mark = 0x00ff00ffu;
+
+  popup_create (&popups[0], "menu", NULL,
+                150, 100, 30, 20, 200, 120,
+                XDG_POSITIONER_ANCHOR_BOTTOM_LEFT,
+                XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT,
+                0, 0,
+                XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_X |
+                XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y, 1);
+
+  popup_create (&popups[1], "submenu", &popups[0],
+                200, 10, 10, 20, 140, 80,
+                XDG_POSITIONER_ANCHOR_TOP_RIGHT,
+                XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT,
+                0, 0,
+                XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_X |
+                XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y, 0);
+}
+
+/* Move the menu with a fresh positioner: this is what a real menu does when the
+ * anchor item scrolls or the window resizes, and the repositioned event is the
+ * answer it waits for. */
+static void
+popup_reposition (void)
+{
+  struct xdg_positioner *positioner;
+
+  if (!popups[0].popup)
+    return;
+
+  positioner = xdg_wm_base_create_positioner (wm_base);
+  xdg_positioner_set_size (positioner, 200, 120);
+  xdg_positioner_set_anchor_rect (positioner, 600, 400, 30, 20);
+  xdg_positioner_set_anchor (positioner, XDG_POSITIONER_ANCHOR_TOP_LEFT);
+  xdg_positioner_set_gravity (positioner, XDG_POSITIONER_GRAVITY_TOP_RIGHT);
+  xdg_positioner_set_offset (positioner, 4, -8);
+  xdg_positioner_set_constraint_adjustment (positioner,
+      XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_X |
+      XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y);
+
+  xdg_popup_reposition (popups[0].popup, positioner, 77);
+  xdg_positioner_destroy (positioner);
+
+  fprintf (stderr, "client: popup menu repositioned to an anchor at 600,400\n");
+}
+
+static void
+popup_configure (void *data, struct xdg_popup *obj, int32_t x, int32_t y,
+                 int32_t w, int32_t h)
+{
+  struct _Popup *popup = data;
+
+  popup->x = x;
+  popup->y = y;
+  popup->width = w;
+  popup->height = h;
+  popup->configured = 1;
+
+  fprintf (stderr, "client: popup %s configured at %d,%d size %dx%d\n",
+           popup->name, x, y, w, h);
+}
+
+static void
+popup_popup_done (void *data, struct xdg_popup *obj)
+{
+  struct _Popup *popup = data;
+
+  fprintf (stderr, "client: popup %s dismissed by the compositor\n", popup->name);
+  popup_close (popup);
+
+  if (mapped)
+    draw ();
+}
+
+static void
+popup_told_repositioned (void *data, struct xdg_popup *obj, uint32_t token)
+{
+  struct _Popup *popup = data;
+
+  fprintf (stderr, "client: popup %s repositioned, token=%u, now at %d,%d %dx%d\n",
+           popup->name, token, popup->x, popup->y, popup->width, popup->height);
+}
+
+static const struct xdg_popup_listener popup_listener = {
+  .configure = popup_configure,
+  .popup_done = popup_popup_done,
+  .repositioned = popup_told_repositioned,
+};
+
+static void
+popup_xdg_configure (void *data, struct xdg_surface *obj, uint32_t serial)
+{
+  struct _Popup *popup = data;
+
+  xdg_surface_ack_configure (obj, serial);
+
+  if (!popup->configured || popup->width <= 0 || popup->height <= 0)
+    return;
+
+  popup_buffer_create (popup);
+  popup_draw (popup);
+}
+
+static const struct xdg_surface_listener popup_xdg_surface_listener = {
+  .configure = popup_xdg_configure,
+};
+
+/* ------------------------------------------------------------------ *
  * wl_seat                                                            *
  * ------------------------------------------------------------------ */
 
@@ -822,10 +1214,30 @@ static void
 pointer_enter (void *data, struct wl_pointer *wl_pointer, uint32_t serial,
                struct wl_surface *wl_surface, wl_fixed_t sx, wl_fixed_t sy)
 {
+  struct _Popup *popup = popup_for_surface (wl_surface);
+
+  enter_serial = serial;
+  pointer_surface = wl_surface;
+
+  /* The grab may cite no serial but this one, and a popup opened before the
+   * pointer arrived can only ask now. */
+  popup_issue_grabs ();
+
+  if (popup)
+    {
+      popup->pointer_inside = 1;
+      popup->pointer_x = wl_fixed_to_double (sx);
+      popup->pointer_y = wl_fixed_to_double (sy);
+
+      fprintf (stderr, "client: pointer enter popup %s serial=%u at %.1f,%.1f\n",
+               popup->name, serial, popup->pointer_x, popup->pointer_y);
+      popup_draw (popup);
+      return;
+    }
+
   pointer_inside = 1;
   pointer_x = wl_fixed_to_double (sx);
   pointer_y = wl_fixed_to_double (sy);
-  enter_serial = serial;
 
   fprintf (stderr, "client: pointer enter serial=%u at %.1f,%.1f\n",
            serial, pointer_x, pointer_y);
@@ -837,6 +1249,16 @@ static void
 pointer_leave (void *data, struct wl_pointer *wl_pointer, uint32_t serial,
                struct wl_surface *wl_surface)
 {
+  struct _Popup *popup = popup_for_surface (wl_surface);
+
+  if (popup)
+    {
+      popup->pointer_inside = 0;
+      fprintf (stderr, "client: pointer leave popup %s serial=%u\n",
+               popup->name, serial);
+      return;
+    }
+
   pointer_inside = 0;
 
   fprintf (stderr, "client: pointer leave serial=%u\n", serial);
@@ -846,6 +1268,19 @@ static void
 pointer_motion (void *data, struct wl_pointer *wl_pointer, uint32_t time,
                 wl_fixed_t sx, wl_fixed_t sy)
 {
+  struct _Popup *popup = popup_for_surface (pointer_surface);
+
+  if (popup)
+    {
+      popup->pointer_x = wl_fixed_to_double (sx);
+      popup->pointer_y = wl_fixed_to_double (sy);
+
+      if (++motion_events % 60 == 1)
+        fprintf (stderr, "client: motion #%d in popup %s at %.1f,%.1f\n",
+                 motion_events, popup->name, popup->pointer_x, popup->pointer_y);
+      return;
+    }
+
   pointer_x = wl_fixed_to_double (sx);
   pointer_y = wl_fixed_to_double (sy);
 
@@ -868,6 +1303,10 @@ pointer_button (void *data, struct wl_pointer *wl_pointer, uint32_t serial,
   fprintf (stderr, "client: button %u %s serial=%u mask=0x%x\n",
            button, state == WL_POINTER_BUTTON_STATE_PRESSED ? "down" : "up",
            serial, button_mask);
+
+  /* Every surface shows the held button, so a screenshot keeps the evidence of
+   * which one the press went to. */
+  popup_draw_all ();
 }
 
 static void
@@ -890,6 +1329,8 @@ pointer_frame (void *data, struct wl_pointer *wl_pointer)
 {
   if (mapped)
     draw ();
+
+  popup_draw_all ();
 }
 
 static void
@@ -958,7 +1399,12 @@ static void
 keyboard_enter (void *data, struct wl_keyboard *wl_keyboard, uint32_t serial,
                 struct wl_surface *wl_surface, struct wl_array *keys)
 {
-  fprintf (stderr, "client: keyboard enter serial=%u, %zu keys held\n",
+  struct _Popup *popup = popup_for_surface (wl_surface);
+
+  keyboard_surface = wl_surface;
+
+  fprintf (stderr, "client: keyboard enter on %s, serial=%u, %zu keys held\n",
+           popup ? popup->name : "the toplevel",
            serial, keys->size / sizeof (uint32_t));
 }
 
@@ -966,13 +1412,19 @@ static void
 keyboard_leave (void *data, struct wl_keyboard *wl_keyboard, uint32_t serial,
                 struct wl_surface *wl_surface)
 {
-  fprintf (stderr, "client: keyboard leave serial=%u\n", serial);
+  fprintf (stderr, "client: keyboard leave %s serial=%u\n",
+           popup_for_surface (wl_surface) ? "of the popup" : "of the toplevel",
+           serial);
+
+  if (wl_surface == keyboard_surface)
+    keyboard_surface = NULL;
 }
 
 static void
 keyboard_key (void *data, struct wl_keyboard *wl_keyboard, uint32_t serial,
               uint32_t time, uint32_t key, uint32_t state)
 {
+  struct _Popup *focus = popup_for_surface (keyboard_surface);
   char name[64] = "(none)";
   xkb_keysym_t sym = 0;
 
@@ -988,12 +1440,15 @@ keyboard_key (void *data, struct wl_keyboard *wl_keyboard, uint32_t serial,
 
   last_keysym = sym;
 
-  fprintf (stderr, "client: key %s evdev=%u keysym=%s mods=0x%x\n",
+  fprintf (stderr, "client: key %s evdev=%u keysym=%s on %s mods=0x%x\n",
            state == WL_KEYBOARD_KEY_STATE_PRESSED ? "down" : "up", key, name,
+           focus ? focus->name : "the toplevel",
            xkb_state ? xkb_state_serialize_mods (xkb_state, XKB_STATE_MODS_DEPRESSED) : 0u);
 
   if (mapped)
     draw ();
+
+  popup_draw_all ();
 }
 
 static void
@@ -1671,6 +2126,13 @@ main (int argc, char *argv[])
         use_cursor_shape = 1;
       else if (!strcmp (argv[i], "--cursor-surface"))
         use_cursor_surface = 1;
+      else if (!strcmp (argv[i], "--popup"))
+        use_popup = 1;
+      else if (!strcmp (argv[i], "--popup-reposition"))
+        {
+          use_popup = 1;
+          use_popup_reposition = 1;
+        }
       else
         fprintf (stderr, "client: ignoring unknown argument '%s'\n", argv[i]);
     }

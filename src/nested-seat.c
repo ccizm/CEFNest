@@ -234,20 +234,38 @@ seat_pointer_serial_is_current (struct wl_resource *pointer, uint32_t serial)
          sc->pointer_enter_serial == serial;
 }
 
+/* Pointer events carry coordinates inside the surface they are addressed to,
+ * while the widget reports them inside itself. A popup is drawn at an offset
+ * over its parent, so that offset comes off here — it is what makes a click
+ * land on the menu row the pointer is actually over. */
+static void
+pointer_local (NestedCompositor *self, NestedSurface *surface, double *x, double *y)
+{
+  int left = 0, above = 0;
+
+  nested_surface_get_position (surface, &left, &above);
+
+  *x = self->pointer_x - left;
+  *y = self->pointer_y - above;
+}
+
 static void
 pointer_send_enter (NestedCompositor *self, struct wl_resource *pointer,
                     NestedSurface *surface)
 {
   SeatClient *sc = wl_resource_get_user_data (pointer);
+  double local_x, local_y;
   uint32_t serial;
 
   if (!seat_surface_is_mine (pointer, surface))
     return;
 
+  pointer_local (self, surface, &local_x, &local_y);
+
   serial = nested_next_serial (self);
   wl_pointer_send_enter (pointer, serial, surface->wl_surface,
-                         wl_fixed_from_double (self->pointer_x),
-                         wl_fixed_from_double (self->pointer_y));
+                         wl_fixed_from_double (local_x),
+                         wl_fixed_from_double (local_y));
 
   if (wl_resource_get_version (pointer) >= WL_POINTER_FRAME_SINCE_VERSION)
     wl_pointer_send_frame (pointer);
@@ -321,13 +339,23 @@ keyboard_send_leave (NestedCompositor *self, struct wl_resource *keyboard,
 void
 seat_retarget (NestedCompositor *self)
 {
-  NestedSurface *target = self->primary;
+  /* The pointer belongs to whichever painted surface is under it: a menu drawn
+   * over the page takes it, and the page gets it back the moment the pointer
+   * steps off the menu. */
+  NestedSurface *pointer_target = self->pointer_wanted ?
+    nested_compositor_surface_at (self, self->pointer_x, self->pointer_y) : NULL;
+  /* Keys go where the client asked for them: a popup that grabbed the seat is
+   * that client's own modal, so it is focused ahead of the toplevel. */
+  NestedSurface *keyboard_target = self->keyboard_wanted ?
+    nested_compositor_keyboard_target (self) : NULL;
   SeatClient *sc;
 
-  if (target && (!target->mapped || !target->wl_surface))
-    target = NULL;
+  if (pointer_target && !pointer_target->wl_surface)
+    pointer_target = NULL;
+  if (keyboard_target && (!keyboard_target->mapped || !keyboard_target->wl_surface))
+    keyboard_target = NULL;
 
-  if (self->pointer_wanted && target != self->pointer_focus)
+  if (self->pointer_wanted && pointer_target != self->pointer_focus)
     {
       if (self->pointer_focus)
         {
@@ -338,12 +366,12 @@ seat_retarget (NestedCompositor *self)
               pointer_send_leave (self, sc->pointer, old);
           g_clear_object (&self->pointer_focus);
         }
-      if (target)
+      if (pointer_target)
         {
           wl_list_for_each (sc, &self->seat_clients, link)
             if (sc->pointer)
-              pointer_send_enter (self, sc->pointer, target);
-          g_set_object (&self->pointer_focus, target);
+              pointer_send_enter (self, sc->pointer, pointer_target);
+          g_set_object (&self->pointer_focus, pointer_target);
         }
 
       /* Whatever cursor the surface that just left had asked for is no longer
@@ -361,7 +389,7 @@ seat_retarget (NestedCompositor *self)
       cursor_reset (self);
     }
 
-  if (self->keyboard_wanted && target != self->keyboard_focus)
+  if (self->keyboard_wanted && keyboard_target != self->keyboard_focus)
     {
       if (self->keyboard_focus)
         {
@@ -372,12 +400,12 @@ seat_retarget (NestedCompositor *self)
               keyboard_send_leave (self, sc->keyboard, old);
           g_clear_object (&self->keyboard_focus);
         }
-      if (target)
+      if (keyboard_target)
         {
           wl_list_for_each (sc, &self->seat_clients, link)
             if (sc->keyboard)
-              keyboard_send_enter (self, sc->keyboard, target);
-          g_set_object (&self->keyboard_focus, target);
+              keyboard_send_enter (self, sc->keyboard, keyboard_target);
+          g_set_object (&self->keyboard_focus, keyboard_target);
         }
     }
   else if (!self->keyboard_wanted && self->keyboard_focus)
@@ -588,8 +616,14 @@ nested_compositor_notify_pointer_motion (NestedCompositor *self, double x, doubl
   self->pointer_x = x;
   self->pointer_y = y;
 
+  /* Which surface is under the pointer can change with the position: moving onto
+   * a menu enters it and moving off the menu enters the page again. */
+  seat_retarget (self);
+
   if (!self->pointer_focus)
     return;
+
+  pointer_local (self, self->pointer_focus, &x, &y);
 
   wl_list_for_each (sc, &self->seat_clients, link)
     {
@@ -611,11 +645,18 @@ nested_compositor_notify_pointer_button (NestedCompositor *self, uint32_t button
   SeatClient *sc;
   uint32_t serial = nested_next_serial (self);
   uint32_t time = nested_now_msec ();
+  double x, y;
 
   g_return_if_fail (NESTED_IS_COMPOSITOR (self));
 
+  /* A press can be the first event after the pointer moved, so the surface
+   * under it is worked out again rather than trusted from the last motion. */
+  seat_retarget (self);
+
   if (!self->pointer_focus)
     return;
+
+  pointer_local (self, self->pointer_focus, &x, &y);
 
   wl_list_for_each (sc, &self->seat_clients, link)
     {
@@ -626,6 +667,17 @@ nested_compositor_notify_pointer_button (NestedCompositor *self, uint32_t button
                                       : WL_POINTER_BUTTON_STATE_RELEASED);
       if (wl_resource_get_version (sc->pointer) >= WL_POINTER_FRAME_SINCE_VERSION)
         wl_pointer_send_frame (sc->pointer);
+    }
+
+  /* A press that did not land inside the grabbed popup is the dismissal the
+   * client is waiting for; it is sent after the press, so the page under the
+   * menu sees the click as well. */
+  if (pressed && self->pointer_focus != nested_compositor_keyboard_target (self))
+    {
+      xdg_popups_dismiss (self, self->pointer_focus);
+      /* The grab is gone, so keys belong to the page again right away: a client
+       * that keeps its menu surface alive would otherwise still hold them. */
+      seat_retarget (self);
     }
 
   nested_flush (self);

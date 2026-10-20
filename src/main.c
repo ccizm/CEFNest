@@ -379,10 +379,12 @@ dump_view (gpointer data)
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "hover <x> <y>",
- * "quit". This is how a headless run proves navigation, history and repaint all
- * work together. A "js" step is tagged with its own line number, which is what
- * comes back on ::script-result, so a result can be matched to the step that
- * asked for it. */
+ * "click <x> <y> [button]", "quit". This is how a headless run proves navigation,
+ * history and repaint all work together. A "js" step is tagged with its own line
+ * number, which is what comes back on ::script-result, so a result can be matched
+ * to the step that asked for it. The page steps need a helper session; "hover",
+ * "click", "shot" and "dump" work against any client, so the same script drives
+ * the nested compositor without Chromium. */
 typedef struct {
   GPtrArray *steps;
   guint index;
@@ -396,6 +398,23 @@ static gboolean
 script_wait_done (gpointer data)
 {
   script_run_next ();
+  return G_SOURCE_REMOVE;
+}
+
+/* BTN_LEFT, spelled out so the kernel headers stay out of the demo. */
+#define DEMO_BTN_LEFT 0x110
+
+/* The release goes out on its own so a press can be dispatched, and whatever
+ * popup it opened painted, before the click finishes. */
+static gboolean
+script_click_release (gpointer data)
+{
+  NestedCompositor *compositor = chromium_view_get_compositor (demo.view);
+
+  if (compositor)
+    nested_compositor_notify_pointer_button (compositor,
+                                             GPOINTER_TO_UINT (data), FALSE);
+
   return G_SOURCE_REMOVE;
 }
 
@@ -414,6 +433,17 @@ script_run_next (void)
   while (session_script.steps && session_script.index < session_script.steps->len)
     {
       const char *line = g_ptr_array_index (session_script.steps, session_script.index++);
+
+      /* Everything but the page commands works without a helper: a plain
+       * Wayland client can be driven through the same script. */
+      if (!demo.session && (!strncmp (line, "load ", 5) || !strncmp (line, "js ", 3) ||
+                            !strcmp (line, "back") || !strcmp (line, "forward") ||
+                            !strcmp (line, "reload") || !strcmp (line, "reload-hard") ||
+                            !strcmp (line, "stop")))
+        {
+          g_warning ("demo: '%s' needs a Chromium helper session", line);
+          continue;
+        }
 
       if (!strncmp (line, "wait ", 5))
         {
@@ -488,6 +518,31 @@ script_run_next (void)
           nested_compositor_notify_pointer_motion (compositor, x, y);
           continue;
         }
+      else if (!strncmp (line, "click ", 6))
+        {
+          int x = 0, y = 0, button = DEMO_BTN_LEFT;
+
+          if (sscanf (line + 6, "%d %d %d", &x, &y, &button) < 2)
+            {
+              g_warning ("demo: click wants '<x> <y> [button]', got '%s'", line);
+              continue;
+            }
+
+          compositor = chromium_view_get_compositor (demo.view);
+          if (!compositor)
+            {
+              g_warning ("demo: no nested compositor to click on");
+              continue;
+            }
+
+          /* A right click is how a page opens a context menu, and the menu is
+           * only reachable if the press lands on the surface under the pointer. */
+          nested_compositor_set_pointer_active (compositor, TRUE);
+          nested_compositor_notify_pointer_motion (compositor, x, y);
+          nested_compositor_notify_pointer_button (compositor, (uint32_t) button, TRUE);
+          g_timeout_add (80, script_click_release, GUINT_TO_POINTER ((uint32_t) button));
+          continue;
+        }
       else if (!strcmp (line, "quit"))
         {
           break;
@@ -509,7 +564,7 @@ start_session_script (void)
   GError *error = NULL;
   guint i;
 
-  if (!path || !*path || !demo.session)
+  if (!path || !*path)
     return;
 
   if (!g_file_get_contents (path, &text, NULL, &error))
@@ -663,8 +718,7 @@ activate (GApplication *application, gpointer data)
   setup_clipboard_test ();
   if (!use_session)
     spawn_client (NULL, NULL);
-  else
-    start_session_script ();
+  start_session_script ();
 
   {
     const char *path = g_getenv ("CHROMIUM_DUMP");

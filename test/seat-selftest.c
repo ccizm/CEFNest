@@ -5,12 +5,18 @@
  *
  * The composition steps stand in for a real input method: they call the same
  * emitter the embedding widget does, so a client's preedit and commits are
- * evidence of the zwp_text_input_v3 round trip. */
+ * evidence of the zwp_text_input_v3 round trip.
+ *
+ * With a client that opens popups (--popup), the stack steps print where the
+ * compositor placed them and a second PNG is composited from the whole stack,
+ * which is what the embedding widget draws. */
 #define G_LOG_DOMAIN "seat-selftest"
 
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#include <cairo.h>
 
 #include "nested.h"
 
@@ -20,6 +26,7 @@
 typedef enum {
   STEP_SETTLE,
   STEP_POINTER_ENTER,
+  STEP_POINTER_MOTION,
   STEP_KEYBOARD_ENTER,
   STEP_KEYBOARD_LEAVE,
   STEP_BUTTON_PRESS,
@@ -31,8 +38,10 @@ typedef enum {
   STEP_TI_PREEDIT,
   STEP_TI_COMMIT,
   STEP_TI_DELETE,
+  STEP_STACK,
   STEP_DUMP,
   STEP_DUMP_TI,
+  STEP_DUMP_COMPOSITE,
   N_STEP_KINDS
 } StepKind;
 
@@ -45,6 +54,8 @@ typedef struct {
 
 static const Step script[] = {
   { STEP_SETTLE,          0,   0, 800 }, /* let the client map and draw */
+  { STEP_STACK,           0,   0,   0 }, /* where the popups were placed */
+  { STEP_DUMP_COMPOSITE,  1,   0,  60 },
   { STEP_POINTER_ENTER, 300, 200,  60 },
   { STEP_KEYBOARD_ENTER,  0,   0,  60 },
   { STEP_BUTTON_PRESS, BTN_LEFT, 1, 60 },
@@ -60,13 +71,21 @@ static const Step script[] = {
   { STEP_DUMP_TI,         0,   0,   0 },
   { STEP_KEYBOARD_LEAVE,  0,   0,  80 },
   { STEP_SETTLE,          0,   0, 120 },
-  { STEP_BUTTON_RELEASE, BTN_LEFT, 0, 0 },
+  { STEP_BUTTON_RELEASE, BTN_LEFT, 0, 60 },
+  /* Off the menu, and a press there: xdg_popup.grab means the compositor owns
+   * the dismissal, so the client should report popup_done for the menu. */
+  { STEP_POINTER_MOTION,   60,  60, 80 },
+  { STEP_BUTTON_PRESS, BTN_LEFT,  1, 60 },
+  { STEP_BUTTON_RELEASE, BTN_LEFT, 0, 120 },
+  { STEP_STACK,           0,   0,   0 },
+  { STEP_DUMP_COMPOSITE,  2,   0,   0 },
 };
 
 static const char *step_names[N_STEP_KINDS] = {
-  "settle", "pointer-enter", "keyboard-enter", "keyboard-leave", "button-press",
-  "button-release", "axis", "key-down", "key-up", "text-input-state",
-  "preedit", "commit", "delete-surrounding", "dump", "dump-text-input",
+  "settle", "pointer-enter", "pointer-motion", "keyboard-enter", "keyboard-leave",
+  "button-press", "button-release", "axis", "key-down", "key-up",
+  "text-input-state", "preedit", "commit", "delete-surrounding", "stack",
+  "dump", "dump-text-input", "dump-composite",
 };
 
 #define PREEDIT_TEXT "nihao"
@@ -77,6 +96,7 @@ static GSubprocess *child;
 static size_t step_index;
 static char *dump_path;
 static char *dump_ti_path;
+static char *dump_composite_path;
 
 static void
 save_texture (const char *path)
@@ -98,6 +118,113 @@ save_texture (const char *path)
              gdk_texture_get_height (texture));
 }
 
+/* What the embedding widget sees: the toplevel plus every popup the compositor
+ * placed over it, in draw order. Printing it is the direct check of the
+ * positioner rules the client handed over. */
+static void
+print_stack (void)
+{
+  GList *stack = nested_compositor_get_paint_stack (compositor);
+  GList *l;
+  int i = 0;
+
+  for (l = stack; l; l = l->next, i++)
+    {
+      NestedSurface *surface = l->data;
+      int width = 0, height = 0, x = 0, y = 0;
+      const char *app_id = nested_surface_get_app_id (surface);
+
+      nested_surface_get_size (surface, &width, &height);
+      nested_surface_get_position (surface, &x, &y);
+
+      g_print ("selftest: stack[%d] %s at %d,%d size %dx%d\n", i,
+               app_id ? app_id : "(popup)", x, y, width, height);
+    }
+
+  g_print ("selftest: %d surfaces painted\n", i);
+
+  g_list_free_full (stack, g_object_unref);
+}
+
+/* The same stack the widget would snapshot, drawn here in memory so a run
+ * leaves one picture with the menus where the compositor put them. */
+static void
+save_composite (const char *path)
+{
+  GList *stack = nested_compositor_get_paint_stack (compositor);
+  GList *l;
+  cairo_surface_t *image;
+  cairo_t *cr;
+  int width = 0, height = 0;
+
+  if (!stack)
+    {
+      g_printerr ("selftest: nothing painted, cannot composite\n");
+      return;
+    }
+
+  /* The bottom of the stack is the toplevel, and that is the picture's size. */
+  nested_surface_get_size ((NestedSurface *) stack->data, &width, &height);
+
+  image = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, width, height);
+  cr = cairo_create (image);
+
+  for (l = stack; l; l = l->next)
+    {
+      NestedSurface *surface = l->data;
+      GdkTexture *texture = nested_surface_get_texture (surface);
+      graphene_rect_t src, dst;
+      unsigned char *pixels;
+      cairo_surface_t *layer;
+      double scale_x, scale_y;
+      int x = 0, y = 0, stride;
+
+      if (!texture)
+        continue;
+
+      nested_surface_get_position (surface, &x, &y);
+      nested_surface_get_paint_rect (surface, &src, &dst);
+
+      stride = gdk_texture_get_width (texture) * 4;
+      pixels = g_malloc ((size_t) stride * gdk_texture_get_height (texture));
+      gdk_texture_download (texture, pixels, stride);
+
+      /* gdk_texture_download hands back B8G8R8A8, which is cairo's native
+       * ARGB32 on this architecture. */
+      layer = cairo_image_surface_create_for_data (pixels, CAIRO_FORMAT_ARGB32,
+                                                   gdk_texture_get_width (texture),
+                                                   gdk_texture_get_height (texture),
+                                                   stride);
+      scale_x = dst.size.width / src.size.width;
+      scale_y = dst.size.height / src.size.height;
+
+      cairo_save (cr);
+      cairo_rectangle (cr, x + dst.origin.x, y + dst.origin.y,
+                       dst.size.width, dst.size.height);
+      cairo_clip (cr);
+      cairo_translate (cr, x + dst.origin.x - src.origin.x * scale_x,
+                           y + dst.origin.y - src.origin.y * scale_y);
+      cairo_scale (cr, scale_x, scale_y);
+      cairo_set_source_surface (cr, layer, 0, 0);
+      cairo_paint (cr);
+      cairo_restore (cr);
+
+      cairo_surface_destroy (layer);
+      g_free (pixels);
+    }
+
+  cairo_destroy (cr);
+
+  if (cairo_surface_write_to_png (image, path) != CAIRO_STATUS_SUCCESS)
+    g_printerr ("selftest: cannot write %s\n", path);
+  else
+    g_print ("selftest: wrote composite %s (%dx%d, %d surfaces)\n", path,
+             width, height, g_list_length (stack));
+
+  cairo_surface_destroy (image);
+  g_list_free_full (stack, g_object_unref);
+}
+
 static gboolean
 run_step (gpointer data)
 {
@@ -110,6 +237,9 @@ run_step (gpointer data)
     {
     case STEP_POINTER_ENTER:
       nested_compositor_set_pointer_active (compositor, TRUE);
+      nested_compositor_notify_pointer_motion (compositor, step->a, step->b);
+      break;
+    case STEP_POINTER_MOTION:
       nested_compositor_notify_pointer_motion (compositor, step->a, step->b);
       break;
     case STEP_KEYBOARD_ENTER:
@@ -158,11 +288,24 @@ run_step (gpointer data)
     case STEP_TI_DELETE:
       nested_compositor_delete_surrounding_text (compositor, step->a, step->b);
       break;
+    case STEP_STACK:
+      print_stack ();
+      break;
     case STEP_DUMP:
       save_texture (dump_path);
       break;
     case STEP_DUMP_TI:
       save_texture (dump_ti_path);
+      break;
+    case STEP_DUMP_COMPOSITE:
+      {
+        /* One picture per step, so the run leaves the stack both before the
+         * dismissal and after it. */
+        char *path = g_strdup_printf ("%s.%d.png", dump_composite_path, step->a);
+
+        save_composite (path);
+        g_free (path);
+      }
       break;
     default:
       break;
@@ -197,10 +340,17 @@ main (int argc, char *argv[])
   /* The composition frames go beside the plain one, with the same name plus a
    * mark, so a run leaves both pictures. */
   if (g_str_has_suffix (dump_path, ".png"))
-    dump_ti_path = g_strdup_printf ("%.*s.text-input.png",
-                                    (int) strlen (dump_path) - 4, dump_path);
+    {
+      dump_ti_path = g_strdup_printf ("%.*s.text-input.png",
+                                      (int) strlen (dump_path) - 4, dump_path);
+      dump_composite_path = g_strdup_printf ("%.*s.composite",
+                                             (int) strlen (dump_path) - 4, dump_path);
+    }
   else
-    dump_ti_path = g_strdup_printf ("%s.text-input.png", dump_path);
+    {
+      dump_ti_path = g_strdup_printf ("%s.text-input.png", dump_path);
+      dump_composite_path = g_strdup_printf ("%s.composite", dump_path);
+    }
 
   compositor = nested_compositor_new (&error);
   if (!compositor)
@@ -252,6 +402,7 @@ main (int argc, char *argv[])
   g_object_unref (child);
   g_object_unref (compositor);
   g_free (dump_ti_path);
+  g_free (dump_composite_path);
 
   return 0;
 }

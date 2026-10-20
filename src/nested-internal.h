@@ -40,6 +40,17 @@ typedef struct {
   uint64_t modifier;
 } DmabufFormat;
 
+/* The placement rules a client writes into an xdg_positioner. They are copied
+ * out at get_popup and at every reposition, because the protocol lets the
+ * client destroy the positioner as soon as it has been named, and a later
+ * re-place still has to work from them. */
+typedef struct {
+  int32_t size_width, size_height;
+  int32_t rect_x, rect_y, rect_width, rect_height;
+  int32_t offset_x, offset_y;
+  uint32_t anchor, gravity, constraint;
+} PositionerRules;
+
 struct _Buffer {
   Pool *pool;                 /* shm only */
   struct wl_resource *resource;
@@ -102,17 +113,37 @@ struct _NestedSurface {
   int height;
   int natural_width;         /* buffer size divided by scale */
   int natural_height;
-  int geom_width;
-  int geom_height;
+  int32_t geom_x;            /* xdg_surface.set_window_geometry */
+  int32_t geom_y;
+  int32_t geom_width;
+  int32_t geom_height;
   int32_t scale;             /* wl_surface.set_buffer_scale */
 
   char *app_id;
   char *title;
 
+  /* Popup placement. The rules are copied out of the client's xdg_positioner
+   * when it names them, and popup_x/popup_y are what they work out to: the
+   * surface's top-left, in the parent surface's logical pixels. A toplevel is
+   * at 0,0 with no parent. */
+  PositionerRules positioner;
+  /* The parent keeps its children in the order they are drawn, so the last one
+   * is the topmost. The child holds the reference that keeps the parent
+   * alive, which is what makes popup_parent safe to read. */
+  NestedSurface *popup_parent;
+  struct wl_list popup_children;  /* NestedSurface.popup_link */
+  struct wl_list popup_link;
+  int popup_x;
+  int popup_y;
+
   uint32_t configure_serial;
   unsigned int is_toplevel : 1;
   unsigned int is_popup : 1;
   unsigned int mapped : 1;
+  /* xdg_popup.grab arrived: while it is held the client expects the pointer and
+   * keyboard over this surface for the whole window, and a press that lands
+   * outside it is meant to dismiss the menu. */
+  unsigned int popup_grabbed : 1;
 };
 
 struct _NestedCompositor {
@@ -212,6 +243,17 @@ struct _NestedCompositor {
 /* nested.c */
 void           nested_flush            (NestedCompositor *self);
 void           nested_update_primary   (NestedCompositor *self);
+/* A surface tree change (a popup mapped, a toplevel gone) both retargets the
+ * seat and tells the widget to draw again. */
+void           nested_surfaces_changed (NestedCompositor *self);
+/* The painted surface under a point in the widget's logical pixels, or NULL.
+ * Popups sit on the toplevel, so this is where the pointer learns what it is
+ * really over. */
+NestedSurface *nested_compositor_surface_at (NestedCompositor *self,
+                                             double x, double y);
+/* Where the keyboard belongs: the topmost popup that asked for a grab, since
+ * that is the client's own idea of a modal menu, and otherwise the toplevel. */
+NestedSurface *nested_compositor_keyboard_target (NestedCompositor *self);
 void           nested_notify_text_input_state (NestedCompositor *self);
 NestedSurface *surface_from_resource   (struct wl_resource *where,
                                         struct wl_resource *resource);
@@ -268,6 +310,16 @@ void        output_send_state_all (NestedCompositor *self);
 void        xdg_wm_base_bind      (struct wl_client *client, void *data,
                                    uint32_t version, uint32_t id);
 void        xdg_surface_configure (NestedSurface *self);
+/* Work a popup's copied-out positioner rules into popup_x/popup_y. Called when
+ * the client names the rules and again whenever the surface it hangs off
+ * changes size, because the anchor rectangle lives in the parent. */
+void        xdg_popup_replace     (NestedSurface *self);
+/* Reposition every popup mapped over @surface, bottommost first. */
+void        xdg_popups_replace    (NestedSurface *surface);
+/* The client's grab is over: xdg_popup.popup_done, which is how it learns the
+ * menu it opened has been dismissed. */
+void        xdg_popups_dismiss    (NestedCompositor *self,
+                                   NestedSurface *keep);
 
 /* nested-text-input.c */
 void        text_input_manager_bind  (struct wl_client *client, void *data,

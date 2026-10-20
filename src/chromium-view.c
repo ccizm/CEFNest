@@ -33,36 +33,23 @@ chromium_view_measure (GtkWidget *widget,
   *natural = 960;
 }
 
+/* Paint one surface of the stack at its offset inside the widget. Surface-local
+ * pixels are the widget's logical pixels, so the texture lands at its own scale:
+ * a client that renders a 1.25x buffer and scales it down with wp_viewport comes
+ * out 1:1 on the real display. */
 static void
-chromium_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
+snapshot_surface (GtkSnapshot *snapshot, NestedSurface *surface, int x, int y)
 {
-  ChromiumView *self = CHROMIUM_VIEW (widget);
-  NestedSurface *surface = NULL;
-  GdkTexture *texture = NULL;
-  graphene_rect_t src, dst;
-  graphene_rect_t bounds;
+  GdkTexture *texture = nested_surface_get_texture (surface);
+  graphene_rect_t src, dst, bounds;
   double scale_x, scale_y;
 
-  if (self->compositor)
-    surface = nested_compositor_get_surface (self->compositor);
-  if (surface)
-    texture = nested_surface_get_texture (surface);
-
   if (!texture)
-    {
-      GdkRGBA background = { 0.07f, 0.07f, 0.09f, 1.0f };
+    return;
 
-      graphene_rect_init (&bounds, 0, 0,
-                          gtk_widget_get_width (widget),
-                          gtk_widget_get_height (widget));
-      gtk_snapshot_append_color (snapshot, &background, &bounds);
-      return;
-    }
-
-  /* Surface-local pixels are the widget's logical pixels, so the texture lands
-   * on the snapshot at its own scale: a client that renders a 1.25x buffer and
-   * scales it down with wp_viewport comes out 1:1 on the real display. */
   nested_surface_get_paint_rect (surface, &src, &dst);
+  dst.origin.x += x;
+  dst.origin.y += y;
   scale_x = dst.size.width / src.size.width;
   scale_y = dst.size.height / src.size.height;
 
@@ -80,6 +67,41 @@ chromium_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
                       gdk_texture_get_height (texture) * scale_y);
   gtk_snapshot_append_texture (snapshot, texture, &bounds);
   gtk_snapshot_pop (snapshot);
+}
+
+static void
+chromium_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
+{
+  ChromiumView *self = CHROMIUM_VIEW (widget);
+  GList *stack = NULL, *l;
+
+  if (self->compositor)
+    stack = nested_compositor_get_paint_stack (self->compositor);
+
+  if (!stack)
+    {
+      GdkRGBA background = { 0.07f, 0.07f, 0.09f, 1.0f };
+      graphene_rect_t bounds;
+
+      graphene_rect_init (&bounds, 0, 0,
+                          gtk_widget_get_width (widget),
+                          gtk_widget_get_height (widget));
+      gtk_snapshot_append_color (snapshot, &background, &bounds);
+      return;
+    }
+
+  /* Bottommost first, so a context menu ends up on top of the page it belongs
+   * to and each layer overwrites what the rules placed under it. */
+  for (l = stack; l; l = l->next)
+    {
+      NestedSurface *surface = l->data;
+      int x = 0, y = 0;
+
+      nested_surface_get_position (surface, &x, &y);
+      snapshot_surface (snapshot, surface, x, y);
+    }
+
+  g_list_free_full (stack, g_object_unref);
 }
 
 /* BTN_* from linux/input-event-codes.h, spelled out so the kernel headers stay
