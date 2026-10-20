@@ -70,16 +70,22 @@ time — nothing is checked in).
 Two stages, and the first is optional.
 
 ```bash
-# 1. the Chromium side — needs a CEF binary distribution
-cmake -S helper -B helper/build \
-      -DCEF_ROOT=/path/to/cef_binary_154.0.34+g14c5a08+chromium-154.0.8037.98_linux64_minimal \
-      -DCMAKE_BUILD_TYPE=Release
-cmake --build helper/build --config Release -j
+# 1. fetch the pinned CEF binary distribution (gitignored, ~500 MB unpacked)
+./scripts/fetch-cef.sh
 
-# 2. the widget, the demo, the tests
+# 2. the Chromium side — picks up third_party/cef/dist automatically
+cmake -S helper -B helper/build -DCMAKE_BUILD_TYPE=Release
+cmake --build helper/build -j
+
+# 3. the widget, the demo, the tests
 meson setup builddir
 ninja -C builddir
 ```
+
+`scripts/fetch-cef.sh` pins the exact CEF build; a different distribution can
+be passed with `-DCEF_ROOT=…`. Bumping the pinned version means re-running the
+full gate — a Chromium milestone also changes what Wayland protocols the
+client asks for (docs/protocol-ceilings.md is the re-measurement record).
 
 Skip stage 1 and everything still builds: the demo then drives
 `test/shm-client` instead of Chromium, which is enough to exercise the

@@ -13,10 +13,16 @@ endif()
 if(NOT CEF_ROOT AND DEFINED ENV{CEF_ROOT})
   set(CEF_ROOT "$ENV{CEF_ROOT}")
 endif()
+# The repository ships without the CEF binary distribution (third_party/ is
+# gitignored). scripts/fetch-cef.sh fills third_party/cef/dist in, and that
+# fixed path is the default so a plain cmake run works after fetching.
+if(NOT CEF_ROOT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cef/dist")
+  set(CEF_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cef/dist")
+endif()
 if(NOT CEF_ROOT)
   message(FATAL_ERROR
-    "CEF_ROOT is not set. Pass -DCEF_ROOT=/path/to/cef_binary_... "
-    "or export CEF_ROOT.")
+    "CEF_ROOT is not set and third_party/cef/dist is missing. "
+    "Run scripts/fetch-cef.sh, or pass -DCEF_ROOT=/path/to/cef_binary_... .")
 endif()
 get_filename_component(CEF_ROOT "${CEF_ROOT}" ABSOLUTE)
 
