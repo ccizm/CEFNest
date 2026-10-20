@@ -13,6 +13,13 @@
 #define HELPER_PATH "cefnest-helper"
 #endif
 
+/* The helper cmake built in the tree this was compiled in, which is what lets a
+ * development run work without an install step — and what must not quietly win
+ * after an install, because then the component runs the wrong build. */
+#ifndef HELPER_DEVELOPMENT
+#define HELPER_DEVELOPMENT ""
+#endif
+
 /* The session is the host half of the control channel. It listens on a private
  * unix socket, hands the path to the helper through the environment, and keeps
  * the page state the helper reports: URL, title, loading, history. The widget
@@ -1646,14 +1653,41 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
+/* Where the helper is, in the order the ways of being wrong about it are worth
+ * ruling out. CEFNEST_HELPER is the path written down on purpose;
+ * CHROMIUM_HELPER flips the demo into session mode as often as it names a
+ * binary, so only a value that looks like a path counts as one there. After
+ * those two, both remaining candidates are guesses, and the configured install
+ * path goes first: a run that quietly picked up the development build after an
+ * install is a run of the wrong Chromium. */
+static char *
+session_find_helper (void)
+{
+  const char *env = g_getenv ("CEFNEST_HELPER");
+
+  if (env && strchr (env, '/'))
+    return g_strdup (env);
+
+  env = g_getenv ("CHROMIUM_HELPER");
+  if (env && strchr (env, '/'))
+    return g_strdup (env);
+
+  if (g_file_test (HELPER_PATH, G_FILE_TEST_IS_EXECUTABLE))
+    return g_strdup (HELPER_PATH);
+
+  if (*HELPER_DEVELOPMENT &&
+      g_file_test (HELPER_DEVELOPMENT, G_FILE_TEST_IS_EXECUTABLE))
+    return g_strdup (HELPER_DEVELOPMENT);
+
+  /* Nothing to start. Name the path this build was configured with, because
+   * that is the one a packager can compare against where they actually put it. */
+  return g_strdup (HELPER_PATH);
+}
+
 static void
 chromium_session_init (ChromiumSession *self)
 {
-  /* CHROMIUM_HELPER flips the demo into session mode, so its value is a flag
-   * as often as a path; only something that looks like a path wins. */
-  const char *env = g_getenv ("CHROMIUM_HELPER");
-
-  self->helper_path = g_strdup (env && strchr (env, '/') ? env : HELPER_PATH);
+  self->helper_path = session_find_helper ();
   self->uri = g_strdup ("");
   self->title = g_strdup ("");
   self->cancellable = g_cancellable_new ();

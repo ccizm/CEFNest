@@ -1,0 +1,27 @@
+# The helper is not built by meson: it is a CEF application built by cmake in
+# helper/. Everything here is about where the component looks for it once the
+# tree it was built in is no longer the tree it runs from.
+option(
+  'helper-path',
+  type: 'string',
+  value: '',
+  description: 'Absolute path of the cefnest-helper binary a ChromiumSession starts when neither CHROMIUM_HELPER nor chromium_session_new() names one. Empty derives it from the install prefix and the host architecture.',
+)
+option(
+  'helper-build-dir',
+  type: 'string',
+  value: 'helper/build/Release',
+  description: 'The cmake output directory holding the built helper, relative to the source root. Used as the development fallback and as what --install-helper copies.',
+)
+option(
+  'install-helper',
+  type: 'boolean',
+  value: false,
+  description: 'Install the helper and the CEF runtime files that have to sit next to it. Off by default: that is the whole Chromium build, over a gigabyte.',
+)
+option(
+  'install-demo',
+  type: 'boolean',
+  value: true,
+  description: 'Install cefnest-demo, which is the sample app and every test/*.sh gate driver.',
+)

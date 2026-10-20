@@ -59,7 +59,7 @@ Measured on the development machine (Debian 13, `linux 6.12`):
 | xkbcommon | 1.7.0 | — |
 | gbm / libdrm | 25.0.7 / 2.4.124 | — |
 | json-glib | 1.10.6 | — |
-| meson / ninja / cmake | 1.x / 1.12 / 3.16+ | — |
+| meson / ninja / cmake | 1.7 / 1.12 / 3.16+ | meson 1.3 (the demo's `$ORIGIN` rpath is built with `fs.relative_to`) |
 | CEF (`cef_binary_*_linux64_minimal`) | 154.0.34+g14c5a08+chromium-154.0.8037.98 | any that builds against its own CMake helpers |
 
 `wayland-scanner` must be on `PATH` (it generates the protocol code at build
@@ -91,24 +91,52 @@ Skip stage 1 and everything still builds: the demo then drives
 `test/shm-client` instead of Chromium, which is enough to exercise the
 compositor, the seat, the clipboard bridge and the popups.
 
+## Install
+
+The component installs as a shared library with a pkg-config file, headers, and
+the demo; `docs/packaging.md` is the write-up of where each piece goes and of how
+a session decides which helper binary to start.
+
+```bash
+meson setup builddir -Dprefix=$HOME/.local/cefnest-stage -Dinstall-helper=true
+ninja -C builddir install
+```
+
+| Option | Default | What it decides |
+| --- | --- | --- |
+| `helper-path` | empty, derived from `prefix` + `libexecdir` + the host architecture | the path compiled into the library, used when nothing names one |
+| `helper-build-dir` | `helper/build/Release` | what cmake left behind: the development fallback, and what gets installed |
+| `install-helper` | `false` | also install the helper and the whole CEF runtime next to it — 1.5 GB, so it is opt-in |
+| `install-demo` | `true` | install `cefnest-demo`, and the `shm-client` it falls back to when there is no Chromium |
+
+`install-helper` on a tree where cmake has not run is a configure-time error, not
+an empty directory with a confident "Installing subdir" line above it.
+
 ## Run
 
 ```bash
-# no Chromium involved: the nested compositor embeds test/shm-client
-./builddir/src/cefnest-demo
+# the real thing — no environment needed once cmake has built the helper,
+# because the library finds it (docs/packaging.md §2)
+CHROMIUM_URL=https://example.com ./builddir/src/cefnest-demo
 
-# the real thing
-CHROMIUM_HELPER=$PWD/helper/build/Release/cefnest-helper \
-CHROMIUM_URL=https://example.com \
-./builddir/src/cefnest-demo
+# no Chromium involved: name a helper that does not exist, and the demo falls
+# back to driving test/shm-client through the nested compositor
+CEFNEST_HELPER=/nonexistent-helper ./builddir/src/cefnest-demo
+
+# an installed one, from a prefix, with nothing in the environment
+CHROMIUM_URL=https://example.com $HOME/.local/cefnest-stage/bin/cefnest-demo
 ```
+
+`CHROMIUM_HELPER` still forces session mode with any value at all, which is how
+`test/fake-helper.py` is driven through a script without a browser anywhere.
 
 The demo reads its whole configuration from the environment, because the point
 of it is reproducible runs:
 
 | Variable | What it does |
 | --- | --- |
-| `CHROMIUM_HELPER` | set (any value containing `/`) to enter session mode; the default is the path compiled in `src/meson.build` |
+| `CHROMIUM_HELPER` | set (to anything) to force session mode; a path here must contain `/`, and it is used as written even when it does not exist |
+| `CEFNEST_HELPER` | the same rule one step earlier: a path with `/` in it wins over `CHROMIUM_HELPER`. With neither set, the library resolves the helper itself — compiled-in install path, then the cmake tree it was built next to (`docs/packaging.md`) |
 | `CHROMIUM_URL` | page to open |
 | `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `drop-in <x0> <y0> <x1> <y1> [text] [mimes]`, `drop-in-hold`, `drop-in-move <x> <y>`, `drop-in-drop`, `drop-in-cancel`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `perm-accept <id>`, `perm-deny <id>`, `perm-dismiss <id>`, `close`, `quit` — see `test/*.session` |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
@@ -124,9 +152,10 @@ of it is reproducible runs:
 ## Test
 
 ```bash
-meson test -C builddir                       # 12 tests
+meson test -C builddir                       # 13 tests
 meson test -C builddir --suite selftest      # the eleven seat selftests
 meson test -C builddir --suite protocol      # the implementation-slot audit
+meson test -C builddir --suite unit          # the helper-path resolution rule
 ```
 
 `seat-selftest` starts the nested compositor, launches `shm-client` against it,
@@ -277,6 +306,18 @@ mode now starts the script from `::ready`.
 
 ## Using it as a library
 
+`meson install` puts `libcefnest.so` in `libdir`, three headers in
+`includedir/cefnest` (`nested.h`, `chromium-view.h`, `chromium-session.h`) and
+`cefnest.pc` under it, so a host builds with `pkg-config`:
+
+```bash
+cc host.c -o host $(pkg-config --cflags --libs cefnest)
+```
+
+A binary that lives outside the prefix still needs `LD_LIBRARY_PATH` or an
+`ldconfig` entry — the installed demo does not, because its `DT_RUNPATH` is
+`$ORIGIN`-relative (`docs/packaging.md` §4).
+
 ```c
 GtkWidget        *view    = g_object_new (CHROMIUM_TYPE_VIEW, NULL);
 ChromiumSession  *session = chromium_session_new (NULL);
@@ -363,6 +404,7 @@ They are the record of *why* the code is shaped like this:
 | `drag-loop.md` | the in-page drag choreography, the measured proof that a `wl_data_device.enter` reaches the page, what the destination actually accepts, why the fd relay is not what carries a same-page payload, how a drag that crosses the window edge is read off the page's source and handed to the host, and how the same crossing in reverse makes the compositor the source — including the measurement that says a page reads a host drag the moment it is entered, so only `finish` can decide the verdict |
 | `context-menu.md` | the one constraint that decided the whole design (Chromium holds a single unanswered menu request), what CEF's default model really contains — the same five rows for a link, an image and a blank page — and `Continue(id)` proven inside the page |
 | `permission-prompt.md` | which asks never reach the host at all, the two queues that make an unanswered request cost the page its next question too, and why `accept` can only ever mean "the whole mask" |
+| `packaging.md` | what installs where, the five-step rule by which a session finds its helper, why `get_option('libexecdir')` must be joined to the prefix before it is compiled in, and the two fallbacks that deliberately run in opposite directions |
 
 ## Known limitations
 

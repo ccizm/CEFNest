@@ -3,7 +3,7 @@ project(
   'c',
   version: '0.0.1',
   license: 'LGPL-2.1-only',
-  meson_version: '>=1.0',
+  meson_version: '>= 1.3.0',
   default_options: ['c_std=gnu11', 'warning_level=2', 'buildtype=debugoptimized'],
 )
 
@@ -15,6 +15,8 @@ xkb_dep = dependency('xkbcommon')
 gbm_dep = dependency('gbm')
 drm_dep = dependency('libdrm')
 threads_dep = dependency('threads')
+pkgconfig = import('pkgconfig')
+fs = import('fs')
 # math.h is not part of glibc's default link set, and rounding a wheel detent
 # into 120ths is the only thing that needs it.
 m_dep = meson.get_compiler('c').find_library('m', required: false)
@@ -23,6 +25,31 @@ wayland_scanner = find_program('wayland-scanner')
 add_project_arguments ('-Wno-unused-parameter', language: 'c')
 protocols_dir = run_command('pkg-config', '--variable=pkgdatadir', 'wayland-protocols', check: true).stdout().strip()
 xdg_shell_xml = protocols_dir / 'stable/xdg-shell/xdg-shell.xml'
+
+# The helper is a CEF application, so it drags the whole Chromium runtime with
+# it, and that runtime is architecture-specific. Installing it under a directory
+# named after the architecture is what lets two builds share one prefix instead
+# of overwriting each other's libcef.so; the component then asks for the one its
+# own host machine names, which is the same value the install rule below uses.
+# get_option() hands these directories back relative to the prefix, which is
+# what an install rule wants and what a path baked into a binary is not: the
+# component would otherwise go looking for its helper under whatever directory
+# the browser happened to be started from.
+helper_arch = host_machine.cpu_family()
+helper_install_dir = get_option('prefix') / get_option('libexecdir') / 'cefnest' / helper_arch
+if get_option('helper-path') == ''
+  helper_default_path = helper_install_dir / 'cefnest-helper'
+else
+  helper_default_path = get_option('helper-path')
+endif
+# What cmake leaves behind in the source tree: the built helper and every runtime
+# file it needs, already next to each other and already found through $ORIGIN.
+helper_build_dir = meson.current_source_dir() / get_option('helper-build-dir')
+helper_build_path = helper_build_dir / 'cefnest-helper'
+# The demo's other client, the one it drives when there is no Chromium to start.
+# It is not architecture-specific, so it sits in libexecdir itself rather than in
+# the per-architecture directory next door.
+client_install_path = get_option('prefix') / get_option('libexecdir') / 'cefnest' / 'shm-client'
 
 gen_inc = include_directories('.')
 

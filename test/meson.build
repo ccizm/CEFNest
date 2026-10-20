@@ -8,16 +8,35 @@ shm_client = executable(
     cursor_shape_client_header, cursor_shape_code, tablet_code ],
   include_directories: gen_inc,
   dependencies: [ wl_client_dep, xkb_dep, gbm_dep, drm_dep ],
-  install: false,
+  # The demo falls back to this client when it has no helper to start, so an
+  # installed demo needs it; the build tree copy is what every run uses in place.
+  install: get_option('install-demo'),
+  install_dir: get_option('prefix') / get_option('libexecdir') / 'cefnest',
 )
 
 seat_selftest = executable(
   'seat-selftest',
   [ 'seat-selftest.c' ],
-  dependencies: [ libnested_dep, gtk_dep ],
+  dependencies: [ libcefnest_dep, gtk_dep ],
   c_args: [ '-DCLIENT_PATH="' + meson.current_build_dir() + '/shm-client"' ],
   install: false,
 )
+
+# The helper is a separate binary, so finding it is a rule rather than a
+# default; this checks the rule against the same two paths the library was
+# configured with, with no display and no Chromium in the loop.
+helper_path = executable(
+  'helper-path',
+  [ 'helper-path.c' ],
+  c_args: [
+    '-DHELPER_PATH="' + helper_default_path + '"',
+    '-DHELPER_DEVELOPMENT="' + helper_build_path + '"',
+  ],
+  dependencies: [ libcefnest_dep, gtk_dep, json_dep ],
+  install: false,
+)
+
+test('helper-path', helper_path, suite: 'unit', timeout: 30)
 
 # Replays evdev events through /dev/uinput, so the widget -> nested seat path
 # can be driven without a hand on the real devices. Needs write access to the

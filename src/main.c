@@ -37,6 +37,10 @@ static Demo demo;
 #define CLIENT_PATH "shm-client"
 #endif
 
+#ifndef CLIENT_DEVELOPMENT
+#define CLIENT_DEVELOPMENT ""
+#endif
+
 static void session_ready (ChromiumSession *session, gpointer data);
 
 static void
@@ -2161,10 +2165,46 @@ signal_quit (gpointer data)
   return G_SOURCE_REMOVE;
 }
 
+/* The demo shows a page when the component can start one. Naming a helper in
+ * the environment still decides the mode — that is how the fake helper is driven
+ * through a script — but an installed component finds its helper by the rule in
+ * chromium-session.c and needs no environment at all, which is the point of
+ * installing it. With neither, the plain client takes over and the compositor is
+ * still exercised, just without a browser in it. */
+static gboolean
+helper_is_available (void)
+{
+  ChromiumSession *session = chromium_session_new (NULL);
+  gboolean found = g_file_test (chromium_session_get_helper_path (session),
+                                G_FILE_TEST_IS_EXECUTABLE);
+
+  g_object_unref (session);
+  return found;
+}
+
+/* The client the demo drives when there is no Chromium to start. The two paths
+ * are tried in the opposite order to the helper's, because the two have opposite
+ * failure modes: a shipped component that quietly ran a development Chromium
+ * would be running the wrong browser, while a demo that quietly ran an
+ * installed shm-client would be running a stale copy of its own test driver
+ * instead of the one built from this tree — which is what every gate script
+ * assumes. With the tree gone there is nothing stale to prefer, so the installed
+ * copy is what an unpackaged demo finds. */
+static const char *
+demo_find_client (void)
+{
+  if (*CLIENT_DEVELOPMENT &&
+      g_file_test (CLIENT_DEVELOPMENT, G_FILE_TEST_IS_EXECUTABLE))
+    return CLIENT_DEVELOPMENT;
+
+  return CLIENT_PATH;
+}
+
 static void
 activate (GApplication *application, gpointer data)
 {
-  const gboolean use_session = g_getenv ("CHROMIUM_HELPER") != NULL;
+  const gboolean use_session = g_getenv ("CHROMIUM_HELPER") != NULL ||
+                               helper_is_available ();
   GtkWidget *box;
   GtkWidget *header;
   GtkWidget *button;
@@ -2280,7 +2320,7 @@ main (int argc, char *argv[])
   for (i = 1; i < argc; i++)
     g_ptr_array_add (args, g_strdup (argv[i]));
   if (args->len == 0)
-    g_ptr_array_add (args, g_strdup (CLIENT_PATH));
+    g_ptr_array_add (args, g_strdup (demo_find_client ()));
   g_ptr_array_add (args, NULL);
   demo.client_argv = (char **) g_ptr_array_free (args, FALSE);
 

@@ -1,4 +1,8 @@
 builddir/
+# Any second build directory is a staging install of the same tree
+# (docs/packaging.md), and a 1.5 GB installed CEF runtime is not what git wants
+# to be asked about.
+builddir-*/
 helper/build/
 compile_commands.json
 *.o
