@@ -1,5 +1,7 @@
 #define G_LOG_DOMAIN "chromium-view"
 
+#include <math.h>
+
 #include "chromium-view.h"
 
 struct _ChromiumView {
@@ -318,42 +320,38 @@ chromium_view_on_button_event (GtkEventController *controller, GdkEvent *event,
 }
 
 static void
-chromium_view_send_axis (ChromiumView *self, uint32_t axis, double delta,
-                         GdkScrollUnit unit)
-{
-  int32_t steps = 0;
-  double value;
-
-  if (delta == 0.0)
-    return;
-
-  if (unit == GDK_SCROLL_UNIT_WHEEL)
-    {
-      /* Wayland wants the surface-local distance and the click count; a wheel
-       * click is conventionally worth ten pixels. */
-      steps = (int32_t) delta;
-      value = delta * 10.0;
-    }
-  else
-    value = delta;
-
-  g_debug ("input: axis %u gdk=%+.3f -> value=%+.2f discrete=%d",
-           axis, delta, value, steps);
-  nested_compositor_notify_pointer_axis (self->compositor, axis, value, steps);
-}
-
-static void
-chromium_view_on_scroll (GtkEventControllerScroll *controller,
-                         double dx, double dy, gpointer data)
+chromium_view_on_scroll (GtkEventControllerScroll *controller, double dx, double dy,
+                         gpointer data)
 {
   ChromiumView *self = data;
   GdkEvent *event = gtk_event_controller_get_current_event (GTK_EVENT_CONTROLLER (controller));
   GdkScrollUnit unit = event ? gdk_scroll_event_get_unit (event) : GDK_SCROLL_UNIT_WHEEL;
+  gboolean stop = event ? gdk_scroll_event_is_stop (event) : FALSE;
+  uint32_t source = WL_POINTER_AXIS_SOURCE_FINGER;
+  int32_t value120_x = 0;
+  int32_t value120_y = 0;
 
-  g_debug ("input: scroll unit=%d dx=%+.3f dy=%+.3f", unit, dx, dy);
+  if (unit == GDK_SCROLL_UNIT_WHEEL)
+    {
+      /* A wheel detent is 120 in the high-resolution channel, and ten surface
+       * pixels is the distance every client already assumes for one of those
+       * detents. Rounding here is what a truncated step count used to throw
+       * away: half a detent is 60, not nothing. */
+      source = WL_POINTER_AXIS_SOURCE_WHEEL;
+      value120_x = (int32_t) lround (dx * 120.0);
+      value120_y = (int32_t) lround (dy * 120.0);
+      dx = value120_x / 12.0;
+      dy = value120_y / 12.0;
+    }
 
-  chromium_view_send_axis (self, WL_POINTER_AXIS_VERTICAL_SCROLL, dy, unit);
-  chromium_view_send_axis (self, WL_POINTER_AXIS_HORIZONTAL_SCROLL, dx, unit);
+  g_debug ("input: scroll unit=%d stop=%d value120=%+d,%+d px=%+.2f,%+.2f source=%u",
+           unit, stop, value120_x, value120_y, dx, dy, source);
+
+  /* The stop is GDK's own: a touchpad gesture ends with an event that carries no
+   * distance and says so, and that is the moment a client may start its momentum
+   * run. Claiming a stop on every event would end the fling before it began. */
+  nested_compositor_notify_pointer_axis (self->compositor, dx, dy,
+                                         value120_x, value120_y, source, stop);
 }
 
 /* ------------------------------------------------------------------ *

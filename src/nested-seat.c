@@ -15,8 +15,12 @@
 /* One seat, one pointer, one keyboard: the embedding widget is the only device
  * the nested compositor knows about. */
 #define NESTED_SEAT_NAME       "seat0"
-#define NESTED_POINTER_VERSION 5
+#define NESTED_POINTER_VERSION 8
 #define NESTED_KEYBOARD_VERSION 4
+/* wl_keyboard.repeat_info, in the units the event asks for: characters per
+ * second, and milliseconds of hold before the first repeat. */
+#define NESTED_KEY_REPEAT_RATE  25
+#define NESTED_KEY_REPEAT_DELAY 250
 
 typedef struct _SeatClient SeatClient;
 
@@ -317,9 +321,6 @@ keyboard_send_enter (NestedCompositor *self, struct wl_resource *keyboard,
 
   keyboard_send_modifiers (self, keyboard);
 
-  if (wl_resource_get_version (keyboard) >= WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION)
-    wl_keyboard_send_repeat_info (keyboard, 25, 250);
-
   ((SeatClient *) wl_resource_get_user_data (keyboard))->keyboard_inside = TRUE;
 }
 
@@ -505,6 +506,14 @@ seat_get_keyboard (struct wl_client *client, struct wl_resource *resource, uint3
       sc->keyboard = NULL;
       return;
     }
+
+  /* The protocol promises a client that repeats keys itself will have the rate
+   * before the first press, so it goes out with the object rather than with the
+   * enter. GDK no longer tells a widget what the keyboard's settings are, so
+   * these are the conventional numbers. */
+  if (wl_resource_get_version (keyboard) >= WL_KEYBOARD_REPEAT_INFO_SINCE_VERSION)
+    wl_keyboard_send_repeat_info (keyboard, NESTED_KEY_REPEAT_RATE,
+                                  NESTED_KEY_REPEAT_DELAY);
 
   if (self->keyboard_focus)
     keyboard_send_enter (self, keyboard, self->keyboard_focus);
@@ -692,16 +701,39 @@ nested_compositor_notify_pointer_button (NestedCompositor *self, uint32_t button
   nested_flush (self);
 }
 
+/* wl_pointer.axis is the channel every client understands, so it always goes
+ * out. The step count has two forms: wl_pointer.axis_discrete, which can only
+ * say whole detents, and wl_pointer.axis_value120 from version 8, which the
+ * protocol describes as replacing it. A half-detent wheel therefore reaches an
+ * old client as nothing at all and a new one as 60. */
+static void
+axis_send_one (struct wl_resource *pointer, uint32_t version, uint32_t time,
+               uint32_t axis, double delta, int32_t value120, gboolean framed)
+{
+  wl_pointer_send_axis (pointer, time, axis, wl_fixed_from_double (delta));
+
+  if (!framed || value120 == 0)
+    return;
+
+  if (version >= WL_POINTER_AXIS_VALUE120_SINCE_VERSION)
+    wl_pointer_send_axis_value120 (pointer, axis, value120);
+  else if (value120 / 120 != 0)
+    wl_pointer_send_axis_discrete (pointer, axis, value120 / 120);
+}
+
 void
-nested_compositor_notify_pointer_axis (NestedCompositor *self, uint32_t axis,
-                                       double delta, int32_t steps)
+nested_compositor_notify_pointer_axis (NestedCompositor *self, double dx, double dy,
+                                       int32_t value120_x, int32_t value120_y,
+                                       uint32_t source, gboolean stop)
 {
   SeatClient *sc;
   uint32_t time = nested_now_msec ();
 
   g_return_if_fail (NESTED_IS_COMPOSITOR (self));
-  g_return_if_fail (axis == WL_POINTER_AXIS_VERTICAL_SCROLL ||
-                    axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL);
+  g_return_if_fail (source == WL_POINTER_AXIS_SOURCE_WHEEL ||
+                    source == WL_POINTER_AXIS_SOURCE_FINGER ||
+                    source == WL_POINTER_AXIS_SOURCE_CONTINUOUS ||
+                    source == WL_POINTER_AXIS_SOURCE_WHEEL_TILT);
 
   if (!self->pointer_focus)
     return;
@@ -709,20 +741,36 @@ nested_compositor_notify_pointer_axis (NestedCompositor *self, uint32_t axis,
   wl_list_for_each (sc, &self->seat_clients, link)
     {
       gboolean framed;
+      uint32_t version;
 
       if (!sc->pointer || !sc->pointer_inside)
         continue;
 
-      framed = wl_resource_get_version (sc->pointer) >= WL_POINTER_FRAME_SINCE_VERSION;
+      version = wl_resource_get_version (sc->pointer);
+      framed = version >= WL_POINTER_FRAME_SINCE_VERSION;
+
+      /* Both axes of one device movement belong to one frame: a client that
+       * builds momentum out of a fling accumulates per frame, and two frames
+       * make one diagonal gesture look like two scrolls. */
+      if (framed)
+        wl_pointer_send_axis_source (sc->pointer, source);
+
+      if (dy != 0.0)
+        axis_send_one (sc->pointer, version, time, WL_POINTER_AXIS_VERTICAL_SCROLL,
+                       dy, value120_y, framed);
+      if (dx != 0.0)
+        axis_send_one (sc->pointer, version, time, WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+                       dx, value120_x, framed);
 
       if (framed)
-        wl_pointer_send_axis_source (sc->pointer, WL_POINTER_AXIS_SOURCE_WHEEL);
-      wl_pointer_send_axis (sc->pointer, time, axis, wl_fixed_from_double (delta));
-      if (framed)
         {
-          if (steps)
-            wl_pointer_send_axis_discrete (sc->pointer, axis, steps);
-          wl_pointer_send_axis_stop (sc->pointer, time, axis);
+          if (stop)
+            {
+              wl_pointer_send_axis_stop (sc->pointer, time,
+                                         WL_POINTER_AXIS_VERTICAL_SCROLL);
+              wl_pointer_send_axis_stop (sc->pointer, time,
+                                         WL_POINTER_AXIS_HORIZONTAL_SCROLL);
+            }
           wl_pointer_send_frame (sc->pointer);
         }
     }
@@ -742,7 +790,20 @@ nested_compositor_notify_keyboard_key (NestedCompositor *self, uint32_t evdev_co
   g_return_if_fail (NESTED_IS_COMPOSITOR (self));
 
   if (pressed)
-    g_array_append_val (self->pressed_keys, evdev_code);
+    {
+      /* A press for a key that is already down is the host's auto-repeat. The
+       * clients have to keep seeing it — a compositor that repeats is what the
+       * protocol expects them to rely on — but pressed_keys is the set of keys
+       * that are physically down and one release removes a single entry, so
+       * appending here would leave the key listed once per repeat and every
+       * later wl_keyboard.enter would report a handful of keys held at once. */
+      for (i = 0; i < self->pressed_keys->len; i++)
+        if (g_array_index (self->pressed_keys, uint32_t, i) == evdev_code)
+          break;
+
+      if (i == self->pressed_keys->len)
+        g_array_append_val (self->pressed_keys, evdev_code);
+    }
   else
     for (i = 0; i < self->pressed_keys->len; i++)
       if (g_array_index (self->pressed_keys, uint32_t, i) == evdev_code)

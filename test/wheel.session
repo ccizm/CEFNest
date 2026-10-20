@@ -1,0 +1,14 @@
+wait 3000
+hover 200 150
+js document.scrollingElement.scrollTop
+wheel 0 3
+wait 700
+js document.scrollingElement.scrollTop
+wheel 0 0.5
+wait 700
+js document.scrollingElement.scrollTop
+wheel 0 5
+wait 700
+js document.scrollingElement.scrollTop
+wait 300
+quit

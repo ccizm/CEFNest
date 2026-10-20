@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -389,14 +390,15 @@ dump_view (gpointer data)
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "hover <x> <y>",
- * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]", "close",
- * "quit". This is how a headless run proves navigation, history and repaint all
- * work together, and "close" is how it proves the way out of the window stops
- * the helper with it. A "js" step is tagged with its own line number, which is
- * what comes back on ::script-result, so a result can be matched to the step
- * that asked for it. The page steps need a helper session; "hover", "click",
- * "drag", "shot", "dump" and "close" work against any client, so the same
- * script drives the nested compositor without Chromium. */
+ * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
+ * "wheel <dx> <dy>", "close", "quit". This is how a headless run proves
+ * navigation, history and repaint all work together, and "close" is how it
+ * proves the way out of the window stops the helper with it. A "js" step is
+ * tagged with its own line number, which is what comes back on
+ * ::script-result, so a result can be matched to the step that asked for it.
+ * The page steps need a helper session; "hover", "click", "drag", "wheel",
+ * "shot", "dump" and "close" work against any client, so the same script drives
+ * the nested compositor without Chromium. */
 typedef struct {
   GPtrArray *steps;
   guint index;
@@ -623,6 +625,34 @@ script_run_next (void)
           drag->left = DEMO_DRAG_STEPS;
           drag->button = (uint32_t) button;
           g_timeout_add (DEMO_DRAG_INTERVAL, script_drag_motion, drag);
+          continue;
+        }
+      else if (!strncmp (line, "wheel ", 6))
+        {
+          double dx = 0, dy = 0;
+
+          if (sscanf (line + 6, "%lf %lf", &dx, &dy) < 2)
+            {
+              g_warning ("demo: wheel wants '<dx> <dy>' in detents, got '%s'", line);
+              continue;
+            }
+
+          /* Detents go in because that is what a hand on a wheel gives, and this
+           * is the same arithmetic the widget does: ten surface pixels and 120
+           * in the high-resolution channel for one of them. Half a detent is the
+           * case only the 120ths can carry. */
+          compositor = chromium_view_get_compositor (demo.view);
+          if (!compositor)
+            {
+              g_warning ("demo: no nested compositor to scroll");
+              continue;
+            }
+
+          nested_compositor_set_pointer_active (compositor, TRUE);
+          nested_compositor_notify_pointer_axis (compositor, dx * 10.0, dy * 10.0,
+                                                 (int32_t) lround (dx * 120.0),
+                                                 (int32_t) lround (dy * 120.0),
+                                                 WL_POINTER_AXIS_SOURCE_WHEEL, TRUE);
           continue;
         }
       else if (!strcmp (line, "close"))

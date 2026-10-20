@@ -176,6 +176,11 @@ static double pointer_x;
 static double pointer_y;
 static double scroll_x;
 static double scroll_y;
+/* The 120ths of a wheel detent, which is the channel that keeps a fractional
+ * detent, and a count of the gesture ends the compositor told us about. */
+static int32_t scroll120_x;
+static int32_t scroll120_y;
+static int axis_stops;
 static int pointer_inside;
 /* Which of our surfaces the pointer is over: the toplevel or one of the popups
  * drawn on top of it. Motion events do not name a surface, so the enter does
@@ -1337,12 +1342,19 @@ pointer_frame (void *data, struct wl_pointer *wl_pointer)
 static void
 pointer_axis_source (void *data, struct wl_pointer *wl_pointer, uint32_t axis_source)
 {
+  static const char *const names[] = { "wheel", "finger", "continuous", "wheel_tilt" };
+  const char *name = axis_source < sizeof (names) / sizeof (names[0])
+    ? names[axis_source] : "?";
+
+  fprintf (stderr, "client: axis source %s\n", name);
 }
 
 static void
 pointer_axis_stop (void *data, struct wl_pointer *wl_pointer, uint32_t time,
                    uint32_t axis)
 {
+  axis_stops++;
+  fprintf (stderr, "client: axis %u stop (#%d)\n", axis, axis_stops);
 }
 
 static void
@@ -1350,6 +1362,19 @@ pointer_axis_discrete (void *data, struct wl_pointer *wl_pointer, uint32_t axis,
                        int32_t discrete)
 {
   fprintf (stderr, "client: axis %d discrete %+d\n", axis, discrete);
+}
+
+static void
+pointer_axis_value120 (void *data, struct wl_pointer *wl_pointer, uint32_t axis,
+                       int32_t value120)
+{
+  if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
+    scroll120_y += value120;
+  else
+    scroll120_x += value120;
+
+  fprintf (stderr, "client: axis %u value120 %+d (total %+d)\n", axis, value120,
+           axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? scroll120_y : scroll120_x);
 }
 
 static const struct wl_pointer_listener pointer_listener = {
@@ -1362,6 +1387,7 @@ static const struct wl_pointer_listener pointer_listener = {
   .axis_source = pointer_axis_source,
   .axis_stop = pointer_axis_stop,
   .axis_discrete = pointer_axis_discrete,
+  .axis_value120 = pointer_axis_value120,
 };
 
 static void
@@ -2078,8 +2104,12 @@ registry_global (void *data, struct wl_registry *registry, uint32_t name,
     }
   else if (!strcmp (interface, "wl_seat"))
     {
+      /* Pointer and keyboard inherit this version, and 8 is what lets the seat
+       * deliver wl_pointer.axis_value120 — a listener slot this client has to
+       * fill before asking for it, because libwayland-client aborts on an event
+       * whose slot is NULL just like the server does on a request. */
       seat = wl_registry_bind (registry, name, &wl_seat_interface,
-                               version < 5 ? version : 5);
+                               version < 8 ? version : 8);
       wl_seat_add_listener (seat, &seat_listener, NULL);
     }
   else if (!strcmp (interface, "xdg_wm_base"))

@@ -17,7 +17,7 @@ libnested = static_library(
 libnested_dep = declare_dependency(
   link_with: libnested,
   include_directories: src_inc,
-  dependencies: [ gtk_dep, wl_server_dep, xkb_dep, gbm_dep, drm_dep ],
+  dependencies: [ gtk_dep, wl_server_dep, xkb_dep, gbm_dep, drm_dep, m_dep ],
 )
 
 chromium_demo = executable(

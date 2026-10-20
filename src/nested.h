@@ -75,7 +75,11 @@ GList            *nested_compositor_get_paint_stack (NestedCompositor *self);
  * are surface-local logical pixels — the same units wl_pointer.motion uses, so
  * a GTK widget's own event coordinates go in unchanged. Buttons are BTN_*
  * codes from linux/input-event-codes.h and keys are evdev key codes, so the
- * same numbers a plain Wayland client would receive. */
+ * same numbers a plain Wayland client would receive. A
+ * nested_compositor_notify_keyboard_key() press for a key that is already down
+ * is the host's auto-repeat: it reaches the clients as another press, which is
+ * what they expect from a compositor that repeats, and it does not make the key
+ * look held twice. */
 void              nested_compositor_set_pointer_active  (NestedCompositor *self,
                                                          gboolean active);
 void              nested_compositor_set_keyboard_active (NestedCompositor *self,
@@ -85,10 +89,18 @@ void              nested_compositor_notify_pointer_motion (NestedCompositor *sel
 void              nested_compositor_notify_pointer_button (NestedCompositor *self,
                                                            uint32_t button,
                                                            gboolean pressed);
+/* One scroll gesture of one input device, both axes at once: they belong to the
+ * same wl_pointer.frame, and a client builds a fling out of frames. @dx and @dy
+ * are surface pixels; @value120_x and @value120_y are the same movement in
+ * 120ths of a wheel detent, zero when the device has no detents (a touchpad).
+ * @source is a WL_POINTER_AXIS_SOURCE_* code, and @stop says this is the end of
+ * the gesture, which is when the client may start its own momentum. */
 void              nested_compositor_notify_pointer_axis   (NestedCompositor *self,
-                                                           uint32_t axis,
-                                                           double delta,
-                                                           int32_t steps);
+                                                           double dx, double dy,
+                                                           int32_t value120_x,
+                                                           int32_t value120_y,
+                                                           uint32_t source,
+                                                           gboolean stop);
 void              nested_compositor_notify_keyboard_key   (NestedCompositor *self,
                                                            uint32_t evdev_code,
                                                            gboolean pressed);

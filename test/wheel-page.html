@@ -1,0 +1,19 @@
+<!doctype html>
+<!-- wheel.session scrolls this page: it is three screens tall with a marker
+     every 100 pixels, so scrollTop after a wheel step says whether the axis
+     events the nested compositor sent actually moved Blink's viewport. -->
+<html>
+<head><title>WHEEL-PAGE</title></head>
+<body style="margin:0;font:20px monospace;background:#fff;color:#000">
+<div id="top" style="height:100px;background:#eef">TOP</div>
+<script>
+  for (var i = 0; i < 28; i++) {
+    var d = document.createElement('div');
+    d.style.height = '100px';
+    d.textContent = 'row ' + i;
+    document.body.appendChild(d);
+  }
+</script>
+<div style="height:100px;background:#fee">BOTTOM</div>
+</body>
+</html>

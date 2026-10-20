@@ -59,9 +59,16 @@ static const Step script[] = {
   { STEP_POINTER_ENTER, 300, 200,  60 },
   { STEP_KEYBOARD_ENTER,  0,   0,  60 },
   { STEP_BUTTON_PRESS, BTN_LEFT, 1, 60 },
-  { STEP_AXIS,              1, 100, 60 },
+  { STEP_AXIS, WL_POINTER_AXIS_VERTICAL_SCROLL, 100, 60 },
   { STEP_KEY_DOWN,      KEY_A,   1, 60 },
+  /* GDK hands over the host's auto-repeat as another press of the same key. The
+   * client has to keep seeing those, but the key must not be counted twice: the
+   * leave and re-enter below are what let it say how many keys it believes are
+   * physically down. */
+  { STEP_KEY_DOWN,      KEY_A,   2, 60 },
   { STEP_KEY_UP,        KEY_A,   0, 60 },
+  { STEP_KEYBOARD_LEAVE,  0,   0,  60 },
+  { STEP_KEYBOARD_ENTER,  0,   0,  60 },
   { STEP_SETTLE,          0,   0, 200 }, /* one client redraw after the input */
   { STEP_DUMP,            0,   0,   0 },
   { STEP_TI_STATE,        0,   0, 150 }, /* the client's enable and report land */
@@ -255,8 +262,14 @@ run_step (gpointer data)
       nested_compositor_notify_pointer_button (compositor, step->a, FALSE);
       break;
     case STEP_AXIS:
-      nested_compositor_notify_pointer_axis (compositor, WL_POINTER_AXIS_VERTICAL_SCROLL,
-                                             step->b, step->b / 10);
+      /* a is the axis, b the surface pixels; twelve pixels per tenth of a
+       * detent, so 120 back-converts the one wheel click this step means. */
+      nested_compositor_notify_pointer_axis (compositor,
+          step->a == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? (double) step->b : 0.0,
+          step->a == WL_POINTER_AXIS_VERTICAL_SCROLL ? (double) step->b : 0.0,
+          step->a == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? step->b * 12 : 0,
+          step->a == WL_POINTER_AXIS_VERTICAL_SCROLL ? step->b * 12 : 0,
+          WL_POINTER_AXIS_SOURCE_WHEEL, TRUE);
       break;
     case STEP_KEY_DOWN:
       nested_compositor_notify_keyboard_key (compositor, step->a, TRUE);

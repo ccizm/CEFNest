@@ -11,8 +11,11 @@
 G_BEGIN_DECLS
 
 /* Version ceilings for the globals nested_compositor_new() advertises, and
- * the plane count every dmabuf structure sizes its arrays with. */
-#define NESTED_SEAT_VERSION     5
+ * the plane count every dmabuf structure sizes its arrays with. A wl_pointer
+ * and wl_keyboard are created at the version their wl_seat was bound at, so
+ * 8 here is what lets the seat hand out a pointer that can carry
+ * axis_value120 — the only wheel channel that survives a fractional detent. */
+#define NESTED_SEAT_VERSION     8
 #define NESTED_DMABUF_VERSION   5
 #define NESTED_DMABUF_MAX_PLANES 4
 #define NESTED_DATA_DEVICE_MANAGER_VERSION 3

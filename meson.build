@@ -15,6 +15,9 @@ xkb_dep = dependency('xkbcommon')
 gbm_dep = dependency('gbm')
 drm_dep = dependency('libdrm')
 threads_dep = dependency('threads')
+# math.h is not part of glibc's default link set, and rounding a wheel detent
+# into 120ths is the only thing that needs it.
+m_dep = meson.get_compiler('c').find_library('m', required: false)
 
 wayland_scanner = find_program('wayland-scanner')
 add_project_arguments ('-Wno-unused-parameter', language: 'c')
