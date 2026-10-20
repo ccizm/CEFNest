@@ -41,21 +41,46 @@ chromium_view_measure (GtkWidget *widget,
  * pixels are the widget's logical pixels, so the texture lands at its own scale:
  * a client that renders a 1.25x buffer and scales it down with wp_viewport comes
  * out 1:1 on the real display. */
+static double chromium_view_device_scale (ChromiumView *self);
+
 static void
-snapshot_surface (GtkSnapshot *snapshot, NestedSurface *surface, int x, int y)
+snapshot_surface (GtkSnapshot *snapshot, NestedSurface *surface, int x, int y,
+                  double device_scale)
 {
   GdkTexture *texture = nested_surface_get_texture (surface);
   graphene_rect_t src, dst, bounds;
-  double scale_x, scale_y;
+  double scale_x, scale_y, inverse_scale;
 
   if (!texture)
     return;
 
   nested_surface_get_paint_rect (surface, &src, &dst);
+  if (src.size.width <= 0.0 || src.size.height <= 0.0)
+    return;
+
   dst.origin.x += x;
   dst.origin.y += y;
+
+  if (device_scale <= 0.0)
+    device_scale = 1.0;
+  inverse_scale = 1.0 / device_scale;
+
   scale_x = dst.size.width / src.size.width;
   scale_y = dst.size.height / src.size.height;
+
+  /* A fractional-scale client's buffer usually has one pixel more than
+   * dst * device_scale: a 1.25x window of 1000x653 renders 1250x817, while the
+   * viewport destination is rounded to 1000x653.  dst/src then comes out as
+   * 0.800245 instead of 0.8, and drawing the texture at that scale resamples
+   * every glyph by a quarter of a pixel.  If the destination is within a
+   * logical pixel of the device-scaled source, the difference is only that
+   * rounding: snap back to the device scale and let the clip remove the extra
+   * row/column.  A real viewport scale (buffer_scale 2, for example) is far
+   * outside this tolerance and is preserved. */
+  if (fabs (dst.size.width - src.size.width * inverse_scale) <= 1.0)
+    scale_x = inverse_scale;
+  if (fabs (dst.size.height - src.size.height * inverse_scale) <= 1.0)
+    scale_y = inverse_scale;
 
   if (scale_x == 1.0 && scale_y == 1.0 && src.origin.x == 0.0 && src.origin.y == 0.0)
     {
@@ -96,14 +121,18 @@ chromium_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
 
   /* Bottommost first, so a context menu ends up on top of the page it belongs
    * to and each layer overwrites what the rules placed under it. */
-  for (l = stack; l; l = l->next)
-    {
-      NestedSurface *surface = l->data;
-      int x = 0, y = 0;
+  {
+    double device_scale = chromium_view_device_scale (self);
 
-      nested_surface_get_position (surface, &x, &y);
-      snapshot_surface (snapshot, surface, x, y);
-    }
+    for (l = stack; l; l = l->next)
+      {
+        NestedSurface *surface = l->data;
+        int x = 0, y = 0;
+
+        nested_surface_get_position (surface, &x, &y);
+        snapshot_surface (snapshot, surface, x, y, device_scale);
+      }
+  }
 
   g_list_free_full (stack, g_object_unref);
 }
