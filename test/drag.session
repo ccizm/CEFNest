@@ -1,0 +1,5 @@
+wait 3000
+hover 200 150
+drag 200 150 460 340
+wait 3000
+quit

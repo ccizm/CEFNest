@@ -389,14 +389,14 @@ dump_view (gpointer data)
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "hover <x> <y>",
- * "click <x> <y> [button]", "close", "quit". This is how a headless run proves
- * navigation, history and repaint all work together, and "close" is how it
- * proves the way out of the window stops the helper with it. A "js" step is
- * tagged with its own line number, which is what comes back on
- * ::script-result, so a result can be matched to the step that asked for it.
- * The page steps need a helper session; "hover", "click", "shot", "dump" and
- * "close" work against any client, so the same script drives the nested
- * compositor without Chromium. */
+ * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]", "close",
+ * "quit". This is how a headless run proves navigation, history and repaint all
+ * work together, and "close" is how it proves the way out of the window stops
+ * the helper with it. A "js" step is tagged with its own line number, which is
+ * what comes back on ::script-result, so a result can be matched to the step
+ * that asked for it. The page steps need a helper session; "hover", "click",
+ * "drag", "shot", "dump" and "close" work against any client, so the same
+ * script drives the nested compositor without Chromium. */
 typedef struct {
   GPtrArray *steps;
   guint index;
@@ -426,6 +426,40 @@ script_click_release (gpointer data)
   if (compositor)
     nested_compositor_notify_pointer_button (compositor,
                                              GPOINTER_TO_UINT (data), FALSE);
+
+  return G_SOURCE_REMOVE;
+}
+
+/* A page decides a text drag from how far the pointer travelled while the
+ * button was down, so a jump from one end to the other is not a drag at all.
+ * The intermediate positions are what make Chromium reach
+ * wl_data_source.set_actions and wl_data_device.start_drag, and they have to
+ * arrive one dispatch at a time. */
+#define DEMO_DRAG_STEPS 12
+#define DEMO_DRAG_INTERVAL 25
+
+typedef struct {
+  NestedCompositor *compositor;
+  double x, y, step_x, step_y;
+  int left;
+  uint32_t button;
+} ScriptDrag;
+
+static gboolean
+script_drag_motion (gpointer data)
+{
+  ScriptDrag *drag = data;
+
+  drag->x += drag->step_x;
+  drag->y += drag->step_y;
+  nested_compositor_notify_pointer_motion (drag->compositor, drag->x, drag->y);
+
+  if (--drag->left > 0)
+    return G_SOURCE_CONTINUE;
+
+  nested_compositor_notify_pointer_button (drag->compositor, drag->button, FALSE);
+  g_object_unref (drag->compositor);
+  g_free (drag);
 
   return G_SOURCE_REMOVE;
 }
@@ -553,6 +587,42 @@ script_run_next (void)
           nested_compositor_notify_pointer_motion (compositor, x, y);
           nested_compositor_notify_pointer_button (compositor, (uint32_t) button, TRUE);
           g_timeout_add (80, script_click_release, GUINT_TO_POINTER ((uint32_t) button));
+          continue;
+        }
+      else if (!strncmp (line, "drag ", 5))
+        {
+          double x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+          int button = DEMO_BTN_LEFT;
+          ScriptDrag *drag;
+
+          if (sscanf (line + 5, "%lf %lf %lf %lf %d", &x0, &y0, &x1, &y1, &button) < 4)
+            {
+              g_warning ("demo: drag wants '<x0> <y0> <x1> <y1> [button]', got '%s'", line);
+              continue;
+            }
+
+          compositor = chromium_view_get_compositor (demo.view);
+          if (!compositor)
+            {
+              g_warning ("demo: no nested compositor to drag on");
+              continue;
+            }
+
+          /* The release lands roughly 300 ms after the press, so a script that
+           * cares about what the drag did has to wait before looking. */
+          nested_compositor_set_pointer_active (compositor, TRUE);
+          nested_compositor_notify_pointer_motion (compositor, x0, y0);
+          nested_compositor_notify_pointer_button (compositor, (uint32_t) button, TRUE);
+
+          drag = g_new0 (ScriptDrag, 1);
+          drag->compositor = g_object_ref (compositor);
+          drag->x = x0;
+          drag->y = y0;
+          drag->step_x = (x1 - x0) / DEMO_DRAG_STEPS;
+          drag->step_y = (y1 - y0) / DEMO_DRAG_STEPS;
+          drag->left = DEMO_DRAG_STEPS;
+          drag->button = (uint32_t) button;
+          g_timeout_add (DEMO_DRAG_INTERVAL, script_drag_motion, drag);
           continue;
         }
       else if (!strcmp (line, "close"))

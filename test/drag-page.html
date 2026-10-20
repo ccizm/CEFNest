@@ -1,0 +1,15 @@
+<!doctype html>
+<!-- drag.session drags this box: Chromium only sends wl_data_source.set_actions
+     and wl_data_device.start_drag once the pointer has travelled over something
+     draggable, so the target is a whole quadrant of the page rather than a word. -->
+<html>
+<head><title>DND-PAGE</title></head>
+<body style="margin:0;font:28px sans-serif;background:#fff;color:#036">
+<div draggable="true" style="width:700px;height:420px;background:#eef">
+  drag anywhere in this box
+</div>
+<script>
+  window.ondragstart = function () { document.title = 'DRAGSTART'; };
+</script>
+</body>
+</html>

@@ -612,6 +612,24 @@ data_offer_destroy (struct wl_client *client, struct wl_resource *resource)
   wl_resource_destroy (resource);
 }
 
+/* Drag and drop ends here without ever having started. These two are v3
+ * requests, so leaving their slots empty would abort the compositor: a
+ * wl_resource implementation is indexed by opcode, and libwayland-server
+ * treats an empty slot as a bug in itself rather than as a refusal. */
+static void
+data_offer_finish (struct wl_client *client, struct wl_resource *resource)
+{
+  g_debug ("nested: a client finished a drag that was never started");
+}
+
+static void
+data_offer_set_actions (struct wl_client *client, struct wl_resource *resource,
+                        uint32_t dnd_actions, uint32_t preferred_action)
+{
+  g_debug ("nested: a client wants action 0x%x of 0x%x, and there is nothing to drop on",
+           preferred_action, dnd_actions);
+}
+
 static void
 data_offer_resource_destroyed (struct wl_resource *resource)
 {
@@ -627,6 +645,8 @@ static const struct wl_data_offer_interface data_offer_impl = {
   .accept = data_offer_accept,
   .receive = data_offer_receive,
   .destroy = data_offer_destroy,
+  .finish = data_offer_finish,
+  .set_actions = data_offer_set_actions,
 };
 
 /* ------------------------------------------------------------ wl_data_source */
@@ -683,9 +703,21 @@ data_source_resource_destroyed (struct wl_resource *resource)
   g_free (source);
 }
 
+static void
+data_source_set_actions (struct wl_client *client, struct wl_resource *resource,
+                         uint32_t dnd_actions)
+{
+  /* Chromium sends this for plain clipboard sources. There are no drags to
+   * act on, but the slot has to be filled: opcode 2 of wl_data_source with an
+   * empty implementation kills the compositor, the host and every client. */
+  g_debug ("nested: a source supports actions 0x%x, which is nothing to do here",
+           dnd_actions);
+}
+
 static const struct wl_data_source_interface data_source_impl = {
   .offer = data_source_offer,
   .destroy = data_source_destroy,
+  .set_actions = data_source_set_actions,
 };
 
 /* ----------------------------------------------------------- wl_data_device */
