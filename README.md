@@ -110,7 +110,10 @@ ninja -C builddir install
 | `install-demo` | `true` | install `cefnest-demo`, and the `shm-client` it falls back to when there is no Chromium |
 
 `install-helper` on a tree where cmake has not run is a configure-time error, not
-an empty directory with a confident "Installing subdir" line above it.
+an empty directory with a confident "Installing subdir" line above it. An
+installed helper needs nothing from the tree it was built in — the CEF runtime
+travels next to it and is resolved from there, which is measured with the whole
+`third_party/cef/dist` directory moved aside (`docs/packaging.md` §9).
 
 ## Run
 

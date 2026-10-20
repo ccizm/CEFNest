@@ -201,7 +201,33 @@ demo: script 3 ok value="DND-PAGE|true"
 `CEF 154.0.34+g14c5a08+chromium-154.0.8037.98`，退出码 0。
 重构之后的回归：`meson test -C builddir` 13/13，`./test/dnd-gate.sh` 六次真 Chromium 运行、59 条断言全过。
 
-## 9. 还没有
+## 9. 一条被实测否证的担心：cmake 的绝对路径会跟着搬过去吗
+
+`helper/CMakeLists.txt` 里 `CEF_ROOT` 解析成 `${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cef/dist`
+这个**构建时的绝对路径**，cmake 又把运行文件 COPY 到产物目录旁边。直觉上，装进 prefix 的 helper
+会把这一串绝对路径一起搬过去，于一台没有源码树的机器上，浏览器在找 resources / locales / 子进程可执行
+文件的那一步死掉。
+
+实测**不是**这样：把 `third_party/cef/dist` 整个改名藏起来（同盘 `mv`，跑完立刻改回来），再用
+`CEFNEST_HELPER=$HOME/.local/cefnest-stage/libexec/cefnest/x86_64/cefnest-helper` 起一次真会话——
+
+```
+helper: sandbox=on
+demo: loaded …/test/dnd-page.html (HTTP 200)
+demo: script 3 ok value="DND-PAGE|true"
+```
+
+没有任何一条 resources / locales / subprocess 的报错。原因是这几件事都从 `/proc/self/exe` 推，而不是
+从 argv 里那条构建时的路径推：`install-helper` 把运行文件**整个目录**搬到 helper 旁边（第 1 节），
+`$ORIGIN` 找到 `libcef.so`，CEF 再从同一个目录取 `resources`、`locales`、`v8_context_snapshot.bin`
+和它自己的子进程可执行文件——子进程再继承同一个 `$ORIGIN`。也就是说第 1 节那条「运行时文件必须并排」
+不只是 `libcef.so` 一个文件的事，它是这一整套都成立的前提；只搬那个可执行文件会在这里断掉。
+
+`CEF_RESOURCES_PATH` 因此是**可选的**：`helper/src/main.cpp` 只在它被设过时才填
+`resources_dir_path` / `locales_dir_path`，谁要把 resources 单独放到 `datadir` 下（Debian 喜欢这么干）
+才有理由设它。当前没有任何一侧代码设这个变量。
+
+## 10. 还没有
 
 - helper 本身仍由 cmake 构建，meson 不驱动它，`install-helper` 只是搬 cmake 留下的东西——「先 cmake、
   再 meson install」这个顺序还是硬要求。这条顺序本来会静默失败：`install_subdir()` 搬一个不存在的目录
