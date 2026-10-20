@@ -64,10 +64,10 @@ Gdk-Message: 12:30:45.376: Lost connection to Wayland compositor.
 
 ```
 $ GDK_BACKEND=wayland G_MESSAGES_DEBUG=nested \
-    CHROMIUM_HELPER=$PWD/helper/build/Release/chromium-helper \
+    CHROMIUM_HELPER=$PWD/helper/build/Release/cefnest-helper \
     CHROMIUM_URL=file://$PWD/test/drag-page.html \
     CHROMIUM_SESSION_SCRIPT=$PWD/test/drag.session \
-    timeout 90 ./builddir/src/chromium-demo
+    timeout 90 ./builddir/src/cefnest-demo
 exit=134
 demo: uri=... title=DND-PAGE loading=0 back=0 forward=0
 nested: pointer becomes grabbing
@@ -139,7 +139,7 @@ $ python3 test/audit-impl-slots.py
 修复前它报的是 **3 个空槽**——正好是这三个。任何一次版本升级之后都要重跑它。
 
 静态审计只看初始化式，运行时会来的另一半现在是 `test/shm-client.c` 的 `--dnd-requests`：
-第一个连接用 `application/x-chromiumgtk-dnd-probe` 这个 mime 拿下选择权并发
+第一个连接用 `application/x-cefnest-dnd-probe` 这个 mime 拿下选择权并发
 `wl_data_source.set_actions`，**第二个连接**（同一个进程的另一条 Wayland 连接，对 compositor
 来说就是别的客户端）收到这个 offer，再发 `wl_data_offer.set_actions` + `wl_data_offer.finish`。
 compositor 不会把客户端自己的选择权还给它自己（`data_device_advertise()` 里那句
@@ -148,7 +148,7 @@ compositor 不会把客户端自己的选择权还给它自己（`data_device_ad
 ```
 $ ./builddir/test/seat-selftest /tmp/x.png "$PWD/builddir/test/shm-client" --dnd-requests
 client: sent wl_data_source.set_actions and took the selection
-client: the second connection was offered application/x-chromiumgtk-dnd-probe
+client: the second connection was offered application/x-cefnest-dnd-probe
 client: sent wl_data_offer.set_actions and .finish on id 4278190080
 client: still connected on both halves (main error=0 second error=0)
 selftest: finished at step 27, 139 fds open (119 at start)

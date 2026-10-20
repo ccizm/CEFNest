@@ -17,7 +17,7 @@ Run it as the helper:
 
   CHROMIUM_HELPER=$(pwd)/test/fake-helper.py \\
   CHROMIUM_SESSION_SCRIPT=$(pwd)/test/close.session \\
-  builddir/src/chromium-demo
+  builddir/src/cefnest-demo
 
 Every command is answered with the events a real helper would send for it, and
 "load" gets an address plus a load-end so the toolbar still lights up. A URL whose

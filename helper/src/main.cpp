@@ -1,4 +1,4 @@
-// ChromiumGTK helper — a windowed Chromium, driven over a socket.
+// CEFNest helper — a windowed Chromium, driven over a socket.
 //
 // The GTK widget owns the Wayland compositor; this process owns Chromium. It
 // creates one frameless CefWindow holding a CefBrowserView, so the page is
@@ -64,7 +64,7 @@ constexpr char kSocketEnv[] = "CHROMIUM_HELPER_SOCKET";
 /* The renderer's side of a js command: one function installed on every global,
  * one CefProcessMessage carrying one JSON text back to the browser process. */
 constexpr char kReportFunction[] = "__chromiumHelperReport";
-constexpr char kJsResultMessage[] = "chromium-helper-js-result";
+constexpr char kJsResultMessage[] = "cefnest-helper-js-result";
 
 /* Events are written on the UI thread with a 200 ms send timeout, so a script
  * that returns the whole DOM would stall Chromium and then be dropped anyway.
@@ -75,7 +75,7 @@ const char kDefaultUrl[] =
     "data:text/html;charset=utf-8,"
     "%3Cbody%20style%3D%22margin%3A0%3Bbackground%3A%23101828%3B"
     "color%3A%23e8eef8%3Bfont%3A16px%20sans-serif%22%3E"
-    "%3Ctitle%3EChromiumGTK%20helper%3C%2Ftitle%3E"
+    "%3Ctitle%3ECEFNest%20helper%3C%2Ftitle%3E"
     "%3Ch1%20style%3D%22padding%3A40px%22%3E"
     "CEF%20helper%20is%20running%3C%2Fh1%3E"
     "%3Cp%20style%3D%22padding%3A0%2040px%22%3E"
@@ -480,7 +480,7 @@ void HandleCommand(const std::string& line) {
       return;
     }
     const int id = command->HasKey("id") ? command->GetInt("id") : 0;
-    frame->ExecuteJavaScript(WrapScript(code, id), "chromium-helper", 0);
+    frame->ExecuteJavaScript(WrapScript(code, id), "cefnest-helper", 0);
     // The answer comes back from the renderer as a js-result event. Nothing is
     // emitted here: a navigation away from the frame can lose the script, and
     // an ack would promise a delivery the page has not confirmed.
@@ -830,8 +830,8 @@ int main(int argc, char** argv) {
     g_auto_quit_ms = std::strtol(auto_quit.c_str(), nullptr, 10);
 
   const std::string cache_dir =
-      CacheDirectory(socket_path.empty() ? "chromium-helper"
-                                         : "chromium-helper-hosted");
+      CacheDirectory(socket_path.empty() ? "cefnest-helper"
+                                         : "cefnest-helper-hosted");
   fprintf(stderr, "helper: cache=%s\n", cache_dir.c_str());
 
   CefSettings settings;

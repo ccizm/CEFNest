@@ -52,7 +52,7 @@ demo: renderer exited status=1 error=9 9
 "页面静止"。
 
 **复现的办法**（也是这次量的办法）：跑一份 `wait 30000` 的会话，找 `/proc` 里 `Seccomp: 2`
-的 `chromium-helper`，`VmRSS` 最大那一个就是 renderer，`kill -9` 它。
+的 `cefnest-helper`，`VmRSS` 最大那一个就是 renderer，`kill -9` 它。
 
 一个警告：`Seccomp=2` 的进程**不止 renderer**。第一次试着杀了 pid 最小的那个，宿主一条事件
 都没收到——CEF 只为渲染进程发这个回调。所以这份信号说的是"这一页的渲染进程没了"，不是
@@ -119,7 +119,7 @@ demo: renderer exited status=1 error=9 9
 
   ```sh
   GDK_BACKEND=wayland CHROMIUM_HELPER=$PWD/test/fake-helper.py \
-    CHROMIUM_SESSION_SCRIPT=$PWD/test/error.session builddir/src/chromium-demo
+    CHROMIUM_SESSION_SCRIPT=$PWD/test/error.session builddir/src/cefnest-demo
   # demo: load failed -105 https://no-such-host.invalid/ ERR_NAME_NOT_RESOLVED
   # demo: loaded https://no-such-host.invalid/ (HTTP 0)
   ```

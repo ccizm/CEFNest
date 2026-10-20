@@ -44,7 +44,7 @@ kernel.apparmor_restrict_unprivileged_userns  不存在（没装那套限制）
 给"没有 userns"的宿主准备的老路（SUID sandbox）。
 
 沙箱开着的进程树（`test/wheel.session` 那一跑，`Seccomp` / `NoNewPrivs` 取自 `/proc/PID/status`，
-命名空间取自 `/proc/PID/ns/`；去掉 `chromium-demo` 自己，helper 一家 9 个进程）：
+命名空间取自 `/proc/PID/ns/`；去掉 `cefnest-demo` 自己，helper 一家 9 个进程）：
 
 | pid | ppid | Seccomp | NNP | CapEff | user ns | pid ns |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -68,7 +68,7 @@ kernel.apparmor_restrict_unprivileged_userns  不存在（没装那套限制）
 只剩 **1 项**，但整条命令行——`--type=`、`--utility-sub-type=` 都在内——就挤在那一个
 `argv[0]` 字符串里，按 NUL 切分什么都得不到，按**空格**切那一项就全回来了
 （`docs/audio-path.md` 第 1 节那张带类型的表就是这么取的）。`/proc/PID/comm` 倒是真的
-全都是 `chromium-helper`。后来补的一张带类型分布的表：浏览器进程、三个 zygote（gpu 的
+全都是 `cefnest-helper`。后来补的一张带类型分布的表：浏览器进程、三个 zygote（gpu 的
 父进程带 `--no-zygote-sandbox`）、`gpu-process`、`network.mojom.NetworkService` 全是
 `Seccomp=0`；`storage.mojom.StorageService` 和两个 renderer 是 `Seccomp=2`；音频则住在一个
 **不沙箱**的 `audio.mojom.AudioService` utility 里。
@@ -103,7 +103,7 @@ CEF/Chromium 自己降权时设的，不属于这次决定的范围，原因没�
 `/proc/sys/kernel/unprivileged_userns_clone` 还是 `1`，可是 `unshare(CLONE_NEWUSER)` 直接
 返回 `ENOSPC`——看文件是看不出来这类限制的。
 
-先跑独立模式的 helper（`chromium-helper https://example.com/`，它拿到的是宿主的 `wayland-0`，
+先跑独立模式的 helper（`cefnest-helper https://example.com/`，它拿到的是宿主的 `wayland-0`，
 不过在建立窗口之前就死了，宿主桌面上没有多出任何东西）：
 
 ```

@@ -1,5 +1,5 @@
 project(
-  'chromium-gtk',
+  'cefnest',
   'c',
   version: '0.0.1',
   license: 'LGPL-2.1-only',

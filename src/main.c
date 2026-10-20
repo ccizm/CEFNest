@@ -985,7 +985,7 @@ main (int argc, char *argv[])
   demo.client_argv = (char **) g_ptr_array_free (args, FALSE);
 
   app = demo.app = g_object_new (GTK_TYPE_APPLICATION,
-                                 "application-id", "org.chromiumgtk.Demo",
+                                 "application-id", "org.cefnest.Demo",
                                  "flags", G_APPLICATION_NON_UNIQUE,
                                  NULL);
 

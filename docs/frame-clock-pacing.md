@@ -74,7 +74,7 @@ snapshot 读当前纹理）全部未动；selftest 等无控件场景继续走�
 ## 3. 实测对比
 
 方法：把改前代码恢复到 /tmp 副本单独构建，两个版本背靠背各跑 4 秒
-`chromium-demo + shm-client`，从客户端侧 `WAYLAND_DEBUG` 日志统计
+`cefnest-demo + shm-client`，从客户端侧 `WAYLAND_DEBUG` 日志统计
 frame 请求 → done 的延迟与 commit 节奏（n≈400 帧/组）。
 
 | 指标 | 改前（16ms 定时器） | 改后（GdkFrameClock） | 变化 |
@@ -106,7 +106,7 @@ frame 请求 → done 的延迟与 commit 节奏（n≈400 帧/组）。
 ```bash
 # 客户端侧日志单独落盘（wrapper 隔离 demo 自身的 wayland 流量）
 CHROMIUM_DUMP=/tmp/d.png CHROMIUM_DUMP_DELAY=4000 \
-  builddir/src/chromium-demo \
+  builddir/src/cefnest-demo \
   sh -c 'WAYLAND_DEBUG=1 exec builddir/test/shm-client 2>/tmp/client-wl.log'
 # 统计 frame 请求 → done 的延迟分布（解析 {Default Queue} -> 行，
 # 回调 id 会复用，需按 FIFO 配对）

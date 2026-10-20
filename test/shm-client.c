@@ -1928,7 +1928,7 @@ do_copy (void)
  * and answers it. Everything here stays inside the nested compositor because
  * the mime below is not one the clipboard bridge copies outward — the host
  * clipboard is left alone. */
-#define DND_PROBE_MIME "application/x-chromiumgtk-dnd-probe"
+#define DND_PROBE_MIME "application/x-cefnest-dnd-probe"
 
 static struct wl_display *dnd_display;
 static struct wl_data_device_manager *dnd_manager;

@@ -125,7 +125,7 @@ stack[0] nested-shm-test at 0,0 size 640x480 → 1 surfaces painted
 
 ```bash
 GDK_BACKEND=wayland CHROMIUM_SESSION_SCRIPT=/tmp/popup-gsk.script \
-  builddir/src/chromium-demo builddir/test/shm-client --popup
+  builddir/src/cefnest-demo builddir/test/shm-client --popup
 # 脚本：wait 1200 / hover 300 200 / shot 带菜单 / click 60 60 / shot 关菜单后 / quit
 ```
 

@@ -1,4 +1,4 @@
-# ChromiumGTK
+# CEFNest
 
 A GTK 4 widget that shows a web page rendered by **real Chromium**, composited
 into the widget through a Wayland compositor that runs inside the same process.
@@ -26,7 +26,7 @@ compositor, so this repository ships one.
          ▲
          │ Wayland protocol (the client side of the socket)
          │
- chromium-helper                          helper/ — a CEF application, separate process
+ cefnest-helper                          helper/ — a CEF application, separate process
    · started with WAYLAND_DISPLAY=<the nested compositor's socket>
    · Chromium renders the page into that compositor
    · control plane: NDJSON over a unix socket, both directions
@@ -89,12 +89,12 @@ compositor, the seat, the clipboard bridge and the popups.
 
 ```bash
 # no Chromium involved: the nested compositor embeds test/shm-client
-./builddir/src/chromium-demo
+./builddir/src/cefnest-demo
 
 # the real thing
-CHROMIUM_HELPER=$PWD/helper/build/Release/chromium-helper \
+CHROMIUM_HELPER=$PWD/helper/build/Release/cefnest-helper \
 CHROMIUM_URL=https://example.com \
-./builddir/src/chromium-demo
+./builddir/src/cefnest-demo
 ```
 
 The demo reads its whole configuration from the environment, because the point
@@ -156,9 +156,9 @@ What the compositor sends is only half of it, so the wheel is also checked where
 it matters:
 
 ```bash
-GDK_BACKEND=wayland CHROMIUM_HELPER=$PWD/helper/build/Release/chromium-helper \
+GDK_BACKEND=wayland CHROMIUM_HELPER=$PWD/helper/build/Release/cefnest-helper \
   CHROMIUM_URL=file://$PWD/test/wheel-page.html \
-  CHROMIUM_SESSION_SCRIPT=$PWD/test/wheel.session ./builddir/src/chromium-demo
+  CHROMIUM_SESSION_SCRIPT=$PWD/test/wheel.session ./builddir/src/cefnest-demo
 ```
 
 `test/wheel.session` reads `document.scrollingElement.scrollTop` after each
@@ -249,7 +249,7 @@ They are the record of *why* the code is shaped like this:
 - **The renderer is sandboxed; the helper itself is not, and cannot be.** The
   browser process holds the Wayland connection, the GPU buffers and the control
   socket, so it stays unsandboxed by design — the trust boundary is the page
-  code in the renderer, not `chromium-helper`. On a host with neither
+  code in the renderer, not `cefnest-helper`. On a host with neither
   unprivileged user namespaces nor a setuid `chrome-sandbox` the helper dies at
   startup instead of quietly running unsandboxed; `CHROMIUM_HELPER_NO_SANDBOX=1`
   is the way to say it on purpose (`docs/sandbox-policy.md`).

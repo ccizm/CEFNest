@@ -13,7 +13,7 @@
 ```bash
 # 跑 A：真 Chromium（helper）连我们 + demo 的 GDK 连 mutter，同一份日志
 timeout 30 env GDK_BACKEND=wayland CHROMIUM_HELPER=1 WAYLAND_DEBUG=1 \
-  CHROMIUM_SESSION_SCRIPT=/tmp/probe.session ./builddir/src/chromium-demo > /tmp/probe.log 2>&1
+  CHROMIUM_SESSION_SCRIPT=/tmp/probe.session ./builddir/src/cefnest-demo > /tmp/probe.log 2>&1
 
 # 跑 B：纯客户端连我们——seat-selftest 本体不开 GDK 显示，--gtk-client 的
 # 第二个进程用 GDK 连我们的 socket，日志里没有 mutter 的成分

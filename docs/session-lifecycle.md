@@ -3,7 +3,7 @@
 日期：2026-10-20
 问题：任务 #27。demo 里 `chromium_session_stop` 只有 header bar 上那颗「停止」按钮
 能调到，窗口关掉它就当没发生；`demo.session` 又是个从来不 unref 的 static。于是每
-跑一次，`$XDG_RUNTIME_DIR` 里多一个 `chromium-helper-<uuid>.sock`——名字每次都是新
+跑一次，`$XDG_RUNTIME_DIR` 里多一个 `cefnest-helper-<uuid>.sock`——名字每次都是新
 的 uuid，所以谁也不会回来收旧的。脚本化验证一晚上攒了 20 个。
 
 ## 1. 三条退出路径
@@ -71,7 +71,7 @@ A/B 实测（fake helper 自己在 0.7 s 后发 `{"event":"closed"}` 然后退�
 GDK_BACKEND=wayland \
 CHROMIUM_HELPER=$PWD/test/fake-helper.py \
 CHROMIUM_SESSION_SCRIPT=$PWD/test/close.session \
-builddir/src/chromium-demo
+builddir/src/cefnest-demo
 ```
 
 `close.session` 就是 load → wait 800 → **close**，脚本语法里新加的这一步走的是和

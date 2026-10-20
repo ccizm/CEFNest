@@ -21,11 +21,11 @@ libnested_dep = declare_dependency(
 )
 
 chromium_demo = executable(
-  'chromium-demo',
+  'cefnest-demo',
   [ 'main.c', 'chromium-view.c', 'chromium-session.c' ],
   c_args: [
     '-DCLIENT_PATH="' + meson.current_build_dir() + '/../test/shm-client"',
-    '-DHELPER_PATH="' + meson.current_source_dir() + '/../helper/build/Release/chromium-helper"',
+    '-DHELPER_PATH="' + meson.current_source_dir() + '/../helper/build/Release/cefnest-helper"',
   ],
   dependencies: [ libnested_dep, gtk_dep, json_dep ],
   install: false,

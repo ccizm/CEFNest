@@ -74,9 +74,9 @@ demo 的会话脚本多两步 `mute` / `unmute`，`::changed` 的转录里多一
   已经删掉。要对着 monitor 量，用 `parecord --device=<monitor>`，并在录之前核对
   `pactl list source-outputs` 里那条 `Source:` 是不是 monitor 的序号。
 * 所以最终的量法是：临时 `pactl load-module module-null-sink
-  sink_name=chromiumgtk-probe`，把 Chromium 那条流 `pactl move-sink-input` 到空 sink 上
+  sink_name=cefnest-probe`，把 Chromium 那条流 `pactl move-sink-input` 到空 sink 上
   （声音从此进不了扬声器，桌面上别的声音也进不了这次测量），然后 `parecord --device=
-  chromiumgtk-probe.monitor --format=s32le` 连续录下整个 mute/unmute 周期，量三个窗口。
+  cefnest-probe.monitor --format=s32le` 连续录下整个 mute/unmute 周期，量三个窗口。
   完了 `pactl unload-module`。
 
 结果（页面增益 0.0001 ≈ −80 dBFS，Goertzel 单频能量，满刻度 dBFS）：

@@ -10,7 +10,7 @@
 #include "chromium-session.h"
 
 #ifndef HELPER_PATH
-#define HELPER_PATH "chromium-helper"
+#define HELPER_PATH "cefnest-helper"
 #endif
 
 /* The session is the host half of the control channel. It listens on a private
@@ -586,7 +586,7 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
   g_free (self->socket_path);
   {
     g_autofree char *uuid = g_uuid_string_random ();
-    g_autofree char *name = g_strconcat ("chromium-helper-", uuid, ".sock", NULL);
+    g_autofree char *name = g_strconcat ("cefnest-helper-", uuid, ".sock", NULL);
 
     /* Unique per run: two windows on the same name would let a helper attach
      * to the wrong widget. */
