@@ -98,6 +98,12 @@ std::string EnvOrEmpty(const char* name) {
   return value ? value : "";
 }
 
+// The only reader of the sandbox opt-out. "1" is the only value that counts as
+// yes: a typo in a security knob should cost the run, not the sandbox.
+bool SandboxDisabled() {
+  return EnvOrEmpty("CHROMIUM_HELPER_NO_SANDBOX") == "1";
+}
+
 std::string PickUrl(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     if (argv[i][0] != '-')
@@ -535,10 +541,11 @@ class HelperApp : public CefApp {
     if (!process_type.empty())
       return;  // Browser process only.
 
-    // The component still has no sandbox decision. Settings.no_sandbox covers
-    // the browser process; this switch keeps the zygote and renderer
-    // subprocesses from trying to set one up.
-    command_line->AppendSwitch("no-sandbox");
+    // No --no-sandbox here on purpose. CefSettings.no_sandbox alone reaches the
+    // whole process tree: with CHROMIUM_HELPER_NO_SANDBOX=1 all seven
+    // subprocesses of a hosted run read Seccomp=0 in /proc
+    // (docs/sandbox-policy.md). Appending the switch a second time would only
+    // give the two paths a chance to drift.
 
     // Native Wayland, unless the host picked a platform on purpose.
     if (!command_line->HasSwitch("ozone-platform")) {
@@ -741,17 +748,24 @@ void PrintEnvironment() {
   // GDK_BACKEND belongs here with the display variables: GTK picks its backend
   // from it before it looks at DISPLAY at all, so "x11" leaking in from the host
   // is enough to make the helper die before it has a window.
+  //
+  // The sandbox is printed for whoever reads a transcript of a run that did not
+  // start: Chromium dies with "No usable sandbox!" when it has nothing to
+  // sandbox with, and the switch named in that message is not the knob this
+  // helper reads.
   fprintf(stderr,
           "helper: CEF %s\n"
           "helper: WAYLAND_DISPLAY=%s DISPLAY=%s XDG_SESSION_TYPE=%s\n"
           "helper: GDK_BACKEND=%s\n"
-          "helper: %s=%s\n",
+          "helper: %s=%s\n"
+          "helper: sandbox=%s\n",
           CEF_VERSION, EnvOrEmpty("WAYLAND_DISPLAY").c_str(),
           EnvOrEmpty("DISPLAY").c_str(),
           EnvOrEmpty("XDG_SESSION_TYPE").c_str(),
           EnvOrEmpty("GDK_BACKEND").c_str(), kSocketEnv,
           EnvOrEmpty(kSocketEnv).empty() ? "(unset, no control)"
-                                         : EnvOrEmpty(kSocketEnv).c_str());
+                                         : EnvOrEmpty(kSocketEnv).c_str(),
+          SandboxDisabled() ? "OFF (CHROMIUM_HELPER_NO_SANDBOX=1)" : "on");
 }
 
 }  // namespace
@@ -783,7 +797,12 @@ int main(int argc, char** argv) {
   fprintf(stderr, "helper: cache=%s\n", cache_dir.c_str());
 
   CefSettings settings;
-  settings.no_sandbox = true;  // Pending the component's sandbox decision.
+  // Sandbox on unless the host takes it off on purpose, and no fallback: a host
+  // with neither unprivileged user namespaces nor a setuid chrome-sandbox dies
+  // at zygote_host_impl_linux.cc with "No usable sandbox!" (SIGTRAP, and the
+  // session reports "helper killed by signal 5") rather than starting wide open.
+  // CHROMIUM_HELPER_NO_SANDBOX=1 is the way to say it deliberately.
+  settings.no_sandbox = SandboxDisabled();
   settings.windowless_rendering_enabled = false;
   settings.multi_threaded_message_loop = false;
   settings.external_message_pump = false;

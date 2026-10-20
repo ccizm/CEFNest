@@ -108,6 +108,7 @@ of it is reproducible runs:
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_WINDOW` | `fullscreen` or `maximize`, for deterministic geometry |
 | `CHROMIUM_CLIPSET` / `CHROMIUM_CLIPWATCH` | seed the host clipboard, and bridge it into the page |
+| `CHROMIUM_HELPER_NO_SANDBOX` | set to exactly `1` to run the helper without Chromium's sandbox; anything else — including a typo — leaves it on (`docs/sandbox-policy.md`) |
 | `G_MESSAGES_DEBUG` | **space-separated** domains: `all`, or `nested chromium-view chromium-session` — a comma list matches nothing |
 
 ## Test
@@ -199,6 +200,7 @@ They are the record of *why* the code is shaped like this:
 | `empty-request-slot.md` | a NULL request slot killing the whole desktop |
 | `wheel-resolution-and-key-repeat.md` | `axis_value120`, one frame per gesture, auto-repeat bookkeeping |
 | `clipboard-offer-during-client-init.md` | a legal `data_offer` sent one dispatch too early kills a GTK client |
+| `sandbox-policy.md` | the sandbox decision: no setuid helper needed, what a host without user namespaces does to the run |
 
 ## Known limitations
 
@@ -209,8 +211,15 @@ They are the record of *why* the code is shaped like this:
   the compositor knows about.
 - **Load failures are not a signal yet.** `load-error` arrives on the channel and
   is logged; there is no `ChromiumSession::load-error` to connect to.
-- **The helper's sandbox policy is undecided**, so treat the process as
-  unsandboxed.
+- **The renderer is sandboxed; the helper itself is not, and cannot be.** The
+  browser process holds the Wayland connection, the GPU buffers and the control
+  socket, so it stays unsandboxed by design — the trust boundary is the page
+  code in the renderer, not `chromium-helper`. On a host with neither
+  unprivileged user namespaces nor a setuid `chrome-sandbox` the helper dies at
+  startup instead of quietly running unsandboxed; `CHROMIUM_HELPER_NO_SANDBOX=1`
+  is the way to say it on purpose (`docs/sandbox-policy.md`).
+- **A renderer crash is not reported.** `OnRenderProcessTerminated` is not
+  implemented, so a killed renderer looks like a page that stopped moving.
 - **Native Wayland only, by design.** Under an X11 session GDK cannot give the
   widget a Wayland surface to hand to clients, so the component will not work
   there.
