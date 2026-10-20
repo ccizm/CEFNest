@@ -53,6 +53,7 @@ struct _ChromiumSession {
   gboolean can_go_forward;
   gboolean running;
   gboolean stopping;
+  gboolean closed_emitted;
 };
 
 G_DEFINE_TYPE (ChromiumSession, chromium_session, G_TYPE_OBJECT)
@@ -92,11 +93,17 @@ chromium_session_set_state (ChromiumSession *self,
 static void
 mark_closed (ChromiumSession *self, const char *why)
 {
-  if (!self->running && !self->child)
+  /* Both halves of a stop watch the helper go: whoever asked for it, and the
+   * pending child_waited once it is reaped. ::closed is the host's cue to tear
+   * down a toolbar, so it goes out once per start — and never for a session
+   * that was stillborn or is already being disposed. */
+  if (self->closed_emitted || (!self->running && !self->child))
     return;
 
-  g_message ("session: helper stopped (%s)", why);
+  self->closed_emitted = TRUE;
   self->running = FALSE;
+
+  g_message ("session: helper stopped (%s)", why);
   chromium_session_set_state (self, NULL, NULL, FALSE, FALSE, FALSE);
   g_signal_emit (self, signals[SIG_CLOSED], 0);
 }
@@ -589,6 +596,7 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
 
   self->running = TRUE;
   self->stopping = FALSE;
+  self->closed_emitted = FALSE;
   chromium_session_set_state (self, initial_url && *initial_url ? initial_url : "",
                               "", FALSE, FALSE, FALSE);
 
@@ -792,6 +800,8 @@ chromium_session_init (ChromiumSession *self)
   self->uri = g_strdup ("");
   self->title = g_strdup ("");
   self->cancellable = g_cancellable_new ();
+  /* Nothing has started, so there is nothing to report as closed yet. */
+  self->closed_emitted = TRUE;
 }
 
 static void
@@ -800,6 +810,10 @@ chromium_session_dispose (GObject *object)
   ChromiumSession *self = CHROMIUM_SESSION (object);
 
   self->stopping = TRUE;
+
+  /* Whoever disposes us is already taking us down: a ::closed from the reaping
+   * child_waited would reach a host that has moved on. */
+  self->closed_emitted = TRUE;
 
   if (self->cancellable)
     g_cancellable_cancel (self->cancellable);

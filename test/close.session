@@ -1,0 +1,3 @@
+load data:text/html,<title>fake</title><h1>lifecycle</h1>
+wait 800
+close

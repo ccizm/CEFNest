@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <glib-unix.h>
+
 #include "chromium-session.h"
 #include "chromium-view.h"
 
@@ -30,7 +32,7 @@ static Demo demo;
 static void
 update_title (void)
 {
-  NestedCompositor *compositor = chromium_view_get_compositor (demo.view);
+  NestedCompositor *compositor = demo.view ? chromium_view_get_compositor (demo.view) : NULL;
   NestedSurface *surface = compositor ? nested_compositor_get_surface (compositor) : NULL;
   const char *socket = compositor ? chromium_view_get_socket_name (demo.view) : NULL;
   const char *title = demo.session ? chromium_session_get_title (demo.session)
@@ -112,12 +114,18 @@ spawn_client (GtkButton *button, gpointer data)
 }
 
 static void
-stop_client (GtkButton *button, gpointer data)
+stop_everything (void)
 {
   if (demo.session)
     chromium_session_stop (demo.session);
   if (demo.child)
     g_subprocess_force_exit (demo.child);
+}
+
+static void
+stop_client (GtkButton *button, gpointer data)
+{
+  stop_everything ();
 }
 
 /* ------------------------------------------------------------------------ *
@@ -132,7 +140,7 @@ session_changed (ChromiumSession *session, gpointer data)
   const gboolean running = chromium_session_get_running (session);
 
   /* Only follow the page while the user is not mid-typing in the entry. */
-  if (!gtk_widget_has_focus (demo.address))
+  if (demo.address && !gtk_widget_has_focus (demo.address))
     gtk_editable_set_text (GTK_EDITABLE (demo.address),
                            chromium_session_get_uri (session));
 
@@ -169,8 +177,10 @@ session_script_result (ChromiumSession *session, int id, gboolean ok,
 static void
 session_closed (ChromiumSession *session, gpointer data)
 {
-  gtk_widget_set_sensitive (demo.back, FALSE);
-  gtk_widget_set_sensitive (demo.forward, FALSE);
+  if (demo.back)
+    gtk_widget_set_sensitive (demo.back, FALSE);
+  if (demo.forward)
+    gtk_widget_set_sensitive (demo.forward, FALSE);
   update_title ();
 }
 
@@ -379,12 +389,14 @@ dump_view (gpointer data)
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "hover <x> <y>",
- * "click <x> <y> [button]", "quit". This is how a headless run proves navigation,
- * history and repaint all work together. A "js" step is tagged with its own line
- * number, which is what comes back on ::script-result, so a result can be matched
- * to the step that asked for it. The page steps need a helper session; "hover",
- * "click", "shot" and "dump" work against any client, so the same script drives
- * the nested compositor without Chromium. */
+ * "click <x> <y> [button]", "close", "quit". This is how a headless run proves
+ * navigation, history and repaint all work together, and "close" is how it
+ * proves the way out of the window stops the helper with it. A "js" step is
+ * tagged with its own line number, which is what comes back on
+ * ::script-result, so a result can be matched to the step that asked for it.
+ * The page steps need a helper session; "hover", "click", "shot", "dump" and
+ * "close" work against any client, so the same script drives the nested
+ * compositor without Chromium. */
 typedef struct {
   GPtrArray *steps;
   guint index;
@@ -543,6 +555,14 @@ script_run_next (void)
           g_timeout_add (80, script_click_release, GUINT_TO_POINTER ((uint32_t) button));
           continue;
         }
+      else if (!strcmp (line, "close"))
+        {
+          /* The same route a hand on the close button takes: close-request
+           * first, then the window and everything in it. */
+          if (demo.window)
+            gtk_window_close (demo.window);
+          break;
+        }
       else if (!strcmp (line, "quit"))
         {
           break;
@@ -657,6 +677,53 @@ report (void)
                 demo.client_argv ? demo.client_argv[0] : "(none)");
 }
 
+/* GtkApplication owns the window, the box owns the view and the header bar owns
+ * the toolbar, so these are borrowed pointers and closing the window frees
+ * them. Leaving them set would make the next ::changed or ::closed title a
+ * window that no longer exists. */
+static void
+forget_widgets (void)
+{
+  demo.window = NULL;
+  demo.view = NULL;
+  demo.address = NULL;
+  demo.back = NULL;
+  demo.forward = NULL;
+}
+
+static gboolean
+window_close_request (GtkWindow *window, gpointer data)
+{
+  /* This is the stop: it reaps the helper, unlinks its control socket and
+   * takes the plain client down with it. It has to happen here rather than on
+   * shutdown, because ::closed updates the toolbar and the toolbar is what
+   * dies next — returning FALSE hands the window to GtkApplication, which
+   * destroys it and everything inside it. */
+  stop_everything ();
+  forget_widgets ();
+  return FALSE;
+}
+
+static void
+app_shutdown (GApplication *application, gpointer data)
+{
+  /* Reaching the end without a close — a script's "quit", a CHROMIUM_DUMP
+   * timer, a terminating signal — has to stop the helper too: the socket name
+   * is a fresh uuid per run, so a run that never stopped left one dead file
+   * behind in $XDG_RUNTIME_DIR and nothing came back for it. */
+  stop_everything ();
+  g_clear_object (&demo.session);
+  g_clear_object (&demo.child);
+  forget_widgets ();
+}
+
+static gboolean
+signal_quit (gpointer data)
+{
+  g_application_quit (G_APPLICATION (data));
+  return G_SOURCE_REMOVE;
+}
+
 static void
 activate (GApplication *application, gpointer data)
 {
@@ -672,6 +739,7 @@ activate (GApplication *application, gpointer data)
     }
 
   demo.window = GTK_WINDOW (gtk_application_window_new (GTK_APPLICATION (application)));
+  g_signal_connect (demo.window, "close-request", G_CALLBACK (window_close_request), NULL);
 
   demo.view = g_object_new (CHROMIUM_TYPE_VIEW, NULL);
 
@@ -754,6 +822,13 @@ main (int argc, char *argv[])
                                  NULL);
 
   g_signal_connect (app, "activate", G_CALLBACK (activate), NULL);
+  g_signal_connect (app, "shutdown", G_CALLBACK (app_shutdown), NULL);
+
+  /* Ctrl+C and `kill` reach us with the default disposition, which would drop
+   * the process with its helper socket still bound — so a signal becomes a
+   * quit, and the shutdown handler stops the helper on the way out. */
+  g_unix_signal_add (SIGINT, signal_quit, app);
+  g_unix_signal_add (SIGTERM, signal_quit, app);
 
   g_application_run (G_APPLICATION (app), 1, argv);
 
