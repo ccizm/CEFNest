@@ -3,12 +3,13 @@ src_inc = include_directories('.')
 libnested = static_library(
   'nested',
   [ 'nested.c', 'nested-dmabuf.c', 'nested-seat.c', 'nested-data-device.c',
-    'nested-xdg.c', 'nested-text-input.c',
+    'nested-xdg.c', 'nested-text-input.c', 'nested-cursor.c',
     xdg_shell_server_header, xdg_shell_code,
     dmabuf_server_header, dmabuf_code,
     viewporter_server_header, viewporter_code,
     fractional_scale_server_header, fractional_scale_code,
-    text_input_server_header, text_input_code ],
+    text_input_server_header, text_input_code,
+    cursor_shape_server_header, cursor_shape_code, tablet_code ],
   include_directories: gen_inc,
   dependencies: [ gtk_dep, wl_server_dep, xkb_dep, gbm_dep, drm_dep, threads_dep ],
 )

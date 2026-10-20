@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "cursor-shape-server-protocol.h"
 #include "fractional-scale-server-protocol.h"
 #include "linux-dmabuf-server-protocol.h"
 #include "text-input-server-protocol.h"
@@ -721,6 +722,11 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
   if (!repaint && self->texture &&
       (self->width != previous_width || self->height != previous_height))
     repaint = TRUE;
+
+  /* A client may have named this surface in wl_pointer.set_cursor before
+   * attaching to it, so this is where the cursor it asked for becomes real. */
+  if (nested)
+    cursor_surface_committed (nested, self);
 
   if (!self->mapped && self->xdg_surface && self->texture)
     {
@@ -1524,6 +1530,8 @@ nested_compositor_dispose (GObject *object)
   g_clear_object (&self->primary);
   g_clear_object (&self->pointer_focus);
   g_clear_object (&self->keyboard_focus);
+  g_clear_object (&self->cursor_pending);
+  g_clear_object (&self->cursor_target);
   g_clear_pointer (&self->socket_name, g_free);
 
   if (self->xkb_state)
@@ -1659,6 +1667,9 @@ nested_compositor_new (GError **error)
   self->global_text_input =
     wl_global_create (self->display, &zwp_text_input_manager_v3_interface,
                       NESTED_TEXT_INPUT_VERSION, self, text_input_manager_bind);
+  self->global_cursor_shape =
+    wl_global_create (self->display, &wp_cursor_shape_manager_v1_interface,
+                      NESTED_CURSOR_SHAPE_VERSION, self, cursor_shape_manager_bind);
 
   /* Optional: without a render node there is nothing to advertise and clients
    * keep using wl_shm. */

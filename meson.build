@@ -136,5 +136,41 @@ text_input_code = custom_target(
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
 
+cursor_shape_xml = protocols_dir / 'staging/cursor-shape/cursor-shape-v1.xml'
+
+cursor_shape_server_header = custom_target(
+  'cursor-shape-server-header',
+  input: cursor_shape_xml,
+  output: 'cursor-shape-server-protocol.h',
+  command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
+)
+
+cursor_shape_client_header = custom_target(
+  'cursor-shape-client-header',
+  input: cursor_shape_xml,
+  output: 'cursor-shape-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+
+cursor_shape_code = custom_target(
+  'cursor-shape-code',
+  input: cursor_shape_xml,
+  output: 'cursor-shape-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+
+# cursor-shape-v1 version 2 asks for a device for a zwp_tablet_tool_v2, and the
+# generated messages table names that interface even though the compositor has
+# no tablet. Only its descriptor is needed, so the tablet code is linked for
+# that and nothing implements it.
+tablet_xml = protocols_dir / 'stable/tablet/tablet-v2.xml'
+
+tablet_code = custom_target(
+  'tablet-code',
+  input: tablet_xml,
+  output: 'tablet-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+
 subdir('src')
 subdir('test')

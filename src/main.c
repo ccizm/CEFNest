@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -377,10 +378,11 @@ dump_view (gpointer data)
 
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
- * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "quit". This is how
- * a headless run proves navigation, history and repaint all work together. A
- * "js" step is tagged with its own line number, which is what comes back on
- * ::script-result, so a result can be matched to the step that asked for it. */
+ * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "hover <x> <y>",
+ * "quit". This is how a headless run proves navigation, history and repaint all
+ * work together. A "js" step is tagged with its own line number, which is what
+ * comes back on ::script-result, so a result can be matched to the step that
+ * asked for it. */
 typedef struct {
   GPtrArray *steps;
   guint index;
@@ -407,6 +409,8 @@ script_finish (void)
 static void
 script_run_next (void)
 {
+  NestedCompositor *compositor;
+
   while (session_script.steps && session_script.index < session_script.steps->len)
     {
       const char *line = g_ptr_array_index (session_script.steps, session_script.index++);
@@ -433,7 +437,7 @@ script_run_next (void)
         }
       else if (!strncmp (line, "dump ", 5))
         {
-          dump_view ((gpointer) line);
+          dump_view ((gpointer) (line + 5));
           return;
         }
       else if (!strcmp (line, "back"))
@@ -459,6 +463,29 @@ script_run_next (void)
       else if (!strcmp (line, "stop"))
         {
           chromium_session_stop_loading (demo.session);
+          continue;
+        }
+      else if (!strncmp (line, "hover ", 6))
+        {
+          int x = 0, y = 0;
+
+          if (2 != sscanf (line + 6, "%d %d", &x, &y))
+            {
+              g_warning ("demo: hover wants two numbers, got '%s'", line);
+              continue;
+            }
+
+          /* Pointer focus normally comes from the widget's own enter, and a
+           * headless run has no hand on a mouse. This stands in for it, which
+           * is how a page is made to ask for a cursor. */
+          compositor = chromium_view_get_compositor (demo.view);
+          if (!compositor)
+            {
+              g_warning ("demo: no nested compositor to hover on");
+              continue;
+            }
+          nested_compositor_set_pointer_active (compositor, TRUE);
+          nested_compositor_notify_pointer_motion (compositor, x, y);
           continue;
         }
       else if (!strcmp (line, "quit"))

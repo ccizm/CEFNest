@@ -162,6 +162,11 @@ chromium_view_on_map (GtkWidget *widget, gpointer data)
                                      gtk_widget_get_frame_clock (GTK_WIDGET (widget)));
 
   surface = gtk_native_get_surface (GTK_NATIVE (gtk_widget_get_native (GTK_WIDGET (self))));
+
+  /* The page decides what the pointer looks like over it, and this window is
+   * the only pointer the user can see. */
+  nested_compositor_set_cursor_target (self->compositor, surface);
+
   if (!surface || surface == self->scale_surface)
     return;
 
@@ -180,6 +185,7 @@ chromium_view_on_unmap (GtkWidget *widget, gpointer data)
   chromium_view_unwatch_scale (self);
   nested_compositor_set_clipboard (self->compositor, NULL);
   nested_compositor_set_frame_clock (self->compositor, NULL);
+  nested_compositor_set_cursor_target (self->compositor, NULL);
 }
 
 static void

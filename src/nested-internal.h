@@ -17,6 +17,7 @@ G_BEGIN_DECLS
 #define NESTED_DMABUF_MAX_PLANES 4
 #define NESTED_DATA_DEVICE_MANAGER_VERSION 3
 #define NESTED_TEXT_INPUT_VERSION 1
+#define NESTED_CURSOR_SHAPE_VERSION 1
 
 typedef struct _Pool Pool;
 typedef struct _Buffer Buffer;
@@ -136,6 +137,7 @@ struct _NestedCompositor {
   struct wl_global *global_fractional;
   struct wl_global *global_data;
   struct wl_global *global_text_input;
+  struct wl_global *global_cursor_shape;
 
   struct wl_list outputs;       /* OutputResource.link */
   struct wl_list surfaces;      /* NestedSurface.nested_link */
@@ -185,6 +187,15 @@ struct _NestedCompositor {
   GArray *pressed_keys;      /* uint32_t evdev codes */
   NestedSurface *pointer_focus;
   NestedSurface *keyboard_focus;
+  /* The window the widget draws its pointer in: whatever a client asks the
+   * cursor to be, it is set on this GdkSurface. NULL until the view maps. */
+  GdkSurface *cursor_target;
+  /* wl_pointer.set_cursor names a surface, and the cursor only changes when
+   * that surface commits. Set when the request arrives, applied again on the
+   * commit, and dropped as soon as a buffer is current. */
+  NestedSurface *cursor_pending;
+  int32_t cursor_hotspot_x;
+  int32_t cursor_hotspot_y;
   /* The one text input the widget should compose for: entered, and enabled by
    * its client. NULL means keys go to the client as plain wl_keyboard.key. */
   TextInput *active_input;
@@ -215,6 +226,26 @@ void        seat_retarget         (NestedCompositor *self);
 void        seat_clear_focus      (NestedCompositor *self, NestedSurface *surface);
 void        nested_setup_keymap   (NestedCompositor *self);
 gboolean    seat_resource_is_seat (struct wl_resource *resource);
+gboolean    seat_resource_is_pointer (struct wl_resource *resource);
+/* TRUE when @serial is the enter the client is currently inside, which is what
+ * wp_cursor_shape_device_v1.set_shape insists on before a cursor may change. */
+gboolean    seat_pointer_serial_is_current (struct wl_resource *pointer,
+                                            uint32_t serial);
+
+/* nested-cursor.c */
+void        cursor_shape_manager_bind (struct wl_client *client, void *data,
+                                       uint32_t version, uint32_t id);
+/* wl_pointer.set_cursor: a cursor surface, or NULL to hide the pointer. */
+void        cursor_pointer_set_cursor (NestedCompositor *self,
+                                       struct wl_resource *pointer,
+                                       struct wl_resource *surface,
+                                       int32_t hotspot_x, int32_t hotspot_y);
+/* Back to the widget's own pointer, as when nothing of ours is under it. */
+void        cursor_reset              (NestedCompositor *self);
+/* wl_surface.commit: a cursor surface named by set_cursor only takes effect
+ * once the client has committed the buffer it attached to it. */
+void        cursor_surface_committed  (NestedCompositor *self,
+                                       NestedSurface *surface);
 
 /* nested-dmabuf.c */
 void        nested_setup_dmabuf         (NestedCompositor *self);

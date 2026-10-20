@@ -32,6 +32,9 @@ struct _SeatClient {
   struct wl_resource *keyboard;
   gboolean pointer_inside;
   gboolean keyboard_inside;
+  /* The serial of the enter @pointer is inside, which is the only serial a
+   * cursor request may cite. Zero when nothing is under the pointer. */
+  uint32_t pointer_enter_serial;
   struct wl_list link;
 };
 
@@ -85,8 +88,16 @@ pointer_set_cursor (struct wl_client *client, struct wl_resource *resource,
                     uint32_t serial, struct wl_resource *surface,
                     int32_t hotspot_x, int32_t hotspot_y)
 {
-  /* The embedding widget draws the real cursor; a nested client's cursor
-   * surface is only ever a request to hide ours, which GTK does on its own. */
+  SeatClient *sc = wl_resource_get_user_data (resource);
+
+  /* The embedding widget owns the only pointer the user sees, so a client's
+   * cursor surface becomes a GdkCursor on it. A serial from an enter that is
+   * no longer current means the client is not under the pointer any more, and
+   * its cursor is not the one to show. */
+  if (!seat_pointer_serial_is_current (resource, serial))
+    return;
+
+  cursor_pointer_set_cursor (sc->nested, resource, surface, hotspot_x, hotspot_y);
 }
 
 static const struct wl_pointer_interface pointer_impl = {
@@ -102,6 +113,7 @@ pointer_resource_destroyed (struct wl_resource *resource)
   if (sc->pointer == resource)
     sc->pointer = NULL;
   sc->pointer_inside = FALSE;
+  sc->pointer_enter_serial = 0;
 }
 
 static void
@@ -207,21 +219,41 @@ seat_resource_is_seat (struct wl_resource *resource)
   return wl_resource_instance_of (resource, &wl_seat_interface, &seat_impl);
 }
 
+gboolean
+seat_resource_is_pointer (struct wl_resource *resource)
+{
+  return wl_resource_instance_of (resource, &wl_pointer_interface, &pointer_impl);
+}
+
+gboolean
+seat_pointer_serial_is_current (struct wl_resource *pointer, uint32_t serial)
+{
+  SeatClient *sc = wl_resource_get_user_data (pointer);
+
+  return sc->pointer == pointer && sc->pointer_inside &&
+         sc->pointer_enter_serial == serial;
+}
+
 static void
 pointer_send_enter (NestedCompositor *self, struct wl_resource *pointer,
                     NestedSurface *surface)
 {
+  SeatClient *sc = wl_resource_get_user_data (pointer);
+  uint32_t serial;
+
   if (!seat_surface_is_mine (pointer, surface))
     return;
 
-  wl_pointer_send_enter (pointer, nested_next_serial (self), surface->wl_surface,
+  serial = nested_next_serial (self);
+  wl_pointer_send_enter (pointer, serial, surface->wl_surface,
                          wl_fixed_from_double (self->pointer_x),
                          wl_fixed_from_double (self->pointer_y));
 
   if (wl_resource_get_version (pointer) >= WL_POINTER_FRAME_SINCE_VERSION)
     wl_pointer_send_frame (pointer);
 
-  ((SeatClient *) wl_resource_get_user_data (pointer))->pointer_inside = TRUE;
+  sc->pointer_inside = TRUE;
+  sc->pointer_enter_serial = serial;
 }
 
 static void
@@ -239,6 +271,7 @@ pointer_send_leave (NestedCompositor *self, struct wl_resource *pointer,
     wl_pointer_send_frame (pointer);
 
   sc->pointer_inside = FALSE;
+  sc->pointer_enter_serial = 0;
 }
 
 static void
@@ -312,6 +345,10 @@ seat_retarget (NestedCompositor *self)
               pointer_send_enter (self, sc->pointer, target);
           g_set_object (&self->pointer_focus, target);
         }
+
+      /* Whatever cursor the surface that just left had asked for is no longer
+       * the one to show; the new focus sets its own if it wants one. */
+      cursor_reset (self);
     }
   else if (!self->pointer_wanted && self->pointer_focus)
     {
@@ -321,6 +358,7 @@ seat_retarget (NestedCompositor *self)
         if (sc->pointer)
           pointer_send_leave (self, sc->pointer, old);
       g_clear_object (&self->pointer_focus);
+      cursor_reset (self);
     }
 
   if (self->keyboard_wanted && target != self->keyboard_focus)
@@ -374,8 +412,12 @@ seat_clear_focus (NestedCompositor *self, NestedSurface *surface)
       /* No leave can be sent for a destroyed surface, so forget that any
        * client is entered; a later enter starts the pair again. */
       wl_list_for_each (sc, &self->seat_clients, link)
-        sc->pointer_inside = FALSE;
+        {
+          sc->pointer_inside = FALSE;
+          sc->pointer_enter_serial = 0;
+        }
       g_clear_object (&self->pointer_focus);
+      cursor_reset (self);
     }
   if (self->keyboard_focus == surface)
     {

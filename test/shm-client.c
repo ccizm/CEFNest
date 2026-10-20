@@ -22,6 +22,7 @@
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include "cursor-shape-client-protocol.h"
 #include "fractional-scale-client-protocol.h"
 #include "linux-dmabuf-client-protocol.h"
 #include "text-input-client-protocol.h"
@@ -80,6 +81,8 @@ static struct wp_fractional_scale_v1 *fractional_scale;
 static struct wl_surface *surface;
 static struct xdg_surface *xdg_surface;
 static struct xdg_toplevel *toplevel;
+static struct wp_cursor_shape_manager_v1 *cursor_shape_manager;
+static struct wp_cursor_shape_device_v1 *cursor_shape_device;
 
 static struct gbm_device *gbm;
 static int use_dmabuf;
@@ -119,6 +122,18 @@ static char field[192] = "field:";
 static int field_caret;     /* byte index of the caret inside field */
 static char preedit[128];
 static int32_t preedit_begin, preedit_end;
+
+/* Cursor identity. --cursor-shape asks wp_cursor_shape_device_v1 for one of the
+ * CSS shapes every time the pointer enters, cycling so repeated enters cover
+ * several names; --cursor-surface takes the older path and hands the compositor
+ * a surface of our own drawing through wl_pointer.set_cursor. Both have to cite
+ * the serial of the enter they answer, which is what the compositor checks. */
+static int use_cursor_shape;
+static int use_cursor_surface;
+static uint32_t enter_serial;
+static struct wl_surface *cursor_surface;
+static struct wl_buffer *cursor_buffer;
+static int cursor_asks;
 
 /* What zwp_linux_dmabuf_feedback_v1 told us: the device the compositor wants
  * buffers on, and its (format, modifier) pairs in preference order. */
@@ -161,6 +176,7 @@ static const struct zwp_text_input_v3_listener text_input_listener;
 static void do_copy (void);
 static void ensure_data_device (void);
 static void ensure_text_input (void);
+static void ensure_cursor_shape (void);
 
 static void
 overlay_rect (Buffer *buffer, int x, int y, int w, int h, uint32_t color)
@@ -710,6 +726,93 @@ static const struct wl_surface_listener surface_listener = {
 };
 
 /* ------------------------------------------------------------------ *
+ * cursor identity                                                    *
+ * ------------------------------------------------------------------ */
+
+#define N_CURSOR_SHAPES 5
+
+static const uint32_t cursor_shapes[N_CURSOR_SHAPES] = {
+  WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT,
+  WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER,
+  WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_WAIT,
+  WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CROSSHAIR,
+  WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRAB,
+};
+
+static void
+ensure_cursor_shape (void)
+{
+  if (!use_cursor_shape || !cursor_shape_manager || !pointer || cursor_shape_device)
+    return;
+
+  cursor_shape_device =
+    wp_cursor_shape_manager_v1_get_pointer (cursor_shape_manager, pointer);
+}
+
+/* The surface the older wl_pointer.set_cursor path needs: an arrow of our own,
+ * because a compositor that has never seen one is the bug this tests for. */
+static void
+cursor_surface_create (void)
+{
+  const int size = 32;
+  struct wl_shm_pool *pool;
+  uint32_t *pixels;
+  int fd, x, y;
+
+  if (!compositor || !shm || cursor_surface)
+    {
+      use_cursor_surface = 0;
+      return;
+    }
+
+  cursor_surface = wl_compositor_create_surface (compositor);
+  pixels = map_pool (size * size * 4, &fd);
+  pool = wl_shm_create_pool (shm, fd, size * size * 4);
+  cursor_buffer = wl_shm_pool_create_buffer (pool, 0, size, size, size * 4,
+                                             WL_SHM_FORMAT_ARGB8888);
+  wl_shm_pool_destroy (pool);
+  close (fd);
+
+  /* Opaque blue wedge on nothing else, so the hotspot at its tip is testable. */
+  for (y = 0; y < size; y++)
+    for (x = 0; x < size; x++)
+      pixels[y * size + x] =
+        (x <= y && x < 14) ? 0xff2020ffu : 0x00000000u;
+
+  wl_surface_attach (cursor_surface, cursor_buffer, 0, 0);
+  wl_surface_damage (cursor_surface, 0, 0, size, size);
+}
+
+static void
+ask_cursor (void)
+{
+  if (cursor_shape_device)
+    {
+      uint32_t shape = cursor_shapes[cursor_asks % N_CURSOR_SHAPES];
+
+      cursor_asks++;
+      wp_cursor_shape_device_v1_set_shape (cursor_shape_device, enter_serial, shape);
+      fprintf (stderr, "client: cursor shape %u, serial=%u\n", shape, enter_serial);
+      return;
+    }
+
+  if (!use_cursor_surface)
+    return;
+
+  cursor_surface_create ();
+  if (!cursor_surface)
+    return;
+
+  /* set_cursor first, commit after: the protocol says the cursor changes with
+   * that commit, so a compositor that only looks at the buffer it finds right
+   * now shows an arrow where this wedge belongs. */
+  wl_pointer_set_cursor (pointer, enter_serial, cursor_surface, 2, 2);
+  wl_surface_commit (cursor_surface);
+  fprintf (stderr, "client: wl_pointer.set_cursor with our own surface, serial=%u\n",
+           enter_serial);
+}
+
+/* ------------------------------------------------------------------ *
  * wl_seat                                                            *
  * ------------------------------------------------------------------ */
 
@@ -722,9 +825,12 @@ pointer_enter (void *data, struct wl_pointer *wl_pointer, uint32_t serial,
   pointer_inside = 1;
   pointer_x = wl_fixed_to_double (sx);
   pointer_y = wl_fixed_to_double (sy);
+  enter_serial = serial;
 
   fprintf (stderr, "client: pointer enter serial=%u at %.1f,%.1f\n",
            serial, pointer_x, pointer_y);
+
+  ask_cursor ();
 }
 
 static void
@@ -1109,6 +1215,7 @@ seat_capabilities (void *data, struct wl_seat *wl_seat, uint32_t caps)
 
   ensure_data_device ();
   ensure_text_input ();
+  ensure_cursor_shape ();
 }
 
 static void
@@ -1506,6 +1613,13 @@ registry_global (void *data, struct wl_registry *registry, uint32_t name,
                                              version < 1 ? version : 1);
       ensure_text_input ();
     }
+  else if (!strcmp (interface, "wp_cursor_shape_manager_v1"))
+    {
+      cursor_shape_manager = wl_registry_bind (registry, name,
+                                               &wp_cursor_shape_manager_v1_interface,
+                                               version < 1 ? version : 1);
+      ensure_cursor_shape ();
+    }
   else if (!strcmp (interface, "wl_seat"))
     {
       seat = wl_registry_bind (registry, name, &wl_seat_interface,
@@ -1553,6 +1667,10 @@ main (int argc, char *argv[])
         }
       else if (!strncmp (argv[i], "--render-node=", 14))
         snprintf (render_node, sizeof render_node, "%s", argv[i] + 14);
+      else if (!strcmp (argv[i], "--cursor-shape"))
+        use_cursor_shape = 1;
+      else if (!strcmp (argv[i], "--cursor-surface"))
+        use_cursor_surface = 1;
       else
         fprintf (stderr, "client: ignoring unknown argument '%s'\n", argv[i]);
     }
@@ -1633,6 +1751,10 @@ main (int argc, char *argv[])
   /* Either global could have arrived after the other, and both have to be in
    * hand before a text input can be created. */
   ensure_text_input ();
+  ensure_cursor_shape ();
+
+  if (use_cursor_shape && !cursor_shape_manager)
+    fprintf (stderr, "client: no wp_cursor_shape_manager_v1, no shapes to ask for\n");
 
   surface = wl_compositor_create_surface (compositor);
   wl_surface_add_listener (surface, &surface_listener, NULL);

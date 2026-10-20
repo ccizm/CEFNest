@@ -16,28 +16,33 @@ popup 定位都在排队）。单文件装了七个本可独立的协议域，�
 
 ## 2. 文件布局
 
+行数为当前值（frame-clock 与 cursor-shape 落地之后），职责列随每次新增协议更新：
+
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `src/nested.c` | 1722 | 核心：NestedSurface（wl_surface/commit 语义）、wl_shm/pool/buffer、帧回调、wp_viewporter、wp_fractional_scale_v1、NestedCompositor 生命周期（socket/globals/frame clock/dispose/公开 API） |
-| `src/nested-internal.h` | 245 | 私有共享头：跨模块类型 + 跨模块函数声明。不是公开 API——外部消费者仍然只用 `nested.h` |
-| `src/nested-seat.c` | 669 | wl_seat/wl_pointer/wl_keyboard、xkb keymap 编译与下发、输入注入公开 API（`nested_compositor_notify_*`、`set_*_active`）、`seat_retarget`/`seat_clear_focus` |
+| `src/nested.c` | 1814 | 核心：NestedSurface（wl_surface/commit 语义）、wl_shm/pool/buffer、帧回调、wp_viewporter、wp_fractional_scale_v1、NestedCompositor 生命周期（socket/globals/frame clock/dispose/公开 API） |
+| `src/nested-internal.h` | 278 | 私有共享头：跨模块类型 + 跨模块函数声明。不是公开 API——外部消费者仍然只用 `nested.h` |
+| `src/nested-seat.c` | 711 | wl_seat/wl_pointer/wl_keyboard、xkb keymap 编译与下发、输入注入公开 API（`nested_compositor_notify_*`、`set_*_active`）、`seat_retarget`/`seat_clear_focus`、enter 序号记账（供 cursor 校验） |
 | `src/nested-data-device.c` | 846 | wl_data_device_manager 剪贴板桥（仅文本、双向、4MB 上限）、`nested_compositor_set_clipboard`、`data_device_shutdown` |
 | `src/nested-text-input.c` | 604 | zwp_text_input_v3 协议端（双缓冲状态、commit 计数序号、密码字段屏蔽）+ 控件侧公开 API（preedit/commit/delete-surrounding、字节↔字符偏移换算） |
 | `src/nested-dmabuf.c` | 584 | gbm 渲染节点探测、zwp_linux_dmabuf_v1（v5 + feedback 格式表）、buffer params、dmabuf 纹理导入 |
 | `src/nested-xdg.c` | 522 | xdg_wm_base/xdg_surface/xdg_toplevel/xdg_popup、wl_output、`xdg_surface_configure`、`output_send_state_all` |
+| `src/nested-cursor.c` | 362 | wp_cursor_shape_manager_v1（CSS 形状 → GDK 光标名）、wl_pointer.set_cursor（客户端自带光标图 → `gdk_cursor_new_from_texture`，等 surface commit 生效）、`nested_compositor_set_cursor_target` |
 
 模块依赖方向（单向，核心被依赖，从不反向）：
 
 ```
             nested-internal.h（类型 + 声明）
                      ▲
-   ┌─────────┬───────┼─────────┬──────────┬───────────┐
-nested.c   seat   data-device  dmabuf   text-input   xdg
-（核心）     │        │           │          │         │
-   ▲        │        │           │          │         │
+   ┌─────────┬───────┼───────┬──────────┬───────────┬──────────┐
+nested.c   seat   data-device dmabuf  text-input    xdg      cursor
+（核心）     │        │         │          │         │         │
+   ▲        │        │         │          │         │         │
    └── surface_commit/destroy 会在关键路径上调用
        seat_clear_focus / text_input_forget_surface /
-       xdg_surface_configure / nested_update_primary
+       cursor_surface_committed / xdg_surface_configure /
+       nested_update_primary
+   cursor ── seat_resource_is_pointer / seat_pointer_serial_is_current
 ```
 
 ## 3. nested-internal.h 里放了什么
@@ -59,7 +64,8 @@ nested.c   seat   data-device  dmabuf   text-input   xdg
 
 **宏**：版本上限全部集中到头文件——`NESTED_SEAT_VERSION`、`NESTED_DMABUF_VERSION`、
 `NESTED_DMABUF_MAX_PLANES`（Buffer 数组尺寸，必须共享）、
-`NESTED_DATA_DEVICE_MANAGER_VERSION`、`NESTED_TEXT_INPUT_VERSION`。
+`NESTED_DATA_DEVICE_MANAGER_VERSION`、`NESTED_TEXT_INPUT_VERSION`、
+`NESTED_CURSOR_SHAPE_VERSION`。
 `NESTED_SEAT_NAME`/`NESTED_POINTER_VERSION`/`NESTED_KEYBOARD_VERSION` 只有 seat 用，
 留在 nested-seat.c。
 
@@ -79,6 +85,18 @@ nested.c   seat   data-device  dmabuf   text-input   xdg
 
 小函数搬家（非新增）：`nested_next_serial`/`nested_now_msec` 从核心移到 seat 文件
 （全项目只有输入注入用它们；核心的 frame clock 直接读 `g_get_monotonic_time()`）。
+
+### 4.1 拆分之后新增的接缝（cursor-shape）
+
+新协议按 §9 的约定单开 `nested-cursor.c`，沿用同一做法——跨文件引用一律收敛成
+有名字的函数，`pointer_impl`、`CursorDevice` 之类继续留在各自文件里：
+
+| 接缝 | 定义处 | 作用 |
+|---|---|---|
+| `seat_resource_is_pointer(resource)` | nested-seat.c | `get_pointer` 的参数必须真是本 compositor 发出的 wl_pointer（否则 `post_wrong_object`） |
+| `seat_pointer_serial_is_current(pointer, serial)` | nested-seat.c | `set_shape`/`set_cursor` 只认当前那次 enter 的序号；抢在 leave 之后属正常竞态，静默忽略而非报错 |
+| `cursor_surface_committed(self, surface)` | nested-cursor.c | 核心 commit 路径回调：`wl_pointer.set_cursor` 点名的 surface 要到 commit 才真正换光标 |
+| `cursor_reset(self)` | nested-cursor.c | 指针焦点变化、或换 target surface 时收回客户端光标，回到控件自己的指针 |
 
 ## 5. 链接属性改动
 
@@ -115,6 +133,13 @@ nested.c   seat   data-device  dmabuf   text-input   xdg
 'nested-xdg.c', 'nested-text-input.c', …]`。依赖、生成的协议源、demo/测试目标
 均不变。
 
+cursor-shape 落地时新增的构建项：`staging/cursor-shape/cursor-shape-v1.xml` 的
+server header / client header / private-code 三个 target（测试客户端用 client
+header，libnested 用 server header + code）。另外该协议的 v2 请求
+`get_tablet_tool_v2` 在生成的消息表里引用 `zwp_tablet_tool_v2_interface`，
+所以还要把 `stable/tablet/tablet-v2.xml` 的 private-code 一起链入——只用它的
+接口描述符，本项目没有任何平板实现，advertise 的版本是 1，这条请求根本到不了。
+
 ## 8. 验证
 
 1. **编译**：`ninja` 全量通过。唯一告警是 `nested.c` 中
@@ -132,10 +157,24 @@ selftest 未覆盖的路径：剪贴板（data-device）与 CEF 嵌套。这两�
 建议下次跑 `clip-copy`/`clip-paste` 冒烟和 `cef-windowed-probe` 的
 `run-nested.sh` 时顺带确认。
 
+### 8.1 cursor-shape 落地后的回归
+
+1. `seat-selftest` 17 步全通过（不带 cursor 参数），带 `--dmabuf --text-input`
+   同过；`--cursor-shape` 时日志出现 `nested: pointer becomes text`。
+2. `--cursor-surface` 走 `wl_pointer.set_cursor`：先 `default`（此刻还没有
+   buffer），随后的 commit 再变 `a client image`——正好证明"等 commit 生效"
+   这条语义成立。
+3. 真 CEF：demo 脚本新增 `hover <x> <y>` 步骤（无头跑也能让页面命中测试），
+   依次悬停 `<input>` / `<a>` / `cursor: grab` 的 div，日志依次为
+   `text` / `pointer` / `grab`，全部来自 Chromium 的
+   `wp_cursor_shape_device_v1.set_shape`。
+4. 同批修掉 demo 脚本 `dump <path>` 少切前缀的 bug（把整行当路径写出，
+   导致 PNG 从来没写成过）。
+
 ## 9. 后续
 
-- 该拆分在无版本控制状态下完成。建议尽快 `git init` 并以本次拆分为首个
-  commit（或先提交拆分前备份再提交拆分，保留完整 diff）。
-- 后续新协议（cursor-shape、popup positioner、subcompositor）各自开新文件；
-  seat 侧输入类协议归 `nested-seat.c` 或仿照 text-input 单独开文件，不再回到
-  `nested.c`。
+- 该拆分在无版本控制状态下完成，随后已 `git init` 并以拆分为早期 commit 之一入库。
+- 后续新协议按本文件的约定各自开新文件：cursor-shape 已落地为
+  `src/nested-cursor.c`（见 §2/§4.1/§8.1），popup positioner、subcompositor
+  仍未动工；seat 侧输入类协议继续归 `nested-seat.c` 或仿照 text-input 单开文件，
+  不再回到 `nested.c`。

@@ -80,6 +80,15 @@ void              nested_compositor_notify_keyboard_key   (NestedCompositor *sel
                                                            uint32_t evdev_code,
                                                            gboolean pressed);
 
+/* Cursor identity. A client names the pointer it wants: wp_cursor_shape_manager
+ * carries the CSS shapes a web page asks for, wl_pointer.set_cursor the image
+ * an older client draws for itself. The nested compositor has no pointer to
+ * put them on, so pass gtk_native_get_surface() on map and NULL on unmap, like
+ * set_clipboard(): what a client asks for becomes the cursor of @surface, and
+ * the widget's own pointer comes back when the page is no longer under it. */
+void              nested_compositor_set_cursor_target     (NestedCompositor *self,
+                                                           GdkSurface *surface);
+
 /* Text input (zwp_text_input_v3). The nested compositor is the input-method
  * host, and the embedding widget is the only thing that can reach a real
  * engine, so the widget drives its own GtkIMContext and feeds the result back
