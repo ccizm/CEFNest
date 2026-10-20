@@ -450,6 +450,24 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
+  if (name == "mute") {
+    CefRefPtr<CefBrowserHost> host = g_browser->GetHost();
+    if (!host) {
+      EmitStatus("no-host");
+      return;
+    }
+    const bool mute =
+        command->HasKey("on") ? command->GetBool("on") : !host->IsAudioMuted();
+    host->SetAudioMuted(mute);
+    // Reported back rather than assumed: the page's sound leaves this process
+    // through an unsandboxed audio service (docs/audio-path.md), and whether it
+    // is silenced is a fact about that service, not about this call.
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("muted");
+    dict->SetBool("muted", host->IsAudioMuted());
+    Emit(dict);
+    return;
+  }
+
   if (name == "js") {
     const std::string code = command->GetString("code").ToString();
     if (code.empty()) {

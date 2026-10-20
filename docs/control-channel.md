@@ -60,13 +60,14 @@ demo: renderer exited status=1 error=9 9
 
 ## 3. 现在通道上有的东西
 
-命令 7 条，事件 10 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
+命令 8 条，事件 11 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
 
 | 方向 | 名字 | 载荷 |
 | --- | --- | --- |
 | host → helper | `load` | `url` |
 | host → helper | `back` `forward` `reload` `stop` `quit` | `reload` 多一个 `hard` |
 | host → helper | `js` | `code`、`id` |
+| host → helper | `mute` | `on`（缺省 = 翻转） |
 | helper → host | `ready` | `cef`、`pid`、`url` |
 | helper → host | `address` | `url`（只有真正提交的导航才发） |
 | helper → host | `title` | `title` |
@@ -74,11 +75,13 @@ demo: renderer exited status=1 error=9 9
 | helper → host | `load-end` | `url`、`http_code`（**失败也发，码为 0**） |
 | helper → host | `load-error` | `error_code`、`url`、`message` |
 | helper → host | `renderer-exited` | `status`、`error_code`、`message`（新） |
+| helper → host | `muted` | `muted`（`SetAudioMuted` 之后的 `IsAudioMuted()` 回读） |
 | helper → host | `js-result` | `id`、`ok`、`value`、`message` |
 | helper → host | `status` `closed` | 文本 / 无 |
 
 `ChromiumSession` 的信号：`::changed`、`::ready`、`::load-end`、`::load-error`（新）、
-`::renderer-exited`（新）、`::script-result`、`::closed`。
+`::renderer-exited`（新）、`::script-result`、`::closed`。`::changed` 现在也会随
+`muted` 事件落地。
 
 `load-error` 和 `renderer-exited` 都是 3 个参数，`renderer-exited` 那两个 int 一个是 CEF 的
 枚举、一个是平台错误码——刻意不合并成一条"出错了"信号：一个是"这一页没来"，另一个是
@@ -94,7 +97,7 @@ demo: renderer exited status=1 error=9 9
 | --- | --- | --- | --- |
 | 页内查找 | `CefBrowserHost::Find` + `CefFindHandler`（命中数、高亮位置都是回调） | **不做**，先记着 | 一问一答装不下"总共 N 处，当前第 M 处"；要做得先给通道加相关任务的 id 空间，和 `js-result` 那套是两码事 |
 | 页面缩放 | `SetZoomLevel` / `GetZoomLevel` | **不做** | 代价最小的一条，但宿主此刻没有理由需要它：控件尺寸变了 Chromium 自己会重排。等真出现"字号设置"的产品需求再加 |
-| 静音 / 音量 | `SetAudioMuted` | **待测** | 先得确认这条路径到底会不会出声：音频在哪个进程里、嵌套合成器管不管得着，都没量过。**不去放大喇叭试探别人的机器**，所以这一格停在"待测" |
+| 静音 / 音量 | `SetAudioMuted` / `IsAudioMuted` | **mute 已做**，音量不做 | `docs/audio-path.md` 把路径量掉了：页面出的声住在一个不沙箱的 `audio.mojom.AudioService` utility 里、直达宿主桌面，组件自己的开关只有这一个；它一次请求、无需回答，符合判据。音量是桌面混音器已经管着的事，不再画第二遍 |
 | 下载 | `CefDownloadHandler::OnBeforeDownload` + 进度 + 取消 | **不做** | 需要落盘策略、路径来源、进度与取消三件事，是一个功能而不是一个命令 |
 | DevTools | `ShowDevTools` | **不做** | 那是第二个顶层窗口；嵌套合成器现在只合成一个 toplevel + 它的 popup（#21），要开就是 `xdg_toplevel` 的第二实例，属于协议侧的决定 |
 | 历史列表 | `CefNavigationEntryVisitor` | **不做** | 现在只有 `can_go_back/forward` 两个布尔；列表是查询型（要 id 空间），同"页内查找" |
@@ -128,6 +131,9 @@ demo: renderer exited status=1 error=9 9
   会话随后 `quit`，`helper stopped (stopped by the host)` 照常——renderer 死了不影响退出
   路径（#27 那三条路仍然成立）。
 
+`mute` / `muted` 那一对也两头看过：假 helper 回读状态，真 Chromium 用 `docs/audio-path.md`
+第 3 节的空 sink 录音证明 mute 之后到达音频服务器的是精确的数字静音。
+
 `meson test -C builddir` 9/9 照旧全过（那套测的是 compositor 侧，不碰控制通道）。
 
 ## 6. 还没做的
@@ -136,5 +142,6 @@ demo: renderer exited status=1 error=9 9
   被吃到（`address`/`load-end` 是间接证据）。要不要给每条命令配一个 `ok`，等 §4 里出现
   需要它的那条再说。
 * **utility 进程（网络、音频）掉了没人报**。CEF 只为渲染进程发这个回调，§2 实测过杀另一个
-  是没有声音的。宿主能看到的兜底只有 `::closed`。
+  是没有声音的。音频现在确认就住在一个 `Seccomp=0` 的 `audio.mojom.AudioService` utility
+  里（`docs/audio-path.md`），宿主能看到的兜底只有 `::closed`。
 * `::renderer-exited` 之后 helper **不会自己把页面重载**，也不该——重载策略是宿主的。

@@ -151,12 +151,13 @@ session_changed (ChromiumSession *session, gpointer data)
                             running && chromium_session_get_can_go_forward (session));
   update_title ();
 
-  g_printerr ("demo: uri=%s title=%s loading=%d back=%d forward=%d\n",
+  g_printerr ("demo: uri=%s title=%s loading=%d back=%d forward=%d muted=%d\n",
               chromium_session_get_uri (session),
               chromium_session_get_title (session),
               chromium_session_get_loading (session),
               chromium_session_get_can_go_back (session),
-              chromium_session_get_can_go_forward (session));
+              chromium_session_get_can_go_forward (session),
+              chromium_session_get_muted (session));
 }
 
 static void
@@ -413,10 +414,10 @@ dump_view (gpointer data)
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "hover <x> <y>",
  * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
- * "wheel <dx> <dy>", "close", "quit". This is how a headless run proves
- * navigation, history and repaint all work together, and "close" is how it
- * proves the way out of the window stops the helper with it. A "js" step is
- * tagged with its own line number, which is what comes back on
+ * "wheel <dx> <dy>", "mute", "unmute", "close", "quit". This is how a headless
+ * run proves navigation, history and repaint all work together, and "close" is
+ * how it proves the way out of the window stops the helper with it. A "js" step
+ * is tagged with its own line number, which is what comes back on
  * ::script-result, so a result can be matched to the step that asked for it.
  * The page steps need a helper session; "hover", "click", "drag", "wheel",
  * "shot", "dump" and "close" work against any client, so the same script drives
@@ -509,7 +510,8 @@ script_run_next (void)
       if (!demo.session && (!strncmp (line, "load ", 5) || !strncmp (line, "js ", 3) ||
                             !strcmp (line, "back") || !strcmp (line, "forward") ||
                             !strcmp (line, "reload") || !strcmp (line, "reload-hard") ||
-                            !strcmp (line, "stop")))
+                            !strcmp (line, "stop") || !strcmp (line, "mute") ||
+                            !strcmp (line, "unmute")))
         {
           g_warning ("demo: '%s' needs a Chromium helper session", line);
           continue;
@@ -563,6 +565,16 @@ script_run_next (void)
       else if (!strcmp (line, "stop"))
         {
           chromium_session_stop_loading (demo.session);
+          continue;
+        }
+      else if (!strcmp (line, "mute"))
+        {
+          chromium_session_set_muted (demo.session, TRUE);
+          continue;
+        }
+      else if (!strcmp (line, "unmute"))
+        {
+          chromium_session_set_muted (demo.session, FALSE);
           continue;
         }
       else if (!strncmp (line, "hover ", 6))

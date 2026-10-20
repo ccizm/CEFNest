@@ -57,6 +57,8 @@ def send(payload):
 
 send({"event": "ready", "pid": os.getpid(), "cef": "fake"})
 
+muted = False
+
 while True:
     line = channel.readline()
     if not line:
@@ -64,6 +66,15 @@ while True:
     try:
         command = json.loads(line)
     except ValueError:
+        continue
+
+    if command.get("cmd") == "mute":
+        # Answered with the state the fake ends up in rather than with what was
+        # asked, because the real helper reads CefBrowserHost back, and "on"
+        # missing means toggle there too.
+        wanted = command.get("on")
+        muted = (not muted) if wanted is None else bool(wanted)
+        send({"event": "muted", "muted": muted})
         continue
 
     if command.get("cmd") != "load":

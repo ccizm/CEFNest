@@ -179,12 +179,17 @@ if (!chromium_session_start (session, "https://example.com", &error))
   g_printerr ("%s\n", error->message);
 ```
 
-`ChromiumSession` signals: `::changed` (uri / title / loading / history moved),
-`::ready` (the helper answered its handshake), `::load-end` (uri, HTTP code —
-it fires for failed loads too, with code 0), `::load-error` (net error code,
-uri, name), `::renderer-exited` (termination status, error code, message),
-`::script-result` (id, ok, JSON value, message), `::closed` (the helper is gone
-and will not come back). `docs/control-channel.md` is the full command and event
+`ChromiumSession` signals: `::changed` (uri / title / loading / history moved,
+and the mute state landing), `::ready` (the helper answered its handshake),
+`::load-end` (uri, HTTP code — it fires for failed loads too, with code 0),
+`::load-error` (net error code, uri, name), `::renderer-exited` (termination
+status, error code, message), `::script-result` (id, ok, JSON value, message),
+`::closed` (the helper is gone and will not come back).
+`chromium_session_set_muted ()` silences the page — its sound leaves the helper
+through an unsandboxed audio process and lands on the host's speakers, and the
+stream stays open while muted, so the desktop mixer cannot see the switch
+(`docs/audio-path.md`).
+`docs/control-channel.md` is the full command and event
 list, and the record of the commands decided against.
 
 ## Where the detail is
@@ -205,6 +210,7 @@ They are the record of *why* the code is shaped like this:
 | `clipboard-offer-during-client-init.md` | a legal `data_offer` sent one dispatch too early kills a GTK client |
 | `sandbox-policy.md` | the sandbox decision: no setuid helper needed, what a host without user namespaces does to the run |
 | `control-channel.md` | every command and event on the socket, what a failed load and a dead renderer look like, and the commands decided against |
+| `audio-path.md` | where the page's sound actually goes: an unsandboxed audio service, straight to the host's speakers, and what muting it measures |
 
 ## Known limitations
 
@@ -221,6 +227,12 @@ They are the record of *why* the code is shaped like this:
 - **Only the renderer's death is reported.** `::renderer-exited` comes from CEF's
   render-process callback; when one of the other sandboxed children goes, the
   host hears nothing until the page stops answering.
+- **The page's sound bypasses the widget entirely.** Audio lives in an
+  unsandboxed `audio.mojom.AudioService` utility and reaches the host's speakers
+  as an ordinary desktop app; the nested compositor never sees it, and GNOME's
+  mixer cannot tell a muted stream from a quiet one. `set_muted` is the only
+  switch, and nothing announces that a page *started* making noise
+  (`docs/audio-path.md`).
 - **The renderer is sandboxed; the helper itself is not, and cannot be.** The
   browser process holds the Wayland connection, the GPU buffers and the control
   socket, so it stays unsandboxed by design — the trust boundary is the page

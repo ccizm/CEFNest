@@ -64,9 +64,14 @@ kernel.apparmor_restrict_unprivileged_userns  不存在（没装那套限制）
 `NoNewPrivs=1`，而且各自一个 pid ns。剩下 130060、130062 两个进程和 zygote 一样停在
 `Seccomp=0`。
 
-**这些叶子是什么类型，给不出标签。** Chromium 给子进程重写了 argv，`/proc/PID/cmdline`
-只剩 1 项，`--type=` 读不出来；`/proc/PID/comm` 全都是 `chromium-helper`。上面这张表只说
-"谁是谁的子进程、进没进 seccomp、在哪个命名空间"，这三件事是量出来的。
+**叶子的类型标签读得出来，但要按空格切。** Chromium 给子进程重写了 argv：`/proc/PID/cmdline`
+只剩 **1 项**，但整条命令行——`--type=`、`--utility-sub-type=` 都在内——就挤在那一个
+`argv[0]` 字符串里，按 NUL 切分什么都得不到，按**空格**切那一项就全回来了
+（`docs/audio-path.md` 第 1 节那张带类型的表就是这么取的）。`/proc/PID/comm` 倒是真的
+全都是 `chromium-helper`。后来补的一张带类型分布的表：浏览器进程、三个 zygote（gpu 的
+父进程带 `--no-zygote-sandbox`）、`gpu-process`、`network.mojom.NetworkService` 全是
+`Seccomp=0`；`storage.mojom.StorageService` 和两个 renderer 是 `Seccomp=2`；音频则住在一个
+**不沙箱**的 `audio.mojom.AudioService` utility 里。
 
 ## 3. 关沙箱只需 CefSettings，那个 `--no-sandbox` 开关是多余的
 

@@ -53,6 +53,7 @@ struct _ChromiumSession {
   gboolean loading;
   gboolean can_go_back;
   gboolean can_go_forward;
+  gboolean muted;
   gboolean running;
   gboolean stopping;
   gboolean closed_emitted;
@@ -223,6 +224,21 @@ handle_event (ChromiumSession *self, const char *line)
                      (int) json_object_get_int_member (object, "status"),
                      (int) json_object_get_int_member (object, "error_code"),
                      json_object_get_string_member (object, "message"));
+      return;
+    }
+
+  if (!strcmp (event, "muted"))
+    {
+      /* The helper, not the caller, is the one that read CefBrowserHost back.
+       * Nothing about the page changes when this happens, so ::changed is the
+       * only place a host can see it land. */
+      gboolean muted = json_object_get_boolean_member (object, "muted");
+
+      if (muted != self->muted)
+        {
+          self->muted = muted;
+          g_signal_emit (self, signals[SIG_CHANGED], 0);
+        }
       return;
     }
 
@@ -626,6 +642,9 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
   self->running = TRUE;
   self->stopping = FALSE;
   self->closed_emitted = FALSE;
+  /* A fresh helper is a fresh browser: it starts unmuted whatever the previous
+   * one was told. */
+  self->muted = FALSE;
   chromium_session_set_state (self, initial_url && *initial_url ? initial_url : "",
                               "", FALSE, FALSE, FALSE);
 
@@ -723,6 +742,23 @@ chromium_session_stop_loading (ChromiumSession *self)
 }
 
 void
+chromium_session_set_muted (ChromiumSession *self, gboolean muted)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "mute");
+  command_add_boolean (builder, "on", muted);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
 chromium_session_run_javascript (ChromiumSession *self, const char *code, int id)
 {
   g_autoptr (JsonBuilder) builder = json_builder_new ();
@@ -782,6 +818,13 @@ chromium_session_get_can_go_forward (ChromiumSession *self)
 {
   g_return_val_if_fail (CHROMIUM_IS_SESSION (self), FALSE);
   return self->can_go_forward;
+}
+
+gboolean
+chromium_session_get_muted (ChromiumSession *self)
+{
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), FALSE);
+  return self->muted;
 }
 
 gboolean

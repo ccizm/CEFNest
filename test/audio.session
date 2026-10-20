@@ -1,0 +1,8 @@
+wait 2500
+click 300 250
+wait 6000
+mute
+wait 6000
+unmute
+wait 6000
+quit

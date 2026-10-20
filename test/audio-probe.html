@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>audio probe</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #fff; }
+  #box { display: flex; align-items: center; justify-content: center;
+         height: 100%; font: 16px monospace; }
+</style>
+<div id="box">click to start audio</div>
+<script>
+window.__probe = { started: false, state: 'none', gain: 0 };
+
+function start () {
+  if (window.__probe.started) return;
+  window.__probe.started = true;
+  var ctx = new AudioContext ();
+  var osc = ctx.createOscillator ();
+  var gain = ctx.createGain ();
+  // 440 Hz at -80 dBFS: not digital silence, so the audio stack has to stay
+  // live, and far too quiet to hear at any volume the host is set to.
+  gain.gain.value = 0.0001;
+  osc.frequency.value = 440;
+  osc.connect (gain);
+  gain.connect (ctx.destination);
+  osc.start ();
+  ctx.resume ();
+  window.__ctx = ctx;
+  window.__gain = gain;
+  window.__probe.state = ctx.state;
+  window.__probe.gain = gain.gain.value;
+  document.getElementById ('box').textContent = 'state=' + ctx.state;
+}
+
+window.setStatus = function (value) {
+  window.__gain.gain.value = value;
+  window.__probe.gain = value;
+  return String (window.__probe.gain) + '/' + window.__ctx.state;
+};
+
+document.addEventListener ('click', start);
+</script>

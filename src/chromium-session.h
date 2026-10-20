@@ -48,12 +48,20 @@ void               chromium_session_run_javascript (ChromiumSession *self,
                                                    const char *code,
                                                    int id);
 
+/* The page's sound leaves the helper through its own audio process and lands on
+ * the host's speakers (docs/audio-path.md), so this is the only switch the
+ * embedding app has. chromium_session_get_muted () reports what the helper read
+ * back: it changes a round trip after the call, and moves ::changed with it.
+ * A new helper always starts unmuted. */
+void               chromium_session_set_muted     (ChromiumSession *self,
+                                                   gboolean muted);
 const char        *chromium_session_get_helper_path (ChromiumSession *self);
 const char        *chromium_session_get_uri         (ChromiumSession *self);
 const char        *chromium_session_get_title       (ChromiumSession *self);
 gboolean          chromium_session_get_loading      (ChromiumSession *self);
 gboolean          chromium_session_get_can_go_back  (ChromiumSession *self);
 gboolean          chromium_session_get_can_go_forward (ChromiumSession *self);
+gboolean          chromium_session_get_muted      (ChromiumSession *self);
 gboolean          chromium_session_get_running      (ChromiumSession *self);
 
 G_END_DECLS
