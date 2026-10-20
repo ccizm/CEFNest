@@ -170,7 +170,88 @@ demo: loaded https://example.com/ (HTTP 200)
   正确的边界是"renderer 里的东西都不可信"。
 * `CHROMIUM_HELPER_NO_SANDBOX=1` 在启动横幅里留了痕（`sandbox=OFF (…)`），转录里能看到。
 
-## 7. 还没做的
+## 7. 长跑：48 秒、28 次导航、两次把 renderer 打死（2026-10-21 补）
+
+第 4 节那次只 `kill -9` 了一回，而且量的是"关沙箱 vs 开沙箱"的数字差。这一节量的是**开沙箱、
+一直开着、反复导航、中途两次打死 renderer** 时这棵树本身的形状。先是一次性测量，跑法：一次会话，
+28 轮 `load` 在四个本地页（`dnd-page` / `find-page` / `wheel-page` / `menu-page`）之间轮流，每 4 轮插一次
+`reload-hard`，每轮后面跟一次 `js document.title` 读回；在 t=18 s 和 t=40 s 各挑一次
+`--type=renderer` 的子进程 `kill -9`。每 2 秒采一行：
+
+| t (s) | 进程数 | `--type=` 子进程 | renderer | 僵尸 | fd 合计 | 树 RSS | 挂着 crashpad 的 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | 9 | 8 | 2 | 0 | 364 | 883 MB | 0 |
+| 18 | 9 | 8 | 2 | 0 | 371 | 903 MB | 0 |
+| 20 | 9 | 8 | 2 | 0 | 370 | 893 MB | 0 |
+| 40 | 9 | 8 | 2 | 0 | 374 | 906 MB | 0 |
+| 42 | 9 | 8 | 2 | 0 | 372 | 894 MB | 0 |
+| 48 | 9 | 8 | 2 | 0 | 378 | 897 MB | 0 |
+
+四件事：
+
+* **树不变形**：进程数 9、`--type=` 的 8、renderer 2 从第一次采样到最后一次，一次没变。
+  两次击杀之后下一次采样就又回到 2 个 renderer——zygote 还在，补出来的 renderer 是它的孩子，
+  不是浏览器进程的孩子。
+* **fd 只涨了 14 个**（364→378），而这段里有 7 次硬重载；RSS 是锯齿不是斜坡（903→906 之后
+  回落到 894→897），28 次导航 + 28 次 JS 读回全部有应答。没有单调增长可报。
+* **两次击杀 = 两条事件**：`demo: renderer exited status=1 error=9 9` 正好两行，一行一次，
+  不多报也不漏报（`status=1` 是 `STATUS_CRASHED`，`error=9` 是信号号，见第 8 节）。
+* **退出干净**：demo 走完之后 `pgrep -f cefnest-helper` 剩 0 个——没有孤儿 zygote，没有滞留的
+  utility 进程。
+
+采样本身踩到一个坑，值得记下来，因为任何"给这棵树做监控"的人都会撞到：**从浏览器进程往下数看不到
+renderer**。renderer 是 zygote 的孩子，不是浏览器进程的孩子，所以 `pgrep -P <浏览器 pid>` 只给
+`zygote` / `gpu-process` / `network utility` 三个，打死一个 renderer 之后那个数字纹丝不动——
+第一版量出来的"children 恒等于 3"就是这么来的。要看全树得按**可执行文件**横切：命令行里跑的是
+`cefnest-helper` 的那个二进制（含 `--type=` 的和不含的都算），再各自读 `/proc/PID/cmdline` 切类型。
+`docs/audio-path.md` 那张进程表是同一件事的另一半：类型标签只在 cmdline 里，`comm` 给不出来。
+
+### 已经收进 `test/sandbox-soak.sh`
+
+一次性的量法第二天就搬进了仓库：`./test/sandbox-soak.sh`，20 轮导航、t=12 s 与 t=28 s 各一次击杀、
+每 2 秒采样，断言的是树的形状而不是像素——它会开一个真窗口约 40 秒，所以按本项目的约定是一个
+**人工门**（和 `test/find-gate.sh`、`test/dnd-gate.sh` 同一类），不进 `meson test`。判据八组：样本够多
+且两次击杀都真找到过 renderer；全程零僵尸；全树任何一格都没出现过 `--crashpad-handler-pid`（第 8 节
+的结论要是哪天变了，这一格先响）；被杀那次的父 pid 不等于浏览器进程 pid（就是上面那个坑的反向断言）；
+从 t≥16 起进程数与 renderer 数一格不变；fd 的增量和峰值都压在 `FD_SLACK`（默认 40）以内——RSS 只报不卡，
+它是锯齿而且是机器相关的；`ROUNDS-2` 次以上的 JS 读回有应答；恰好两条 `renderer exited status=1 error=9`；
+demo 退出后 helper 剩 0 个。
+
+第一次跑（2026-10-21，本篇表格之外的数都来自这一趟）：40 秒、19 个样本，9 个进程 / 8 个带 `--type=` /
+2 个 renderer 从 t=16 到最后一次采样没动过，fd 379→378、峰值 386，最后一格 RSS 898 MB，20 次读回 18 次
+有应答，两条死亡事件，0 残留，12 行 ok 全绿。读回为什么写成下限：一次 `kill -9` 正好落在某轮 `js`
+发出去的那一毫秒时，那一次读回必然丢，所以「20 次全应答」不是判据而是运气；上面那次量到 28/28 是同一
+棵树在另一组击杀时刻上的结果。基线取 t≥16 而不是第一格，同理：第一格常在页面进程起来之前，拿它当
+"泄漏前的基准"会把启动本身算成增长。
+
+## 8. crashpad：这里没有要修的，也没有能关的（2026-10-21 补）
+
+任务清单上这一条写的是"crashpad 修复或显式关闭"，前提是有个崩溃报告器在跑或者该跑。实测两个都不成立。
+
+我们这棵树里**没有任何崩溃处理器**：
+
+* 每个子进程的命令行带的都是 `--enable-crash-reporter=,` ——逗号后面是空的，没有 reporter id，
+  也没有产品短名；
+* 全树没有一处出现 `--crashpad-handler-pid=`，而这一项正是"孩子挂在一个真实 handler 上"的可见标志。
+  同一台机器上那两个 Electron 应用的孩子每一行都有它，而且它们各有一个活的
+  `chrome_crashpad_handler … --database=/home/siem/.config/…` 进程做父兄；
+* CEF **minimal** 分发根本不装那个可执行文件。安装后的 helper 旁边一共这么多东西：
+  `cefnest-helper`、`chrome-sandbox`、`chrome_100_percent.pak`、`chrome_200_percent.pak`、
+  `extensions`、`icudtl.dat`、`libcef.so`、`libvk_swiftshader.so`、`libvulkan.so.1`、
+  `locales/`（220 个文件）、`resources.pak`、`v8_context_snapshot.bin`——没有 `crashpad_handler`。
+
+所以"修复"没有对象（要修得先往分发里塞一个仓库里没有的可执行文件，再给它一个上报端点和一个产品标识，
+那是一件需要产品决定的事，不是一个 bug）；"显式关闭"也没有开关可拧：那个空值不启动任何进程，
+手动补一条 `--disable-crash-reporter` 不会改变第 7 节表里的任何一格，所以不加。
+
+真正要写进部署文档的是**它的后果**：一次崩溃能给到宿主的只有 OS 那层的死法。`::renderer-exited`
+给的是 `status=1 error=9`——CEF 的终止状态加一个信号号，没有 minidump，没有栈，没有崩溃时的
+URL。第 7 节那两次击杀量的就是这个上限：宿主能确定"死了几个、怎么死的"，不能确定"为什么"。
+`chrome-sandbox` 随安装落到 prefix 里时权限没变（`mode=0o755`、uid 还是装机的人、
+`security.capability` 无），装这个包本身不产生任何提权面——第 6 节那条"不需要 setuid 安装步骤"
+在打包之后依然成立。
+
+## 9. 还没做的
 
 * **没做运行时预检**（"先探一探沙箱起不起来，再决定怎么报错"）。不打算做，两个理由：
   第 4 节量到 sysctl 读起来全绿而 `unshare` 仍然失败，所以"读 `/proc` 判断这台宿主能不能
@@ -183,8 +264,11 @@ demo: loaded https://example.com/ (HTTP 200)
 * **renderer 崩了不报**这条已经做掉了：helper 实现了 `OnRenderProcessTerminated`，控制通道上新增
   `renderer-exited` 事件，宿主侧是 `ChromiumSession::renderer-exited`
   （`docs/control-channel.md`）。实测 `kill -9` 掉最大的那个 `Seccomp=2` 子进程后，host 只多出
-  `status=1 error=9` 这一行，其余一切照旧——正是本篇原本担心的「只表现为页面静止」。
+  `status=1 error=9` 这一行，其余一切照旧——正是本篇原本担心的「只表现为页面静止」。第 7 节把这条
+  在同一次长跑里量了两次，并且量到了它给不出更多东西的原因：没有崩溃处理器（第 8 节）。
   反过来，**其它**沙箱子进程（utility、GPU、网络）死了仍然没有任何事件，CEF 那边没有对应的回调，
   这条留在 `docs/control-channel.md` 的「还没做的」里。
+* **崩溃归因没做**：要给"为什么"就得往分发里加一个 handler 可执行文件、一个 reporter id 和一个上报端，
+  那是产品决定，不是这里能顺手补的实现（第 8 节）。
 * 沙箱开着时的**逐帧渲染正确性**没比对过（截图、dmabuf 提交都发生在不沙箱的浏览器进程里，
   逻辑上无关，所以只比了第 5 节那些可观察数字）。

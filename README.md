@@ -307,6 +307,20 @@ seconds to report `ready` on a profile nobody has used before, and a session
 script that starts on a fixed timer loses its first `load` on the floor. Session
 mode now starts the script from `::ready`.
 
+`test/sandbox-soak.sh` is the sandbox half, and it asserts on the process tree
+rather than on pixels: one session, 20 navigations over four local pages with a
+hard reload every seventh, and a deliberate `kill -9` of every renderer at two
+points inside the run. Eight groups of checks — the tree keeps its size (9
+processes, 8 with `--type=`, 2 renderers, unchanged from the settled sample on),
+nothing becomes a zombie, no child ever carries `--crashpad-handler-pid`, a killed
+renderer's parent is not the browser process, the fd count stays inside
+`FD_SLACK` (default 40) both at the end and at its peak, the page keeps answering
+`js` through both kills, exactly two `renderer exited status=1 error=9` lines
+appear, and nothing is left running when the demo exits. RSS is reported and not
+pinned — it is a sawtooth. Measured run: 40 s, 19 samples, fd 379 → 378 (peak
+386), 898 MB, 18 of 20 readbacks answered, 0 leftovers.
+`docs/sandbox-policy.md` §7 and §8 are the numbers this keeps from going stale.
+
 ## Using it as a library
 
 `meson install` puts `libcefnest.so` in `libdir`, three headers in
@@ -398,7 +412,7 @@ They are the record of *why* the code is shaped like this:
 | `empty-request-slot.md` | a NULL request slot killing the whole desktop |
 | `wheel-resolution-and-key-repeat.md` | `axis_value120`, one frame per gesture, auto-repeat bookkeeping |
 | `clipboard-offer-during-client-init.md` | a legal `data_offer` sent one dispatch too early kills a GTK client |
-| `sandbox-policy.md` | the sandbox decision: no setuid helper needed, what a host without user namespaces does to the run |
+| `sandbox-policy.md` | the sandbox decision: no setuid helper needed, what a host without user namespaces does to the run, the soak that keeps the process tree and the fd count flat through repeated navigation and two `kill -9`'d renderers (now `test/sandbox-soak.sh`), and why there is no crash handler here to fix or to turn off |
 | `control-channel.md` | every command and event on the socket, what a failed load and a dead renderer look like, and the commands decided against |
 | `audio-path.md` | where the page's sound actually goes: an unsandboxed audio service, straight to the host's speakers, and what muting it measures |
 | `protocol-ceilings.md` | what real clients bind against the nested compositor, and the measured verdict on every protocol and version ceiling left un-advertised |
@@ -440,8 +454,12 @@ They are the record of *why* the code is shaped like this:
   later; the load-end arrives with HTTP code 0. Nothing is filtered, because
   picking which error a host should see is not this layer's call
   (`docs/control-channel.md`).
-- **Only the renderer's death is reported.** `::renderer-exited` comes from CEF's
-  render-process callback; when one of the other sandboxed children goes, the
+- **Only the renderer's death is reported, and only how it died.** `::renderer-exited`
+  comes from CEF's render-process callback — `kill -9` measured as `status=1` with
+  error code 9, which is the OS-level wait status and nothing more: the minimal CEF
+  distribution ships no crash handler, and no process in this tree carries a
+  `--crashpad-handler-pid`, so there is no minidump and no stack behind it
+  (`docs/sandbox-policy.md` §8). When one of the other sandboxed children goes, the
   host hears nothing until the page stops answering.
 - **A download can be accepted, refused or cancelled — not paused.**
   `CefDownloadItemCallback` also has `Pause` and `Resume`; nothing on the channel
