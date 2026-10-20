@@ -6,19 +6,46 @@ slot is not a refused request: libwayland-server aborts the whole compositor
 ("listener function for opcode N of IFACE is NULL") the moment a client sends
 that request. Parse every "struct X_interface" from the installed and the
 generated server headers, then every initializer in src/, and report the holes.
+
+Run with no arguments from anywhere in the checkout: the sources are found
+relative to this file, and the generated headers relative to ./builddir. Pass a
+build directory as the first argument when meson put it somewhere else — that
+is what `meson test` does.
 """
 import re
 import glob
 import os
+import subprocess
 import sys
 
-headers = ['/usr/include/wayland-server-protocol.h']
-headers += glob.glob('builddir/*-server-protocol.h')
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+build = sys.argv[1] if len(sys.argv) > 1 else os.path.join(root, 'builddir')
+
+
+def core_header ():
+    """The installed wayland-server-protocol.h, wherever this distro put it."""
+    try:
+        out = subprocess.run (['pkg-config', '--cflags', 'wayland-server'],
+                              capture_output = True, text = True, check = True).stdout
+    except Exception:
+        out = ''
+
+    dirs = [f[2:] for f in out.split () if f.startswith ('-I')] + ['/usr/include']
+    for d in dirs:
+        path = os.path.join (d, 'wayland-server-protocol.h')
+        if os.path.exists (path):
+            return path
+    return None
+
+
+headers = []
+core = core_header ()
+if core:
+    headers.append (core)
+headers += glob.glob (os.path.join (build, '*-server-protocol.h'))
 
 members = {}
 for path in headers:
-    if not os.path.exists(path):
-        continue
     src = open(path).read()
     for m in re.finditer(r'struct (\w+)_interface \{(.*?)\n\};', src, re.S):
         iface, body = m.group(1), m.group(2)
@@ -30,8 +57,13 @@ for path in headers:
             table.append((n, int(sm.group(1)) if sm else 1))
         members.setdefault(iface, table)
 
+if 'wl_data_source' not in members:
+    print('the installed wayland server header was not found, so nothing was '
+          'audited (looked for wayland-server-protocol.h and %s)' % build)
+    sys.exit(2)
+
 rows = []
-for path in sorted(glob.glob('src/*.c')):
+for path in sorted(glob.glob(os.path.join(root, 'src', '*.c'))):
     text = open(path).read()
     for m in re.finditer(r'static const struct (\w+)_interface (\w+) = \{(.*?)\n\};', text, re.S):
         iface, var, body = m.group(1), m.group(2), m.group(3)
@@ -56,4 +88,6 @@ for path, iface, var, provided, positional in rows:
 
 print('\n%d uncovered slot(s), %d unknown interface(s), %d implementation struct(s)'
       % (missing, unknown, len(rows)))
-sys.exit (1 if missing else 0)
+# An interface that is in no header is not a pass: it is a struct that was never
+# looked at, which is exactly what a missing generated header produces.
+sys.exit (1 if (missing or unknown) else 0)

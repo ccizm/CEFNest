@@ -370,6 +370,16 @@ main (int argc, char *argv[])
 
   dump_path = argc > 1 ? argv[1] : (char *) "/tmp/seat-selftest.png";
 
+  /* The compositor paints into GdkTextures and reads the render node through
+   * GDK, so this test is only meaningful where a display can be opened. Without
+   * one it reports itself skipped rather than failed — `meson test` runs on
+   * machines nobody is sitting at. */
+  if (!gtk_init_check ())
+    {
+      g_print ("selftest: no GDK display, skipping\n");
+      return 0;
+    }
+
   /* The composition frames go beside the plain one, with the same name plus a
    * mark, so a run leaves both pictures. */
   if (g_str_has_suffix (dump_path, ".png"))
