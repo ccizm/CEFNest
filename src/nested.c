@@ -142,6 +142,24 @@ pool_unref (Pool *pool)
   g_free (pool);
 }
 
+/* Every object that cites a serial — wl_pointer.enter, wl_data_device.enter, an
+ * xdg_popup grab — takes it from the one counter, because a serial a client is
+ * told to answer with has to be distinguishable from every other one we made. */
+uint32_t
+nested_next_serial (NestedCompositor *self)
+{
+  return ++self->serial;
+}
+
+/* wl_pointer.axis, wl_data_device.motion and the keyboard timestamps are all
+ * "milliseconds since an unspecified start", and monotonic is the only clock
+ * that cannot go backwards when the laptop wakes from a suspend. */
+uint32_t
+nested_now_msec (void)
+{
+  return (uint32_t) (g_get_monotonic_time () / 1000);
+}
+
 /* ------------------------------------------------------------------ *
  * NestedSurface                                                      *
  * ------------------------------------------------------------------ */
@@ -685,6 +703,13 @@ static void
 surface_offset (struct wl_client *client, struct wl_resource *resource,
                int32_t x, int32_t y)
 {
+  NestedSurface *self = wl_resource_get_user_data (resource);
+
+  /* Deprecated for every surface but a drag icon, whose place the client still
+   * moves: for an icon this is a distance from the pointer hotspot, and it
+   * becomes real with the commit it travels with. */
+  self->pending_offset_x = x;
+  self->pending_offset_y = y;
 }
 
 static void
@@ -696,6 +721,13 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
   gboolean repaint = FALSE;
   int natural_width, natural_height;
   int previous_width, previous_height;
+
+  /* A drag icon is placed by the pointer, so a new offset moves it now; every
+   * other surface keeps the offset the protocol tells us to ignore. */
+  self->offset_x = self->pending_offset_x;
+  self->offset_y = self->pending_offset_y;
+  if (self->is_drag_icon && nested)
+    nested_compositor_drag_move_icon (nested);
 
   /* Buffer scale is applied before crop and scale, so the source rectangle the
    * client named refers to the buffer that is about to become current. */
@@ -784,7 +816,10 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
   if (nested)
     cursor_surface_committed (nested, self);
 
-  if (!self->mapped && self->xdg_surface && self->texture)
+  /* A drag icon has no xdg_surface — wl_data_device.start_drag gave it its role
+   * instead — but it still reaches the screen the same way: once it has
+   * pixels. */
+  if (!self->mapped && (self->xdg_surface || self->is_drag_icon) && self->texture)
     {
       self->mapped = TRUE;
       if (self->is_popup)
@@ -816,6 +851,14 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
         }
       else
         nested_update_primary (nested);
+    }
+  else if (self->is_drag_icon)
+    {
+      /* Not a window and not part of one: the icon is only drawn while a drag
+       * holds it, and it never takes the pointer from the surface under it, so
+       * a commit here is a new picture and nothing else. */
+      if (surface_is_painted (self))
+        g_signal_emit (nested, signals[SIGNAL_FRAME], 0);
     }
   else
     nested_update_primary (nested);
@@ -1572,6 +1615,11 @@ surface_is_painted (NestedSurface *self)
   if (!self->nested || !self->mapped || !self->texture)
     return FALSE;
 
+  /* A drag icon belongs to the pointer rather than to a window, so it is on
+   * screen exactly as long as a drag is carrying it. */
+  if (self->is_drag_icon)
+    return self->wl_surface && nested_compositor_drag_icon (self->nested) == self;
+
   while (root->popup_parent)
     root = root->popup_parent;
 
@@ -1599,6 +1647,7 @@ NestedSurface *
 nested_compositor_surface_at (NestedCompositor *self, double x, double y)
 {
   GList *stack = nested_compositor_get_paint_stack (self);
+  NestedSurface *icon = nested_compositor_drag_icon (self);
   GList *l;
   NestedSurface *found = NULL;
 
@@ -1606,6 +1655,11 @@ nested_compositor_surface_at (NestedCompositor *self, double x, double y)
     {
       NestedSurface *surface = l->data;
       int left, above;
+
+      /* "The input region is ignored for wl_surfaces with the role of a
+       * drag-and-drop icon": the pointer is over whatever the icon covers. */
+      if (surface == icon)
+        continue;
 
       nested_surface_get_position (surface, &left, &above);
 
@@ -2035,11 +2089,18 @@ GList *
 nested_compositor_get_paint_stack (NestedCompositor *self)
 {
   GList *stack = NULL;
+  NestedSurface *icon;
 
   g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), NULL);
 
   if (self->primary)
     surface_stack_append (self->primary, &stack);
+
+  /* The drag icon is not part of any window's tree, so it is not in the tree
+   * walk: it rides on top of all of it, above even the menu a page opened. */
+  icon = nested_compositor_drag_icon (self);
+  if (icon && surface_is_painted (icon))
+    stack = g_list_append (stack, g_object_ref (icon));
 
   return stack;
 }

@@ -46,18 +46,6 @@ static const struct wl_seat_interface seat_impl;
 static const struct wl_pointer_interface pointer_impl;
 static const struct wl_keyboard_interface keyboard_impl;
 
-static uint32_t
-nested_next_serial (NestedCompositor *self)
-{
-  return ++self->serial;
-}
-
-static uint32_t
-nested_now_msec (void)
-{
-  return (uint32_t) (g_get_monotonic_time () / 1000);
-}
-
 /* ------------------------------------------------------------------ *
  * wl_seat, wl_pointer, wl_keyboard                                   *
  * ------------------------------------------------------------------ */
@@ -342,14 +330,23 @@ seat_retarget (NestedCompositor *self)
 {
   /* The pointer belongs to whichever painted surface is under it: a menu drawn
    * over the page takes it, and the page gets it back the moment the pointer
-   * steps off the menu. */
-  NestedSurface *pointer_target = self->pointer_wanted ?
-    nested_compositor_surface_at (self, self->pointer_x, self->pointer_y) : NULL;
+   * steps off the menu. A drag is the exception: while it holds the pointer the
+   * surface the icon is over must not be told anything about it, so the focus
+   * stays exactly where the press that started the drag left it. */
+  NestedSurface *pointer_target;
   /* Keys go where the client asked for them: a popup that grabbed the seat is
    * that client's own modal, so it is focused ahead of the toplevel. */
   NestedSurface *keyboard_target = self->keyboard_wanted ?
     nested_compositor_keyboard_target (self) : NULL;
   SeatClient *sc;
+
+  if (nested_compositor_drag_active (self))
+    pointer_target = self->pointer_focus;
+  else if (self->pointer_wanted)
+    pointer_target = nested_compositor_surface_at (self, self->pointer_x,
+                                                   self->pointer_y);
+  else
+    pointer_target = NULL;
 
   if (pointer_target && !pointer_target->wl_surface)
     pointer_target = NULL;
@@ -634,6 +631,16 @@ nested_compositor_notify_pointer_motion (NestedCompositor *self, double x, doubl
   self->pointer_x = x;
   self->pointer_y = y;
 
+  /* A drag has the pointer: wl_pointer.motion would tell the page that the
+   * cursor moved over it while the client's own code is waiting for the
+   * wl_data_device channel instead. */
+  if (nested_compositor_drag_active (self))
+    {
+      nested_compositor_drag_motion (self);
+      nested_flush (self);
+      return;
+    }
+
   /* Which surface is under the pointer can change with the position: moving onto
    * a menu enters it and moving off the menu enters the page again. */
   seat_retarget (self);
@@ -666,6 +673,16 @@ nested_compositor_notify_pointer_button (NestedCompositor *self, uint32_t button
   double x, y;
 
   g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  /* The release that lets go of a drag is its drop, and it must not arrive at
+   * the page as a button click: the destination is told through
+   * wl_data_device.drop instead. The press that started the drag came through
+   * here before there was a drag to hold it back. */
+  if (nested_compositor_drag_button (self, button, pressed))
+    {
+      nested_flush (self);
+      return;
+    }
 
   /* A press can be the first event after the pointer moved, so the surface
    * under it is worked out again rather than trusted from the last motion. */

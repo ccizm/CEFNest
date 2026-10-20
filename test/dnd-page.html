@@ -1,0 +1,71 @@
+<!doctype html>
+<!-- dnd-page.html is the fixture for the in-page drag loop. The source is a
+     small box in the top-left and the drop target is the whole rest of the page,
+     so a scripted drag that starts at (150,100) and ends at (150,500) is
+     guaranteed to begin on the box and finish on the target whatever height the
+     host's own chrome has, and one that ends at (150,90) never leaves the box,
+     which is how the gate measures a destination that will not take the payload.
+     The log line is the one thing in the way of that target, so it takes no
+     pointer events at all. Every event the page sees is recorded and readable
+     from JavaScript, because the questions this page answers are "which events
+     arrive, on which element, at which position" — and whether the pointer comes
+     back to the page after the drag lets go of it. -->
+<html>
+<head><title>DND-PAGE</title></head>
+<body style="margin:0;font:20px sans-serif;background:#fff;color:#036">
+<div id="target" style="position:fixed;top:0;right:0;bottom:0;left:0;background:#f6f6f6"></div>
+<div id="source" draggable="true"
+     style="position:fixed;left:20px;top:20px;width:260px;height:160px;background:#dde;border:1px solid #369">
+  drag from here
+</div>
+<pre id="log" style="margin:200px 20px;pointer-events:none"></pre>
+<script>
+  window.dndLog = [];
+
+  function note (kind, ev) {
+    var types = ev.dataTransfer && ev.dataTransfer.types
+      ? Array.prototype.join.call(ev.dataTransfer.types, '+') : '';
+    /* The target id and the client coordinates go in the log because "which
+     * events arrive" is only half the question: the other half is where the
+     * page thought the pointer was when it dispatched them. */
+    window.dndLog.push (kind + (types ? '[' + types + ']' : '') +
+                        '@' + (ev.target ? ev.target.id : '?') +
+                        ' ' + Math.round (ev.clientX) + ',' + Math.round (ev.clientY));
+    document.getElementById ('log').textContent = window.dndLog.join (' | ');
+    document.title = 'DND-' + window.dndLog.length;
+  }
+
+  var src = document.getElementById('source');
+  var target = document.getElementById('target');
+
+  src.addEventListener('dragstart', function (ev) {
+    ev.dataTransfer.setData('text/plain', 'dnd-payload');
+    ev.dataTransfer.effectAllowed = 'copy';
+    note('dragstart', ev);
+  });
+  src.addEventListener('dragend', function (ev) { note('dragend', ev); });
+
+  ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(function (kind) {
+    target.addEventListener(kind, function (ev) {
+      if (kind === 'dragover' || kind === 'drop')
+        ev.preventDefault();
+      if (kind === 'drop') {
+        ev.dataTransfer.dropEffect = 'copy';
+        note('drop(' + ev.dataTransfer.getData('text/plain') + ')', ev);
+      } else {
+        note(kind, ev);
+      }
+    });
+  });
+
+  /* A drag takes the pointer grab, so the thing to check after one is that the
+   * seat handed it back: this counts a click the page sees once the drag is
+   * over. */
+  window.clicks = 0;
+  target.addEventListener('click', function (ev) {
+    window.clicks++;
+    note('click', ev);
+  });
+</script>
+</body>
+</html>

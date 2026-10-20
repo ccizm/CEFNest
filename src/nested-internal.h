@@ -35,6 +35,7 @@ typedef struct _BufferUser BufferUser;
 typedef struct _TextInput TextInput;
 typedef struct _DataSource DataSource;
 typedef struct _ClipboardTransfer ClipboardTransfer;
+typedef struct _Drag Drag;
 
 typedef struct _TextInput TextInput;
 
@@ -146,10 +147,19 @@ struct _NestedSurface {
   int popup_x;
   int popup_y;
 
+  /* The wl_data_device drag icon: the one surface whose place is decided by the
+   * pointer rather than by a window, and the one for which
+   * wl_surface.set_offset still means something. The protocol puts its top-left
+   * at the cursor hotspot and lets the offset move it from there, so popup_x
+   * and popup_y are rewritten from the pointer whenever either changes. */
+  int32_t pending_offset_x, pending_offset_y;
+  int32_t offset_x, offset_y;
+
   uint32_t configure_serial;
   unsigned int is_toplevel : 1;
   unsigned int is_popup : 1;
   unsigned int mapped : 1;
+  unsigned int is_drag_icon : 1;
   /* xdg_popup.grab arrived: while it is held the client expects the pointer and
    * keyboard over this surface for the whole window, and a press that lands
    * outside it is meant to dismiss the menu. */
@@ -202,6 +212,7 @@ struct _NestedCompositor {
    * holds, buffered so a client can be served without blocking the loop. */
   struct wl_list data_devices;      /* DataDevice.link */
   DataSource *selection_source;
+  Drag *drag;                       /* the wl_data_device drag in progress, or NULL */
   ClipboardTransfer *clipboard_transfer;
   GdkClipboard *clipboard;          /* the embedding widget's, may be NULL */
   gulong clipboard_handler;         /* notify::content */
@@ -274,6 +285,11 @@ resource_create (struct wl_client *client, const struct wl_interface *interface,
 /* nested.c */
 void           nested_flush            (NestedCompositor *self);
 void           nested_update_primary   (NestedCompositor *self);
+/* The compositor's own serial counter and event clock: wl_pointer.enter,
+ * wl_data_device.enter and a popup grab all cite serials from here, and a
+ * client can only answer one of them if there is a single source of them. */
+uint32_t       nested_next_serial      (NestedCompositor *self);
+uint32_t       nested_now_msec         (void);
 /* A surface tree change (a popup mapped, a toplevel gone) both retargets the
  * seat and tells the widget to draw again. */
 void           nested_surfaces_changed (NestedCompositor *self);
@@ -333,6 +349,19 @@ struct wl_resource *buffer_resource_new (struct wl_client *client,
 void        data_device_manager_bind (struct wl_client *client, void *data,
                                       uint32_t version, uint32_t id);
 void        data_device_shutdown     (NestedCompositor *self);
+/* A drag takes the pointer away from the seat until the button that started it
+ * is released: the position goes to wl_data_device.motion and nothing to
+ * wl_pointer. The button one says whether the drag consumed it. */
+gboolean    nested_compositor_drag_active (NestedCompositor *self);
+void        nested_compositor_drag_motion (NestedCompositor *self);
+gboolean    nested_compositor_drag_button (NestedCompositor *self, uint32_t button,
+                                           gboolean pressed);
+/* Move the drag icon to wherever the pointer and its own offset now put it. */
+void        nested_compositor_drag_move_icon (NestedCompositor *self);
+/* The surface a drag carries as its icon, whether or not it has pixels yet: it
+ * is drawn above every window and takes no input while the drag holds the
+ * pointer. */
+NestedSurface *nested_compositor_drag_icon (NestedCompositor *self);
 
 /* nested-xdg.c */
 void        output_bind           (struct wl_client *client, void *data,

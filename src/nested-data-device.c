@@ -17,10 +17,12 @@ typedef struct _DataDevice DataDevice;
 /* ------------------------------------------------------------------ *
  * wl_data_device_manager                                             *
  *                                                                    *
- * Clipboard only. A drag needs a pointer-owned icon and a second      *
- * surface to drop onto, and this compositor has neither, so           *
- * start_drag is ignored: answering a drag with a protocol error would *
- * kill the client for something as ordinary as selecting text.        *
+ * Two relays over one protocol. A copy moves text between the widget  *
+ * clipboard and a client. A drag is the same relay with a pointer on  *
+ * it, and here the two ends of it are usually the same client: an     *
+ * HTML5 drag starts and finishes inside one page, so the payload      *
+ * leaves Blink through wl_data_source.send and comes back into it     *
+ * through wl_data_offer.receive.                                     *
  * ------------------------------------------------------------------ */
 
 #define NESTED_DATA_DEVICE_MANAGER_VERSION 3
@@ -41,6 +43,7 @@ struct _DataSource {
   NestedCompositor *compositor;
   GPtrArray *mime_types;      /* char *, owned */
   struct wl_list offers;      /* DataOffer.source_link */
+  uint32_t dnd_actions;       /* the mask wl_data_source.set_actions named */
 };
 
 struct _DataOffer {
@@ -56,6 +59,37 @@ struct _DataDevice {
   NestedCompositor *compositor;
   struct wl_list link;
   struct wl_list offers;      /* DataOffer.device_link */
+};
+
+/* One drag in progress. There is only ever one of these: a widget has one
+ * pointer, and a second wl_data_device.start_drag before the first has
+ * concluded means the client lost track of it.
+ *
+ * The destination half is per-surface, the way the protocol makes it: entering
+ * a surface introduces a wl_data_offer for the client to read, and leaving one
+ * ends that. The drag itself outlives the pointer's hold on it — after the drop
+ * the destination is still fetching the payload and still has to say finish —
+ * so owns_pointer, not the existence of this object, is what tells the seat to
+ * keep wl_pointer away from the surfaces underneath. */
+struct _Drag {
+  NestedCompositor *compositor;
+  DataSource *source;              /* not owned; NULL is a drag with no payload */
+  DataDevice *origin_device;       /* the wl_data_device that asked for the drag */
+  NestedSurface *origin;
+  NestedSurface *icon;
+  uint32_t serial;                 /* start_drag's implicit grab, kept for the log */
+  uint32_t source_actions;
+  uint32_t dest_actions;           /* what the surface under it supports */
+  uint32_t preferred_action;       /* what it would rather do */
+  uint32_t chosen_action;
+  DataDevice *dest_device;         /* only while a surface is entered */
+  struct wl_resource *dest_offer;   /* ditto, and the client's to destroy */
+  NestedSurface *dest_surface;
+  char *accepted_mime;
+  unsigned int owns_pointer : 1;
+  unsigned int refused : 1;         /* the destination accepted no mime type */
+  unsigned int dropped : 1;         /* wl_data_device.drop went out */
+  unsigned int concluded : 1;       /* cancelled or dnd_finished went out */
 };
 
 struct _ClipboardTransfer {
@@ -78,6 +112,12 @@ static void data_offer_resource_destroyed (struct wl_resource *resource);
 static void compositor_advertise_selection (NestedCompositor *self);
 static void compositor_clipboard_read_done (GObject *clipboard, GAsyncResult *result,
                                             gpointer user_data);
+
+static void drag_cancel (Drag *drag);
+static void drag_destroy (Drag *drag);
+static void drag_leave (Drag *drag);
+static void drag_enter (Drag *drag, DataDevice *device, NestedSurface *surface);
+static void drag_negotiate (Drag *drag);
 
 static gboolean
 mime_is_text (const char *mime)
@@ -387,17 +427,56 @@ clipboard_paste_later (NestedCompositor *self, int fd)
 
 /* ------------------------------------------------------------- the offers */
 
+/* Introduce an offer object to a device's client and list the types it carries.
+ * The caller names it right afterwards — wl_data_device.selection for a copy,
+ * wl_data_device.enter for a drag — because neither can refer to an object the
+ * client has not been given yet. */
+static struct wl_resource *
+data_offer_introduce (DataDevice *device, DataSource *source, GPtrArray *types)
+{
+  struct wl_client *client = wl_resource_get_client (device->resource);
+  struct wl_resource *offer_resource;
+  DataOffer *offer;
+  gsize i;
+
+  if (types->len == 0)
+    return NULL;
+
+  offer_resource = resource_create (client, &wl_data_offer_interface,
+                                    wl_resource_get_version (device->resource), 0);
+  if (!offer_resource)
+    return NULL;
+
+  offer = g_new0 (DataOffer, 1);
+  offer->resource = offer_resource;
+  offer->compositor = device->compositor;
+  offer->source = source;
+  wl_list_init (&offer->source_link);
+  wl_list_init (&offer->device_link);
+  wl_list_insert (&device->offers, &offer->device_link);
+  if (source)
+    wl_list_insert (&source->offers, &offer->source_link);
+  wl_resource_set_implementation (offer_resource, &data_offer_impl, offer,
+                                  data_offer_resource_destroyed);
+
+  wl_data_device_send_data_offer (device->resource, offer_resource);
+
+  for (i = 0; i < types->len; i++)
+    wl_data_offer_send_offer (offer_resource, g_ptr_array_index (types, i));
+
+  return offer_resource;
+}
+
 static void
 data_device_advertise (DataDevice *device, DataSource *source)
 {
   NestedCompositor *self = device->compositor;
-  struct wl_client *client = wl_resource_get_client (device->resource);
   struct wl_resource *offer_resource;
   GPtrArray *types;
-  DataOffer *offer;
   gsize i;
 
-  if (source && wl_resource_get_client (source->resource) == client)
+  if (source && wl_resource_get_client (source->resource) ==
+      wl_resource_get_client (device->resource))
     return;                 /* nobody is handed back their own copy */
 
   if (!source && !self->clipboard_bytes)
@@ -417,40 +496,13 @@ data_device_advertise (DataDevice *device, DataSource *source)
     for (i = 0; i < G_N_ELEMENTS (text_mimes); i++)
       g_ptr_array_add (types, (char *) text_mimes[i]);
 
-  if (types->len == 0)
-    {
-      g_ptr_array_free (types, TRUE);
-      return;
-    }
-
-  offer_resource = resource_create (client, &wl_data_offer_interface,
-                                    wl_resource_get_version (device->resource), 0);
-  if (!offer_resource)
-    {
-      g_ptr_array_free (types, TRUE);
-      return;
-    }
-
-  offer = g_new0 (DataOffer, 1);
-  offer->resource = offer_resource;
-  offer->compositor = self;
-  offer->source = source;
-  wl_list_init (&offer->source_link);
-  wl_list_init (&offer->device_link);
-  wl_list_insert (&device->offers, &offer->device_link);
-  if (source)
-    wl_list_insert (&source->offers, &offer->source_link);
-  wl_resource_set_implementation (offer_resource, &data_offer_impl, offer,
-                                  data_offer_resource_destroyed);
-
-  /* data_offer is the event that actually creates the object on the client:
-   * selection only names it, so introducing the offer comes first. */
-  wl_data_device_send_data_offer (device->resource, offer_resource);
-
-  for (i = 0; i < types->len; i++)
-    wl_data_offer_send_offer (offer_resource, g_ptr_array_index (types, i));
+  offer_resource = data_offer_introduce (device, source, types);
   g_ptr_array_free (types, TRUE);
+  if (!offer_resource)
+    return;
 
+  /* The actions a copy could be used for. There is no drag to move anything
+   * with it and nothing to ask about, so it is only ever copied. */
   if (wl_resource_get_version (device->resource) >= WL_DATA_OFFER_SOURCE_ACTIONS_SINCE_VERSION)
     wl_data_offer_send_source_actions (offer_resource,
                                        WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
@@ -583,13 +635,461 @@ compositor_on_clipboard_changed (GObject *clipboard, GParamSpec *pspec, gpointer
   compositor_paste_clipboard (data);
 }
 
+/* ------------------------------------------------------------------ *
+ * The drag                                                           *
+ *                                                                    *
+ * A drag is a copy that the pointer carries. Where the payload comes   *
+ * from does not change — it is still a wl_data_source asking its       *
+ * client for bytes over a pipe — but who is told about it does: the    *
+ * destination is whichever surface the cursor is over, it is introduced *
+ * to a wl_data_offer of its own, and the seat stays out of it: while    *
+ * a drag holds the pointer, nothing goes to wl_pointer at all.          *
+ * ------------------------------------------------------------------ */
+
+/* What a source can do when it never said: everything the protocol names.
+ * Blink always says, but a client that does not is not refusing. */
+#define DRAG_ALL_ACTIONS (WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | \
+                          WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE | \
+                          WL_DATA_DEVICE_MANAGER_DND_ACTION_ASK)
+
+static void
+drag_update_destination (Drag *drag);
+
+static int
+round_to_pixel (double value)
+{
+  return (int) (value >= 0.0 ? value + 0.5 : value - 0.5);
+}
+
+/* The pointer's position in the destination surface's own pixels, which is what
+ * wl_data_device.enter and .motion are measured in — the same subtraction
+ * wl_pointer.motion uses, because a drag icon is not part of the surface it is
+ * over. */
+static void
+drag_local (NestedCompositor *self, NestedSurface *surface, double *x, double *y)
+{
+  int left = 0, above = 0;
+
+  nested_surface_get_position (surface, &left, &above);
+
+  *x = self->pointer_x - left;
+  *y = self->pointer_y - above;
+}
+
+/* The data device of the client that owns a surface: a drag is handed to a
+ * surface, and the offer it is given has to live on that client's own device. */
+static DataDevice *
+device_for_surface (NestedCompositor *self, NestedSurface *surface)
+{
+  struct wl_client *client;
+  DataDevice *device;
+
+  if (!surface->wl_surface)
+    return NULL;
+
+  client = wl_resource_get_client (surface->wl_surface);
+
+  wl_list_for_each (device, &self->data_devices, link)
+    if (wl_resource_get_client (device->resource) == client)
+      return device;
+
+  return NULL;
+}
+
+/* The live drag this offer was made for, or NULL for a copy's offer and for one
+ * whose drag has already been called off. */
+static Drag *
+drag_for_offer (DataOffer *offer)
+{
+  Drag *drag = offer->compositor->drag;
+
+  /* After the drop the destination keeps reading from the offer it was handed,
+   * so the drag still owns it even though it no longer holds a surface. */
+  return drag && drag->dest_offer == offer->resource ? drag : NULL;
+}
+
+/* The action both ends can carry out. A destination's preference comes first,
+ * because that is the one its own code is ready to do; after that the protocol's
+ * recommended default, the first match in bit order. */
+static uint32_t
+drag_pick_action (uint32_t source_actions, uint32_t dest_actions,
+                  uint32_t preferred_action)
+{
+  static const uint32_t order[] = {
+    WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY,
+    WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE,
+    WL_DATA_DEVICE_MANAGER_DND_ACTION_ASK,
+  };
+  uint32_t both = source_actions & dest_actions;
+  gsize i;
+
+  if (preferred_action != 0 && (both & preferred_action) == preferred_action)
+    return preferred_action;
+
+  for (i = 0; i < G_N_ELEMENTS (order); i++)
+    if (both & order[i])
+      return order[i];
+
+  return WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
+}
+
+static void
+drag_negotiate (Drag *drag)
+{
+  uint32_t action = drag_pick_action (drag->source_actions, drag->dest_actions,
+                                      drag->preferred_action);
+
+  if (action == drag->chosen_action)
+    return;
+
+  drag->chosen_action = action;
+  g_debug ("nested: drag settled on action 0x%x of source 0x%x and destination 0x%x",
+           action, drag->source_actions, drag->dest_actions);
+
+  if (drag->source &&
+      wl_resource_get_version (drag->source->resource) >= WL_DATA_SOURCE_ACTION_SINCE_VERSION)
+    wl_data_source_send_action (drag->source->resource, action);
+
+  /* "This event will no longer be emitted after wl_data_device.drop": the
+   * destination honors the last one it had. */
+  if (!drag->dropped && drag->dest_offer &&
+      wl_resource_get_version (drag->dest_offer) >= WL_DATA_OFFER_ACTION_SINCE_VERSION)
+    wl_data_offer_send_action (drag->dest_offer, action);
+}
+
+static void
+drag_leave (Drag *drag)
+{
+  /* Only the surface is let go: the offer it was introduced with is the
+   * client's to destroy, and the protocol says it does at this very point. */
+  if (drag->dest_device && drag->dest_surface && drag->dest_surface->wl_surface)
+    wl_data_device_send_leave (drag->dest_device->resource);
+
+  drag->dest_device = NULL;
+  drag->dest_offer = NULL;
+  g_clear_object (&drag->dest_surface);
+  g_clear_pointer (&drag->accepted_mime, g_free);
+  drag->refused = FALSE;
+  drag->dest_actions = 0;
+  drag->preferred_action = 0;
+  drag->chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
+}
+
+static void
+drag_enter (Drag *drag, DataDevice *device, NestedSurface *surface)
+{
+  NestedCompositor *self = drag->compositor;
+  struct wl_resource *offer_resource = NULL;
+  GPtrArray *types;
+  double x, y;
+  gsize i;
+
+  drag->dest_device = device;
+  g_set_object (&drag->dest_surface, surface);
+
+  /* Every surface is asked again: what the last one would take says nothing
+   * about this one, and a drag that crosses a menu has to be renegotiated. */
+  drag->accepted_mime = NULL;
+  drag->refused = FALSE;
+  drag->dest_actions = 0;
+  drag->preferred_action = 0;
+  drag->chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
+
+  if (drag->source)
+    {
+      types = g_ptr_array_new ();
+      for (i = 0; i < drag->source->mime_types->len; i++)
+        g_ptr_array_add (types, g_ptr_array_index (drag->source->mime_types, i));
+
+      /* Where a copy refuses to hand a client its own text back, a drag has to:
+       * an HTML5 drag has one client on both ends of it by design, and the page
+       * cannot find out what it is dropping onto unless it is given the offer. */
+      offer_resource = data_offer_introduce (device, drag->source, types);
+      g_ptr_array_free (types, TRUE);
+
+      if (offer_resource &&
+          wl_resource_get_version (offer_resource) >=
+          WL_DATA_OFFER_SOURCE_ACTIONS_SINCE_VERSION)
+        wl_data_offer_send_source_actions (offer_resource, drag->source_actions);
+    }
+
+  drag->dest_offer = offer_resource;
+
+  drag_local (self, surface, &x, &y);
+  wl_data_device_send_enter (device->resource, nested_next_serial (self),
+                             surface->wl_surface, wl_fixed_from_double (x),
+                             wl_fixed_from_double (y), offer_resource);
+  g_debug ("nested: dragged onto surface id %u offering %s, id %u",
+           wl_resource_get_id (surface->wl_surface),
+           drag->source ? "a client's payload" : "nothing (the drag has no source)",
+           offer_resource ? wl_resource_get_id (offer_resource) : 0u);
+}
+
+/* The surface under the pointer is the destination: a new one gets an enter and
+ * an offer, the one being left gets a leave, and the one already inside is told
+ * where within it the pointer now is. */
+static void
+drag_update_destination (Drag *drag)
+{
+  NestedCompositor *self = drag->compositor;
+  NestedSurface *target;
+  DataDevice *device;
+  double x, y;
+
+  target = nested_compositor_surface_at (self, self->pointer_x, self->pointer_y);
+  if (target && !target->wl_surface)
+    target = NULL;
+
+  if (target != drag->dest_surface)
+    {
+      if (drag->dest_surface)
+        drag_leave (drag);
+
+      if (!target)
+        return;
+
+      device = device_for_surface (self, target);
+      if (!device)
+        return;    /* its client never asked for a data device, so there is
+                    * nothing to hand the payload to and no offer to make */
+
+      drag_enter (drag, device, target);
+      return;
+    }
+
+  if (!drag->dest_device || !drag->dest_surface)
+    return;
+
+  drag_local (self, drag->dest_surface, &x, &y);
+  wl_data_device_send_motion (drag->dest_device->resource, nested_now_msec (),
+                              wl_fixed_from_double (x), wl_fixed_from_double (y));
+}
+
+static void
+drag_destroy (Drag *drag)
+{
+  NestedCompositor *self = drag->compositor;
+
+  if (self->drag == drag)
+    self->drag = NULL;
+
+  /* The icon and the surface it started from outlive the drag: their client
+   * destroys them, and a surface that was an icon is not one any more. */
+  if (drag->icon)
+    drag->icon->is_drag_icon = FALSE;
+  g_clear_object (&drag->icon);
+  g_clear_object (&drag->origin);
+  g_clear_object (&drag->dest_surface);
+  g_clear_pointer (&drag->accepted_mime, g_free);
+  g_free (drag);
+}
+
+static void
+drag_cancel (Drag *drag)
+{
+  NestedCompositor *self = drag->compositor;
+
+  if (drag->owns_pointer)
+    drag_leave (drag);
+
+  if (drag->source && !drag->concluded)
+    {
+      drag->concluded = TRUE;
+      wl_data_source_send_cancelled (drag->source->resource);
+    }
+
+  drag_destroy (drag);
+
+  /* Whatever the pointer was over when the drag gave up is news to the page. */
+  nested_surfaces_changed (self);
+}
+
+/* The pointer goes back to the seat. The drag itself stays alive: the
+ * destination is still reading the payload through the offer it was given, and
+ * still has to say whether it is done with it. */
+static void
+drag_release_pointer (Drag *drag)
+{
+  drag->owns_pointer = FALSE;
+  drag->dest_device = NULL;
+  g_clear_object (&drag->dest_surface);
+}
+
+static void
+drag_drop (Drag *drag)
+{
+  NestedCompositor *self = drag->compositor;
+
+  /* The protocol's three reasons to call a drag off: it ended over no surface,
+   * over one that accepted no mime type, or over one that chose no action. The
+   * last two are only known once the destination has negotiated at all — a
+   * client that says nothing on entering is taken as willing, because a page
+   * that does not want the drop says so itself by never handling the event. */
+  if (!drag->dest_surface || !drag->dest_device || drag->refused ||
+      (drag->dest_actions != 0 &&
+       drag->chosen_action == WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE))
+    {
+      g_debug ("nested: a drag ended where nothing would take its payload");
+      drag_cancel (drag);
+      return;
+    }
+
+  g_debug ("nested: dropped %s as action 0x%x",
+           drag->accepted_mime ? drag->accepted_mime : "a drag",
+           drag->chosen_action);
+
+  /* The destination reads what it is being given after this, and answers with
+   * wl_data_offer.finish once it has. */
+  wl_data_device_send_drop (drag->dest_device->resource);
+  drag->dropped = TRUE;
+  drag_release_pointer (drag);
+
+  if (drag->source &&
+      wl_resource_get_version (drag->source->resource) >=
+      WL_DATA_SOURCE_DND_DROP_PERFORMED_SINCE_VERSION)
+    wl_data_source_send_dnd_drop_performed (drag->source->resource);
+
+  nested_surfaces_changed (self);
+}
+
+/* ------------------------------------------------------------------ *
+ * The drag, seen from the seat and the drawing                       *
+ * ------------------------------------------------------------------ */
+
+gboolean
+nested_compositor_drag_active (NestedCompositor *self)
+{
+  g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), FALSE);
+
+  return self->drag && self->drag->owns_pointer;
+}
+
+NestedSurface *
+nested_compositor_drag_icon (NestedCompositor *self)
+{
+  g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), NULL);
+
+  if (!self->drag || !self->drag->owns_pointer)
+    return NULL;
+
+  return self->drag->icon;
+}
+
+void
+nested_compositor_drag_move_icon (NestedCompositor *self)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  if (!self->drag || !self->drag->icon)
+    return;
+
+  /* The protocol puts the icon's top-left at the pointer hotspot, and
+   * wl_surface.set_offset moves it from there. Its place is therefore the
+   * cursor's plus the offset, in the widget's own logical pixels — which is
+   * what popup_x and popup_y hold for every other surface. */
+  self->drag->icon->popup_x = round_to_pixel (self->pointer_x) + self->drag->icon->offset_x;
+  self->drag->icon->popup_y = round_to_pixel (self->pointer_y) + self->drag->icon->offset_y;
+}
+
+void
+nested_compositor_drag_motion (NestedCompositor *self)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  if (!self->drag || !self->drag->owns_pointer)
+    return;
+
+  nested_compositor_drag_move_icon (self);
+  drag_update_destination (self->drag);
+
+  /* Only an icon that reaches the screen makes this a picture change. */
+  if (self->drag->icon && self->drag->icon->wl_surface &&
+      self->drag->icon->mapped && self->drag->icon->texture)
+    nested_surfaces_changed (self);
+}
+
+gboolean
+nested_compositor_drag_button (NestedCompositor *self, uint32_t button, gboolean pressed)
+{
+  g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), FALSE);
+
+  if (!self->drag || !self->drag->owns_pointer)
+    return FALSE;
+
+  /* The grab is the drag's, so no button reaches the surfaces underneath while
+   * it lasts: a second press means nothing, and the release is the drop. */
+  if (pressed)
+    {
+      g_debug ("nested: button 0x%x pressed during a drag, which is not a click",
+               button);
+      return TRUE;
+    }
+
+  g_debug ("nested: button 0x%x released: the drag is let go", button);
+  drag_drop (self->drag);
+
+  return TRUE;
+}
+
+/* A client's data device is gone: give up the halves of the drag that travelled
+ * through it before anything is sent, because the resource they would go on is
+ * the one being destroyed. */
+static void
+drag_forget_device (NestedCompositor *self, DataDevice *device)
+{
+  Drag *drag = self->drag;
+  gboolean is_origin, is_dest;
+
+  if (!drag)
+    return;
+
+  is_origin = drag->origin_device == device;
+  is_dest = drag->dest_device == device;
+
+  if (!is_origin && !is_dest)
+    return;
+
+  if (is_dest)
+    {
+      drag->dest_device = NULL;
+      drag->dest_offer = NULL;
+      g_clear_object (&drag->dest_surface);
+    }
+
+  if (is_origin)
+    {
+      /* The source belongs to the client that dragged, so it is going with it:
+       * nothing may be sent to it, and it is not ours to talk about any more. */
+      drag->origin_device = NULL;
+      drag->source = NULL;
+      drag->concluded = TRUE;
+    }
+
+  drag_cancel (drag);
+}
+
 /* ------------------------------------------------------------- wl_data_offer */
 
 static void
 data_offer_accept (struct wl_client *client, struct wl_resource *resource,
                    uint32_t serial, const char *mime_type)
 {
-  /* Only drags use it, and there are no drags here. */
+  DataOffer *offer = wl_resource_get_user_data (resource);
+  Drag *drag = drag_for_offer (offer);
+
+  /* A copy answers this by asking for the bytes when it wants them, so there is
+   * nothing to tell anyone about what it intends to take. A drag does: the
+   * source is kept informed during it, and for a drag inside one page that means
+   * the page is told what its own code agreed to be handed. */
+  if (!drag)
+    return;
+
+  g_clear_pointer (&drag->accepted_mime, g_free);
+  drag->accepted_mime = mime_type ? g_strdup (mime_type) : NULL;
+  drag->refused = mime_type == NULL;
+
+  if (offer->source)
+    wl_data_source_send_target (offer->source->resource, mime_type);
 }
 
 static void
@@ -601,9 +1101,11 @@ data_offer_receive (struct wl_client *client, struct wl_resource *resource,
 
   if (offer->source)
     {
-      /* The owner of the selection writes into the fd the requester made;
-       * libwayland dups it, so our copy can go. */
-      g_debug ("nested: passing %s to the client that copied it", mime_type);
+      /* The owner of the selection, or of a drag, writes into the fd the
+       * requester made; libwayland dups it, so our copy can go. Both ends being
+       * one client is normal here: this is how a page's own drop event gets the
+       * text it is dropping. */
+      g_debug ("nested: passing %s to the client that owns it", mime_type);
       wl_data_source_send_send (offer->source->resource, mime_type, fd);
       close (fd);
       return;
@@ -635,28 +1137,88 @@ data_offer_destroy (struct wl_client *client, struct wl_resource *resource)
   wl_resource_destroy (resource);
 }
 
-/* Drag and drop ends here without ever having started. These two are v3
- * requests, so leaving their slots empty would abort the compositor: a
- * wl_resource implementation is indexed by opcode, and libwayland-server
- * treats an empty slot as a bug in itself rather than as a refusal. */
+/* These two are version 3 requests, so their slots had to be filled even before
+ * a drag could make any use of them: a wl_resource implementation is indexed by
+ * opcode and libwayland-server treats an empty slot as a bug in the compositor
+ * rather than as a refusal. See docs/empty-request-slot.md. */
 static void
 data_offer_finish (struct wl_client *client, struct wl_resource *resource)
 {
-  g_debug ("nested: a client finished a drag that was never started");
+  DataOffer *offer = wl_resource_get_user_data (resource);
+  Drag *drag = drag_for_offer (offer);
+
+  if (!drag)
+    {
+      /* The protocol's answer to finishing a copy is the invalid_finish error,
+       * and the client that asks for it is confused rather than dangerous. A
+       * page killed over a version 3 request it was never obliged to send is a
+       * worse outcome than a drag that was never there, so it is ignored —
+       * which is also what the request looked like before drags worked at all. */
+      g_debug ("nested: a client finished a copy, which is not a thing to finish");
+      return;
+    }
+
+  if (!drag->dropped)
+    {
+      /* finish before the pointer was let go: the destination has the payload
+       * already and is done negotiating. */
+      g_debug ("nested: a drag was finished before the pointer let go of it");
+      drag_cancel (drag);
+      return;
+    }
+
+  g_debug ("nested: a drag concluded: the destination has what it was given");
+  drag->concluded = TRUE;
+  if (offer->source &&
+      wl_resource_get_version (offer->source->resource) >=
+      WL_DATA_SOURCE_DND_FINISHED_SINCE_VERSION)
+    wl_data_source_send_dnd_finished (offer->source->resource);
+
+  drag_destroy (drag);
 }
 
 static void
 data_offer_set_actions (struct wl_client *client, struct wl_resource *resource,
                         uint32_t dnd_actions, uint32_t preferred_action)
 {
-  g_debug ("nested: a client wants action 0x%x of 0x%x, and there is nothing to drop on",
-           preferred_action, dnd_actions);
+  DataOffer *offer = wl_resource_get_user_data (resource);
+  Drag *drag = drag_for_offer (offer);
+
+  if (!drag)
+    {
+      g_debug ("nested: a client wants action 0x%x of 0x%x, and there is nothing to drop on",
+               preferred_action, dnd_actions);
+      return;
+    }
+
+  drag->dest_actions = dnd_actions;
+  drag->preferred_action = preferred_action;
+  drag_negotiate (drag);
 }
 
 static void
 data_offer_resource_destroyed (struct wl_resource *resource)
 {
   DataOffer *offer = wl_resource_get_user_data (resource);
+  Drag *drag = drag_for_offer (offer);
+
+  /* A destination that throws the offer away before the pointer is let go is
+   * giving up on the drag — the protocol's own way of dismissing an ask. One
+   * that throws it away afterwards has already had its drop, and cancelled
+   * would be a lie: nothing is being called off. Either way the drag is over,
+   * and this is the last moment at which the icon can be told it is not one. */
+  if (drag)
+    {
+      drag->dest_offer = NULL;
+
+      if (drag->dropped)
+        {
+          g_debug ("nested: a drag ended without the destination finishing");
+          drag_destroy (drag);
+        }
+      else
+        drag_cancel (drag);
+    }
 
   wl_list_remove (&offer->device_link);
   if (offer->source)
@@ -700,6 +1262,16 @@ data_source_resource_destroyed (struct wl_resource *resource)
   DataSource *source = wl_resource_get_user_data (resource);
   NestedCompositor *self = source->compositor;
 
+  /* "If source is destroyed, the drag-and-drop session will be cancelled": the
+   * drag is called off first, and its hold on this resource is dropped before
+   * that happens, because a source being destroyed cannot be sent anything. */
+  if (self->drag && self->drag->source == source)
+    {
+      self->drag->source = NULL;
+      self->drag->concluded = TRUE;
+      drag_cancel (self->drag);
+    }
+
   /* The offers outlive the source: their clients still hold them and will
    * destroy them themselves. Detached, they fall back to the widget
    * clipboard, which still holds what was copied. */
@@ -730,11 +1302,32 @@ static void
 data_source_set_actions (struct wl_client *client, struct wl_resource *resource,
                          uint32_t dnd_actions)
 {
-  /* Chromium sends this for plain clipboard sources. There are no drags to
-   * act on, but the slot has to be filled: opcode 2 of wl_data_source with an
-   * empty implementation kills the compositor, the host and every client. */
-  g_debug ("nested: a source supports actions 0x%x, which is nothing to do here",
-           dnd_actions);
+  DataSource *source = wl_resource_get_user_data (resource);
+  NestedCompositor *self = source->compositor;
+  Drag *drag = self->drag;
+
+  /* The protocol wants this once, before start_drag, so there is usually no
+   * drag to attach it to yet: it is the source that remembers. Chromium also
+   * sends it for a plain clipboard source, which is why a mask from a source
+   * that is not dragging is only recorded. */
+  source->dnd_actions = dnd_actions;
+
+  if (!drag || drag->source != source)
+    {
+      g_debug ("nested: a source supports actions 0x%x", dnd_actions);
+      return;
+    }
+
+  drag->source_actions = dnd_actions != 0 ? dnd_actions : DRAG_ALL_ACTIONS;
+
+  /* "or anytime the source side changes its offered actions": the destination
+   * is told, then both are asked again what they can agree on. */
+  if (drag->dest_offer &&
+      wl_resource_get_version (drag->dest_offer) >=
+      WL_DATA_OFFER_SOURCE_ACTIONS_SINCE_VERSION)
+    wl_data_offer_send_source_actions (drag->dest_offer, drag->source_actions);
+
+  drag_negotiate (drag);
 }
 
 static const struct wl_data_source_interface data_source_impl = {
@@ -747,10 +1340,85 @@ static const struct wl_data_source_interface data_source_impl = {
 
 static void
 data_device_start_drag (struct wl_client *client, struct wl_resource *resource,
-                        struct wl_resource *source, struct wl_resource *origin,
+                        struct wl_resource *source_resource, struct wl_resource *origin,
                         struct wl_resource *icon, uint32_t serial)
 {
-  g_debug ("nested: ignoring a drag: a surface inside a widget has nowhere to drop");
+  DataDevice *device = wl_resource_get_user_data (resource);
+  NestedCompositor *self = device->compositor;
+  NestedSurface *origin_surface;
+  NestedSurface *icon_surface = NULL;
+  DataSource *source = NULL;
+  Drag *drag;
+
+  /* A drag has to come from somewhere, and the surface it comes from has to be
+   * one this compositor is drawing: both are the client naming a wrong object,
+   * which surface_from_resource() reports. */
+  origin_surface = surface_from_resource (resource, origin);
+  if (!origin_surface)
+    return;
+
+  if (icon)
+    {
+      icon_surface = surface_from_resource (resource, icon);
+      if (!icon_surface)
+        return;
+
+      if (icon_surface->xdg_surface)
+        {
+          /* The one error a drag is worth raising: a surface that is already a
+           * window cannot also be an icon, and a client that tries has lost
+           * track of what it is drawing with. */
+          wl_resource_post_error (resource, WL_DATA_DEVICE_ERROR_ROLE,
+                                  "the drag icon id %u is already a window",
+                                  wl_resource_get_id (icon));
+          return;
+        }
+    }
+
+  if (source_resource)
+    {
+      if (!wl_resource_instance_of (source_resource, &wl_data_source_interface,
+                                    &data_source_impl))
+        {
+          post_wrong_object (resource, source_resource, "wl_data_source");
+          return;
+        }
+      source = wl_resource_get_user_data (source_resource);
+    }
+
+  /* One pointer, one drag: a second start_drag means the client lost the first,
+   * and the seat cannot hold button events back for two of them. */
+  if (self->drag)
+    drag_cancel (self->drag);
+
+  drag = g_new0 (Drag, 1);
+  drag->compositor = self;
+  drag->source = source;
+  drag->origin_device = device;
+  drag->origin = g_object_ref (origin_surface);
+  drag->icon = icon_surface ? g_object_ref (icon_surface) : NULL;
+  drag->serial = serial;
+  drag->owns_pointer = TRUE;
+  drag->source_actions = source && source->dnd_actions != 0 ? source->dnd_actions
+                                                            : DRAG_ALL_ACTIONS;
+  drag->chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE;
+  if (icon_surface)
+    icon_surface->is_drag_icon = TRUE;
+  self->drag = drag;
+
+  g_debug ("nested: a drag started over surface id %u carrying %u type%s",
+           wl_resource_get_id (origin),
+           source ? source->mime_types->len : 0u,
+           source && source->mime_types->len == 1 ? "" : "s");
+
+  /* The cursor is already over something when the drag begins, and a page that
+   * drags inside itself has to be told about the surface it started on: without
+   * this first enter it never fires a dragenter, and however far the pointer
+   * then moves its drop handlers stay shut. */
+  nested_compositor_drag_move_icon (self);
+  drag_update_destination (drag);
+  nested_surfaces_changed (self);
+  nested_flush (self);
 }
 
 static void
@@ -793,6 +1461,10 @@ static void
 data_device_resource_destroyed (struct wl_resource *resource)
 {
   DataDevice *device = wl_resource_get_user_data (resource);
+
+  /* First the drag, because its offers are about to be destroyed and their
+   * notifications would otherwise find a device they can no longer use. */
+  drag_forget_device (device->compositor, device);
 
   while (!wl_list_empty (&device->offers))
     {
@@ -923,6 +1595,11 @@ nested_compositor_set_clipboard (NestedCompositor *self, GdkClipboard *clipboard
 void
 data_device_shutdown (NestedCompositor *self)
 {
+  /* Nothing is sent on the way out: the display is going with these resources,
+   * and a drag's surfaces belong to clients that are already gone. */
+  if (self->drag)
+    drag_destroy (self->drag);
+
   if (self->clipboard_transfer)
     {
       self->clipboard_transfer->compositor = NULL;

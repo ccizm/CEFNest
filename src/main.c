@@ -935,6 +935,7 @@ dump_view (gpointer data)
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "hover <x> <y>",
  * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
+ * "drag-hold <x0> <y0> <x1> <y1> [button]", "release [button]", "surfaces",
  * "wheel <dx> <dy>", "mute", "unmute", "download-accept <path>",
  * "download-reject", "find <pattern>", "find-case <pattern>", "find-next",
  * "find-prev", "find-stop",
@@ -944,8 +945,8 @@ dump_view (gpointer data)
  * is tagged with its own line number, which is what comes back on
  * ::script-result, so a result can be matched to the step that asked for it.
  * The page steps need a helper session; "hover", "click", "drag", "wheel",
- * "shot", "dump" and "close" work against any client, so the same script drives
- * the nested compositor without Chromium. */
+ * "shot", "dump", "surfaces" and "close" work against any client, so the same
+ * script drives the nested compositor without Chromium. */
 typedef struct {
   GPtrArray *steps;
   guint index;
@@ -992,6 +993,7 @@ typedef struct {
   double x, y, step_x, step_y;
   int left;
   uint32_t button;
+  unsigned int hold : 1;
 } ScriptDrag;
 
 static gboolean
@@ -1006,7 +1008,12 @@ script_drag_motion (gpointer data)
   if (--drag->left > 0)
     return G_SOURCE_CONTINUE;
 
-  nested_compositor_notify_pointer_button (drag->compositor, drag->button, FALSE);
+  /* A held drag stops with the button still down, so the script can look at
+   * what the drag is carrying while it is in flight — a snapshot taken
+   * mid-drag is the only way to see the drag icon painted — and finish it with
+   * "release". */
+  if (!drag->hold)
+    nested_compositor_notify_pointer_button (drag->compositor, drag->button, FALSE);
   g_object_unref (drag->compositor);
   g_free (drag);
 
@@ -1231,15 +1238,18 @@ script_run_next (void)
           g_timeout_add (80, script_click_release, GUINT_TO_POINTER ((uint32_t) button));
           continue;
         }
-      else if (!strncmp (line, "drag ", 5))
+      else if (!strncmp (line, "drag ", 5) || !strncmp (line, "drag-hold ", 10))
         {
+          gboolean hold = !strncmp (line, "drag-hold ", 10);
+          const char *args = line + (hold ? 10 : 5);
           double x0 = 0, y0 = 0, x1 = 0, y1 = 0;
           int button = DEMO_BTN_LEFT;
           ScriptDrag *drag;
 
-          if (sscanf (line + 5, "%lf %lf %lf %lf %d", &x0, &y0, &x1, &y1, &button) < 4)
+          if (sscanf (args, "%lf %lf %lf %lf %d", &x0, &y0, &x1, &y1, &button) < 4)
             {
-              g_warning ("demo: drag wants '<x0> <y0> <x1> <y1> [button]', got '%s'", line);
+              g_warning ("demo: %s wants '<x0> <y0> <x1> <y1> [button]', got '%s'",
+                         hold ? "drag-hold" : "drag", line);
               continue;
             }
 
@@ -1250,8 +1260,9 @@ script_run_next (void)
               continue;
             }
 
-          /* The release lands roughly 300 ms after the press, so a script that
-           * cares about what the drag did has to wait before looking. */
+          /* The release goes out roughly 300 ms after the press unless the step
+           * asked to hold, so a script that cares about what the drag did has
+           * to wait before looking. */
           nested_compositor_set_pointer_active (compositor, TRUE);
           nested_compositor_notify_pointer_motion (compositor, x0, y0);
           nested_compositor_notify_pointer_button (compositor, (uint32_t) button, TRUE);
@@ -1264,7 +1275,61 @@ script_run_next (void)
           drag->step_y = (y1 - y0) / DEMO_DRAG_STEPS;
           drag->left = DEMO_DRAG_STEPS;
           drag->button = (uint32_t) button;
+          drag->hold = hold;
           g_timeout_add (DEMO_DRAG_INTERVAL, script_drag_motion, drag);
+          continue;
+        }
+      else if (!strcmp (line, "surfaces"))
+        {
+          GList *stack, *l;
+          int n = 0;
+
+          compositor = chromium_view_get_compositor (demo.view);
+          if (!compositor)
+            {
+              g_warning ("demo: no nested compositor to look at");
+              continue;
+            }
+
+          /* One line per surface that reaches the screen, in the order they are
+           * drawn. A popup a page opened and the image a drag is carrying are
+           * both invisible to the page, so this is how a headless run sees
+           * them. */
+          stack = nested_compositor_get_paint_stack (compositor);
+          for (l = stack; l; l = l->next)
+            {
+              NestedSurface *surface = l->data;
+              const char *title;
+              int x = 0, y = 0, w = 0, h = 0;
+
+              nested_surface_get_size (surface, &w, &h);
+              nested_surface_get_position (surface, &x, &y);
+              title = nested_surface_get_title (surface);
+              g_printerr ("demo: surface %d at %d,%d size %dx%d title=%s\n",
+                          ++n, x, y, w, h, title ? title : "none");
+            }
+          g_list_free_full (stack, g_object_unref);
+          g_printerr ("demo: %d surface(s) paint\n", n);
+          continue;
+        }
+      else if (!strncmp (line, "release", 7))
+        {
+          int button = DEMO_BTN_LEFT;
+
+          if (line[7] && sscanf (line + 7, "%d", &button) < 1)
+            {
+              g_warning ("demo: release wants '[button]', got '%s'", line);
+              continue;
+            }
+
+          compositor = chromium_view_get_compositor (demo.view);
+          if (!compositor)
+            {
+              g_warning ("demo: no nested compositor to let go on");
+              continue;
+            }
+
+          nested_compositor_notify_pointer_button (compositor, (uint32_t) button, FALSE);
           continue;
         }
       else if (!strncmp (line, "wheel ", 6))

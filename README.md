@@ -110,7 +110,7 @@ of it is reproducible runs:
 | --- | --- |
 | `CHROMIUM_HELPER` | set (any value containing `/`) to enter session mode; the default is the path compiled in `src/meson.build` |
 | `CHROMIUM_URL` | page to open |
-| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `close`, `quit` — see `test/*.session` |
+| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `close`, `quit` — see `test/*.session` |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_WINDOW` | `fullscreen` or `maximize`, for deterministic geometry |
 | `CHROMIUM_CLIPSET` / `CHROMIUM_CLIPWATCH` | seed the host clipboard, and bridge it into the page |
@@ -204,6 +204,20 @@ filtered on the host side, and they read `scrollTop` twice — before and after 
 step — because the measurement that says a search does not move the page while a
 step scrolls the match in is the whole reason no match rectangle is on the wire.
 
+`test/dnd-gate.sh` is the drag half, four real-Chromium runs on
+`test/dnd-page.html` and 35 assertions. It answers the question the whole
+in-process route hanged on: whether a browser inside a widget honours a
+`wl_data_device.enter` at all, or settles an in-window drag through its own
+internal drag manager. The page's own event log says it honours it — the
+coordinates the script fed the seat are the coordinates the page reports on
+`dragenter`, `dragover` and `drop`. The other three runs are the ones that catch
+a state machine left behind: a destination that will not take the payload, a
+second drag after the first, and a drag held open so the drag image can be seen
+joining and leaving the paint stack, then a click that says the seat came back.
+It pipes stderr through `tee` because GLib's writer drops DEBUG messages when
+stderr is a plain file, and the compositor's own trace is half of what is
+asserted.
+
 ## Using it as a library
 
 ```c
@@ -267,12 +281,17 @@ They are the record of *why* the code is shaped like this:
 | `protocol-ceilings.md` | what real clients bind against the nested compositor, and the measured verdict on every protocol and version ceiling left un-advertised |
 | `download-path.md` | the parked `OnBeforeDownload` gate, who decides the path, and the three CEF download behaviours only a measurement can tell you |
 | `find-path.md` | a command that answers nothing, the reply shape only a measurement gives (one identifier per request, one to three updates per request), and what actually scrolls the page |
+| `drag-loop.md` | the in-page drag choreography, the measured proof that a `wl_data_device.enter` reaches the page, what the destination actually accepts, and why the fd relay is not what carries a same-page payload |
 
 ## Known limitations
 
-- **No drag and drop out of the page.** `start_drag` is refused on purpose: a
-  surface inside a widget has nowhere to be dropped. The version 3 requests are
-  answered, they just do nothing.
+- **Drag and drop stops at the window edge.** A drag that starts and ends inside
+  one page works: the compositor runs the whole `wl_data_device` negotiation, the
+  page's own drag image is composited on top of everything, and the drop lands
+  where the pointer says (`docs/drag-loop.md`). What is missing is the two
+  directions that leave it: a drag out of the page into the host, and a drop
+  from the host into the page. There is nothing outside this window for a
+  surface-in-a-widget to be dropped on yet.
 - **One seat, one pointer, no touch.** The embedding widget is the only device
   the compositor knows about.
 - **No pinch zoom, no tablet input, no middle-click paste.** Chromium binds
