@@ -211,6 +211,7 @@ They are the record of *why* the code is shaped like this:
 | `sandbox-policy.md` | the sandbox decision: no setuid helper needed, what a host without user namespaces does to the run |
 | `control-channel.md` | every command and event on the socket, what a failed load and a dead renderer look like, and the commands decided against |
 | `audio-path.md` | where the page's sound actually goes: an unsandboxed audio service, straight to the host's speakers, and what muting it measures |
+| `protocol-ceilings.md` | what real clients bind against the nested compositor, and the measured verdict on every protocol and version ceiling left un-advertised |
 
 ## Known limitations
 
@@ -219,6 +220,12 @@ They are the record of *why* the code is shaped like this:
   answered, they just do nothing.
 - **One seat, one pointer, no touch.** The embedding widget is the only device
   the compositor knows about.
+- **No pinch zoom, no tablet input, no middle-click paste.** Chromium binds
+  `zwp_pointer_gestures`, `zwp_tablet_manager_v2` and the primary-selection
+  manager against real compositors; the nested compositor does not advertise
+  them, so the page loses exactly those features and nothing else
+  (`docs/protocol-ceilings.md` has the measured verdict for every protocol left
+  out).
 - **A failed navigation reports twice, and `::load-end` still fires.** First the
   real code (`ERR_NAME_NOT_RESOLVED`), then `ERR_ABORTED` (-3) about a second
   later; the load-end arrives with HTTP code 0. Nothing is filtered, because
