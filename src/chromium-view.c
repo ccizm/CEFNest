@@ -154,6 +154,13 @@ chromium_view_on_map (GtkWidget *widget, gpointer data)
   nested_compositor_set_clipboard (self->compositor,
                                    gdk_display_get_clipboard (gtk_widget_get_display (widget)));
 
+  /* Client frames are paced by the same display cycle the widget paints on:
+   * a client that asks for a frame is answered at the start of a cycle, so
+   * what it commits lands on the next one instead of a fixed timer quantum
+   * later — and a hidden window pauses the clients along with it. */
+  nested_compositor_set_frame_clock (self->compositor,
+                                     gtk_widget_get_frame_clock (GTK_WIDGET (widget)));
+
   surface = gtk_native_get_surface (GTK_NATIVE (gtk_widget_get_native (GTK_WIDGET (self))));
   if (!surface || surface == self->scale_surface)
     return;
@@ -172,6 +179,7 @@ chromium_view_on_unmap (GtkWidget *widget, gpointer data)
 
   chromium_view_unwatch_scale (self);
   nested_compositor_set_clipboard (self->compositor, NULL);
+  nested_compositor_set_frame_clock (self->compositor, NULL);
 }
 
 static void

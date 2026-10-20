@@ -1331,15 +1331,14 @@ fractional_scale_manager_bind (struct wl_client *client, void *data,
 
 G_DEFINE_TYPE (NestedCompositor, nested_compositor, G_TYPE_OBJECT)
 
+/* Tell every client that is waiting for a frame to draw now, and say whether
+ * anyone still is. */
 static gboolean
-frame_clock_tick (gpointer data)
+fire_pending_frame_callbacks (NestedCompositor *self)
 {
-  NestedCompositor *self = data;
   uint32_t msec = (uint32_t) (g_get_monotonic_time () / 1000);
   NestedSurface *surface;
   gboolean again = FALSE;
-
-  self->frame_timer_id = 0;
 
   wl_list_for_each (surface, &self->surfaces, nested_link)
     surface_fire_frame_callbacks (surface, msec);
@@ -1352,28 +1351,62 @@ frame_clock_tick (gpointer data)
         again = TRUE;
     }
 
-  if (again)
+  return again;
+}
+
+/* Fallback pacing for when no widget clock is attached (tests, headless runs):
+ * a plain timer that is neither aligned with the display nor paused when the
+ * widget is hidden, which is exactly why the widget attaches its frame clock. */
+static gboolean
+frame_clock_tick (gpointer data)
+{
+  NestedCompositor *self = data;
+
+  self->frame_timer_id = 0;
+
+  if (fire_pending_frame_callbacks (self))
     self->frame_timer_id = g_timeout_add (16, frame_clock_tick, self);
 
   return G_SOURCE_REMOVE;
+}
+
+/* The widget's display cycle. A client that asked for a frame is told to draw
+ * at the start of one, so what it commits lands on the next cycle instead of
+ * waiting an arbitrary software-timer quantum on top of it. While anyone still
+ * waits, keep asking for update phases; with nobody waiting the clock idles
+ * until a commit or a frame request speaks up again. */
+static void
+frame_clock_update (GdkFrameClock *clock, gpointer data)
+{
+  NestedCompositor *self = data;
+
+  if (fire_pending_frame_callbacks (self))
+    gdk_frame_clock_request_phase (clock, GDK_FRAME_CLOCK_PHASE_UPDATE);
 }
 
 static void
 nested_start_frame_clock (NestedCompositor *self)
 {
   NestedSurface *surface;
-
-  if (self->frame_timer_id)
-    return;
+  gboolean pending = FALSE;
 
   wl_list_for_each (surface, &self->surfaces, nested_link)
     {
       if (surface_has_pending_frames (surface))
         {
-          self->frame_timer_id = g_timeout_add (16, frame_clock_tick, self);
-          return;
+          pending = TRUE;
+          break;
         }
     }
+
+  if (!pending)
+    return;
+
+  if (self->frame_clock)
+    gdk_frame_clock_request_phase (self->frame_clock,
+                                   GDK_FRAME_CLOCK_PHASE_UPDATE);
+  else if (!self->frame_timer_id)
+    self->frame_timer_id = g_timeout_add (16, frame_clock_tick, self);
 }
 
 void
@@ -1452,6 +1485,14 @@ nested_compositor_dispose (GObject *object)
     {
       g_source_remove (self->frame_timer_id);
       self->frame_timer_id = 0;
+    }
+
+  if (self->frame_clock)
+    {
+      if (self->frame_clock_handler != 0)
+        g_signal_handler_disconnect (self->frame_clock, self->frame_clock_handler);
+      self->frame_clock_handler = 0;
+      g_clear_object (&self->frame_clock);
     }
 
   if (self->source_id)
@@ -1718,5 +1759,45 @@ nested_compositor_get_frame_count (NestedCompositor *self)
 {
   g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), 0);
   return self->frame_count;
+}
+
+void
+nested_compositor_set_frame_clock (NestedCompositor *self, GdkFrameClock *clock)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+  g_return_if_fail (clock == NULL || GDK_IS_FRAME_CLOCK (clock));
+
+  if (self->frame_clock == clock)
+    return;
+
+  if (self->frame_clock)
+    {
+      if (self->frame_clock_handler != 0)
+        g_signal_handler_disconnect (self->frame_clock, self->frame_clock_handler);
+      self->frame_clock_handler = 0;
+      g_clear_object (&self->frame_clock);
+    }
+
+  if (self->frame_timer_id)
+    {
+      g_source_remove (self->frame_timer_id);
+      self->frame_timer_id = 0;
+    }
+
+  if (!clock)
+    {
+      /* Clients that are mid-animation keep going on the fallback timer. */
+      nested_start_frame_clock (self);
+      return;
+    }
+
+  self->frame_clock = g_object_ref (clock);
+  self->frame_clock_handler =
+    g_signal_connect (self->frame_clock, "update",
+                      G_CALLBACK (frame_clock_update), self);
+
+  /* A client may already be waiting for a frame: fold it into the display
+   * cycle instead of leaving it on the timer until the next request. */
+  nested_start_frame_clock (self);
 }
 

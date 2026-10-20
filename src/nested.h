@@ -46,6 +46,14 @@ void              nested_compositor_get_size        (NestedCompositor *self,
  * this: start_drag is ignored. */
 void              nested_compositor_set_clipboard   (NestedCompositor *self,
                                                      GdkClipboard *clipboard);
+/* Paces client frame callbacks with the embedding widget's display cycle: pass
+ * gtk_widget_get_frame_clock() on map and NULL on unmap, like set_clipboard().
+ * While attached, a client waiting for a frame is told to draw at the start of
+ * a cycle, so what it commits lands on the following one — and a hidden window
+ * pauses the clients along with it. Without a clock (tests, headless runs) a
+ * plain 16 ms timer keeps callbacks flowing instead. */
+void              nested_compositor_set_frame_clock (NestedCompositor *self,
+                                                     GdkFrameClock *clock);
 NestedSurface    *nested_compositor_get_surface     (NestedCompositor *self);
 uint64_t          nested_compositor_get_frame_count (NestedCompositor *self);
 

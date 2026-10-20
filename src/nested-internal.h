@@ -122,6 +122,8 @@ struct _NestedCompositor {
   GSource *source;
   gulong source_id;
   guint frame_timer_id;
+  GdkFrameClock *frame_clock;   /* the embedding widget's, may be NULL */
+  gulong frame_clock_handler;
   char *socket_name;
 
   struct wl_global *global_compositor;
