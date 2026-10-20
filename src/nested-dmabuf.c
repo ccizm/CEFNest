@@ -300,8 +300,14 @@ dmabuf_create_params (struct wl_client *client, struct wl_resource *resource,
   for (i = 0; i < NESTED_DMABUF_MAX_PLANES; i++)
     params->fd[i] = -1;
 
-  params_resource = wl_resource_create (client, &zwp_linux_buffer_params_v1_interface,
-                                        wl_resource_get_version (resource), id);
+  params_resource = resource_create (client, &zwp_linux_buffer_params_v1_interface,
+                                     wl_resource_get_version (resource), id);
+  if (!params_resource)
+    {
+      g_free (params); /* no resource means no destroy handler either */
+      return;
+    }
+
   params->resource = params_resource;
   wl_resource_set_implementation (params_resource, &params_impl, params,
                                   params_resource_destroyed);
@@ -363,13 +369,10 @@ dmabuf_create_feedback (struct wl_client *client, struct wl_resource *resource, 
   NestedCompositor *self = wl_resource_get_user_data (resource);
   struct wl_resource *feedback;
 
-  feedback = wl_resource_create (client, &zwp_linux_dmabuf_feedback_v1_interface,
-                                 wl_resource_get_version (resource), id);
+  feedback = resource_create (client, &zwp_linux_dmabuf_feedback_v1_interface,
+                              wl_resource_get_version (resource), id);
   if (!feedback)
-    {
-      wl_client_post_no_memory (client);
-      return;
-    }
+    return;
 
   wl_resource_set_implementation (feedback, &feedback_impl, self, NULL);
   dmabuf_send_feedback (feedback, self);
@@ -404,7 +407,10 @@ dmabuf_bind (struct wl_client *client, void *data, uint32_t version, uint32_t id
   NestedCompositor *self = data;
   struct wl_resource *resource;
 
-  resource = wl_resource_create (client, &zwp_linux_dmabuf_v1_interface, version, id);
+  resource = resource_create (client, &zwp_linux_dmabuf_v1_interface, version, id);
+  if (!resource)
+    return;
+
   wl_resource_set_implementation (resource, &dmabuf_impl, self, NULL);
 
   dmabuf_send_formats (resource, self);
@@ -464,8 +470,22 @@ params_add (struct wl_client *client, struct wl_resource *resource,
   params->has_plane[plane_idx] = TRUE;
 }
 
+/* A buffer that never reached a resource has no destroy handler to close the
+ * planes it took over from the params, so this is where they go back. */
+static void
+buffer_discard (Buffer *buffer)
+{
+  int i;
+
+  for (i = 0; i < NESTED_DMABUF_MAX_PLANES; i++)
+    if (buffer->fd[i] >= 0)
+      close (buffer->fd[i]);
+
+  g_free (buffer);
+}
+
 /* Imports the collected planes as a wl_buffer. On failure an error or the
- * 'failed' event has been sent and NULL is returned. */
+ * 'failed' event has been sent and no buffer is left behind. */
 static void
 params_create_buffer (struct wl_client *client, struct wl_resource *resource,
                       uint32_t buffer_id, int32_t width, int32_t height,
@@ -498,8 +518,11 @@ params_create_buffer (struct wl_client *client, struct wl_resource *resource,
         return;
       }
 
-  if (width <= 0 || height <= 0)
+  if (width <= 0 || height <= 0 || width > 65535 || height > 65535)
     {
+      /* The same ceiling shm buffers get: no window is 128 MB of pixels wide,
+       * and keeping the dimensions in 16 bits is what makes the plane
+       * arithmetic below safe to hold in an int32. */
       wl_resource_post_error (resource,
                               ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_DIMENSIONS,
                               "invalid buffer size %dx%d", width, height);
@@ -543,9 +566,6 @@ params_create_buffer (struct wl_client *client, struct wl_resource *resource,
 
   buffer->stride = (int32_t) buffer->plane_stride[0];
   wl_list_init (&buffer->users);
-
-  /* An id of 0 makes libwayland pick one when the 'created' event binds it. */
-  buffer_resource = buffer_resource_new (client, buffer, immediate ? buffer_id : 0);
   params->used = TRUE;
 
   /* Import now rather than at the first commit: the client can only fall back
@@ -553,6 +573,17 @@ params_create_buffer (struct wl_client *client, struct wl_resource *resource,
   buffer->texture = buffer_create_dmabuf_texture (buffer);
   if (!buffer->texture)
     {
+      buffer_discard (buffer);
+      zwp_linux_buffer_params_v1_send_failed (resource);
+      return;
+    }
+
+  /* An id of 0 makes libwayland pick one when the 'created' event binds it. */
+  buffer_resource = buffer_resource_new (client, buffer, immediate ? buffer_id : 0);
+  if (!buffer_resource)
+    {
+      g_clear_object (&buffer->texture);
+      buffer_discard (buffer);
       zwp_linux_buffer_params_v1_send_failed (resource);
       return;
     }

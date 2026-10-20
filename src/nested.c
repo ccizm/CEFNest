@@ -402,8 +402,11 @@ surface_frame (struct wl_client *client, struct wl_resource *resource, uint32_t 
   struct wl_resource *cb_resource;
   FrameCallback *cb;
 
-  cb_resource = wl_resource_create (client, &wl_callback_interface,
-                                    wl_resource_get_version (resource), id);
+  cb_resource = resource_create (client, &wl_callback_interface,
+                                 wl_resource_get_version (resource), id);
+  if (!cb_resource)
+    return;
+
   cb = g_new0 (FrameCallback, 1);
   cb->resource = cb_resource;
   cb->surface = g_object_ref (self);
@@ -868,8 +871,11 @@ compositor_create_surface (struct wl_client *client, struct wl_resource *resourc
   NestedCompositor *self = wl_resource_get_user_data (resource);
   struct wl_resource *surface_resource;
 
-  surface_resource = wl_resource_create (client, &wl_surface_interface,
-                                         wl_resource_get_version (resource), id);
+  surface_resource = resource_create (client, &wl_surface_interface,
+                                      wl_resource_get_version (resource), id);
+  if (!surface_resource)
+    return;
+
   nested_surface_new (self, surface_resource);
 }
 
@@ -897,8 +903,11 @@ compositor_create_region (struct wl_client *client, struct wl_resource *resource
 {
   struct wl_resource *region_resource;
 
-  region_resource = wl_resource_create (client, &wl_region_interface,
-                                        wl_resource_get_version (resource), id);
+  region_resource = resource_create (client, &wl_region_interface,
+                                     wl_resource_get_version (resource), id);
+  if (!region_resource)
+    return;
+
   wl_resource_set_implementation (region_resource, &region_impl, NULL, NULL);
 }
 
@@ -912,7 +921,10 @@ compositor_bind (struct wl_client *client, void *data, uint32_t version, uint32_
 {
   struct wl_resource *resource;
 
-  resource = wl_resource_create (client, &wl_compositor_interface, version, id);
+  resource = resource_create (client, &wl_compositor_interface, version, id);
+  if (!resource)
+    return;
+
   wl_resource_set_implementation (resource, &compositor_impl, data, NULL);
 }
 
@@ -932,6 +944,15 @@ shm_create_pool (struct wl_client *client, struct wl_resource *resource,
     {
       wl_resource_post_error (resource, WL_SHM_ERROR_INVALID_FD,
                               "invalid pool size %d", size);
+      close (fd);
+      return;
+    }
+
+  if (size > NESTED_SHM_MAX_POOL)
+    {
+      wl_resource_post_error (resource, WL_SHM_ERROR_INVALID_FD,
+                              "pool of %d bytes is over the %d byte limit",
+                              size, NESTED_SHM_MAX_POOL);
       close (fd);
       return;
     }
@@ -958,8 +979,14 @@ shm_create_pool (struct wl_client *client, struct wl_resource *resource,
   pool->size = (size_t) size;
   pool->refcount = 1;
 
-  pool_resource = wl_resource_create (client, &wl_shm_pool_interface,
-                                      wl_resource_get_version (resource), id);
+  pool_resource = resource_create (client, &wl_shm_pool_interface,
+                                   wl_resource_get_version (resource), id);
+  if (!pool_resource)
+    {
+      pool_unref (pool); /* the pool owns the fd from the moment it was made */
+      return;
+    }
+
   wl_resource_set_implementation (pool_resource, &shm_pool_impl, pool,
                                   pool_resource_destroyed);
 }
@@ -980,7 +1007,10 @@ shm_bind (struct wl_client *client, void *data, uint32_t version, uint32_t id)
 {
   struct wl_resource *resource;
 
-  resource = wl_resource_create (client, &wl_shm_interface, version, id);
+  resource = resource_create (client, &wl_shm_interface, version, id);
+  if (!resource)
+    return;
+
   wl_resource_set_implementation (resource, &shm_impl, data, NULL);
 
   wl_shm_send_format (resource, WL_SHM_FORMAT_ARGB8888);
@@ -1041,7 +1071,10 @@ shm_pool_create_buffer (struct wl_client *client, struct wl_resource *resource,
       return;
     }
 
-  if (width <= 0 || height <= 0 || stride < width * 4 || offset < 0)
+  /* Sixteen bits of size each way is 128 MB of pixels, which no window has and
+   * which keeps the stride and area arithmetic below free of overflow. */
+  if (width <= 0 || height <= 0 || width > 65535 || height > 65535 ||
+      (int64_t) stride < (int64_t) width * 4 || offset < 0)
     {
       wl_resource_post_error (resource, WL_SHM_ERROR_INVALID_STRIDE,
                               "invalid %dx%d buffer with stride %d offset %d",
@@ -1067,7 +1100,14 @@ shm_pool_create_buffer (struct wl_client *client, struct wl_resource *resource,
   buffer->format = format;
   wl_list_init (&buffer->users);
 
-  buffer_resource = wl_resource_create (client, &wl_buffer_interface, 1, id);
+  buffer_resource = resource_create (client, &wl_buffer_interface, 1, id);
+  if (!buffer_resource)
+    {
+      pool_unref (buffer->pool);
+      g_free (buffer);
+      return;
+    }
+
   buffer->resource = buffer_resource;
   wl_resource_set_implementation (buffer_resource, &buffer_impl, buffer,
                                   buffer_resource_destroyed);
@@ -1095,6 +1135,14 @@ shm_pool_resize (struct wl_client *client, struct wl_resource *resource, int32_t
     {
       wl_resource_post_error (resource, WL_SHM_ERROR_INVALID_FD,
                               "pool can only grow, not shrink to %d", size);
+      return;
+    }
+
+  if (size > NESTED_SHM_MAX_POOL)
+    {
+      wl_resource_post_error (resource, WL_SHM_ERROR_INVALID_FD,
+                              "grown to %d bytes the pool is over the %d byte limit",
+                              size, NESTED_SHM_MAX_POOL);
       return;
     }
 
@@ -1129,8 +1177,11 @@ static const struct wl_buffer_interface buffer_impl = {
 struct wl_resource *
 buffer_resource_new (struct wl_client *client, Buffer *buffer, uint32_t id)
 {
-  struct wl_resource *resource = wl_resource_create (client, &wl_buffer_interface,
-                                                     1, id);
+  struct wl_resource *resource = resource_create (client, &wl_buffer_interface,
+                                                  1, id);
+
+  if (!resource)
+    return NULL;
 
   buffer->resource = resource;
   wl_resource_set_implementation (resource, &buffer_impl, buffer,
@@ -1256,8 +1307,11 @@ viewporter_get_viewport (struct wl_client *client, struct wl_resource *resource,
       return;
     }
 
-  viewport_resource = wl_resource_create (client, &wp_viewport_interface,
-                                          wl_resource_get_version (resource), id);
+  viewport_resource = resource_create (client, &wp_viewport_interface,
+                                       wl_resource_get_version (resource), id);
+  if (!viewport_resource)
+    return;
+
   viewport = g_new0 (Viewport, 1);
   viewport->surface = g_object_ref (surface);
   viewport->resource = viewport_resource;
@@ -1277,7 +1331,10 @@ viewporter_bind (struct wl_client *client, void *data, uint32_t version, uint32_
 {
   struct wl_resource *resource;
 
-  resource = wl_resource_create (client, &wp_viewporter_interface, version, id);
+  resource = resource_create (client, &wp_viewporter_interface, version, id);
+  if (!resource)
+    return;
+
   wl_resource_set_implementation (resource, &viewporter_impl, data, NULL);
 }
 
@@ -1368,8 +1425,11 @@ fractional_scale_manager_get_scale (struct wl_client *client,
       return;
     }
 
-  scale_resource = wl_resource_create (client, &wp_fractional_scale_v1_interface,
-                                       wl_resource_get_version (resource), id);
+  scale_resource = resource_create (client, &wp_fractional_scale_v1_interface,
+                                    wl_resource_get_version (resource), id);
+  if (!scale_resource)
+    return;
+
   scale = g_new0 (FractionalScale, 1);
   scale->surface = g_object_ref (surface);
   scale->resource = scale_resource;
@@ -1395,8 +1455,11 @@ fractional_scale_manager_bind (struct wl_client *client, void *data,
 {
   struct wl_resource *resource;
 
-  resource = wl_resource_create (client, &wp_fractional_scale_manager_v1_interface,
-                                 version, id);
+  resource = resource_create (client, &wp_fractional_scale_manager_v1_interface,
+                              version, id);
+  if (!resource)
+    return;
+
   wl_resource_set_implementation (resource, &fractional_scale_manager_impl, data, NULL);
 }
 

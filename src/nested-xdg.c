@@ -437,7 +437,10 @@ output_bind (struct wl_client *client, void *data, uint32_t version, uint32_t id
   NestedCompositor *self = data;
   OutputResource *output;
 
-  resource = wl_resource_create (client, &wl_output_interface, version, id);
+  resource = resource_create (client, &wl_output_interface, version, id);
+  if (!resource)
+    return;
+
   output = g_new0 (OutputResource, 1);
   output->nested = self;
   output->resource = resource;
@@ -588,8 +591,11 @@ xdg_wm_base_create_positioner (struct wl_client *client, struct wl_resource *res
   struct wl_resource *positioner;
   XdgPositioner *rules;
 
-  positioner = wl_resource_create (client, &xdg_positioner_interface,
-                                   wl_resource_get_version (resource), id);
+  positioner = resource_create (client, &xdg_positioner_interface,
+                                wl_resource_get_version (resource), id);
+  if (!positioner)
+    return;
+
   rules = g_new0 (XdgPositioner, 1);
   wl_resource_set_implementation (positioner, &xdg_positioner_impl, rules,
                                   positioner_resource_destroyed);
@@ -618,8 +624,11 @@ xdg_wm_base_get_xdg_surface (struct wl_client *client, struct wl_resource *resou
       return;
     }
 
-  xdg_resource = wl_resource_create (client, &xdg_surface_interface,
-                                     wl_resource_get_version (resource), id);
+  xdg_resource = resource_create (client, &xdg_surface_interface,
+                                  wl_resource_get_version (resource), id);
+  if (!xdg_resource)
+    return;
+
   surface->xdg_surface = xdg_resource;
   wl_resource_set_implementation (xdg_resource, &xdg_surface_impl,
                                   g_object_ref (surface),
@@ -647,7 +656,10 @@ xdg_wm_base_bind (struct wl_client *client, void *data, uint32_t version, uint32
 {
   struct wl_resource *resource;
 
-  resource = wl_resource_create (client, &xdg_wm_base_interface, version, id);
+  resource = resource_create (client, &xdg_wm_base_interface, version, id);
+  if (!resource)
+    return;
+
   wl_resource_set_implementation (resource, &xdg_wm_base_impl, data, NULL);
 }
 
@@ -738,8 +750,11 @@ xdg_surface_get_toplevel (struct wl_client *client, struct wl_resource *resource
       return;
     }
 
-  toplevel = wl_resource_create (client, &xdg_toplevel_interface,
-                                 wl_resource_get_version (resource), id);
+  toplevel = resource_create (client, &xdg_toplevel_interface,
+                              wl_resource_get_version (resource), id);
+  if (!toplevel)
+    return;
+
   self->toplevel = toplevel;
   self->is_toplevel = TRUE;
   wl_resource_set_implementation (toplevel, &xdg_toplevel_impl, g_object_ref (self),
@@ -802,8 +817,11 @@ xdg_surface_get_popup (struct wl_client *client, struct wl_resource *resource,
       return;
     }
 
-  popup = wl_resource_create (client, &xdg_popup_interface,
-                              wl_resource_get_version (resource), id);
+  popup = resource_create (client, &xdg_popup_interface,
+                           wl_resource_get_version (resource), id);
+  if (!popup)
+    return;
+
   self->popup = popup;
   self->is_popup = TRUE;
   wl_resource_set_implementation (popup, &xdg_popup_impl, g_object_ref (self),

@@ -192,8 +192,11 @@ cursor_device_new (struct wl_client *client, uint32_t version, uint32_t id,
   struct wl_resource *resource;
   CursorDevice *device;
 
-  resource = wl_resource_create (client, &wp_cursor_shape_device_v1_interface,
-                                 version, id);
+  resource = resource_create (client, &wp_cursor_shape_device_v1_interface,
+                              version, id);
+  if (!resource)
+    return;
+
   device = g_new0 (CursorDevice, 1);
   device->self = self;
   device->pointer = pointer;
@@ -259,8 +262,11 @@ cursor_shape_manager_bind (struct wl_client *client, void *data,
 {
   struct wl_resource *resource;
 
-  resource = wl_resource_create (client, &wp_cursor_shape_manager_v1_interface,
-                                 version, id);
+  resource = resource_create (client, &wp_cursor_shape_manager_v1_interface,
+                              version, id);
+  if (!resource)
+    return;
+
   wl_resource_set_implementation (resource, &cursor_manager_impl, data, NULL);
 }
 

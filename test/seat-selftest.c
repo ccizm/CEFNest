@@ -325,6 +325,25 @@ run_step (gpointer data)
   return G_SOURCE_REMOVE;
 }
 
+/* The compositor runs in this process, so the descriptors a client hands it are
+ * counted here. A run that gets refused forty imports must not end with forty
+ * more open than it started with. */
+static int
+open_fds (void)
+{
+  GDir *dir = g_dir_open ("/proc/self/fd", 0, NULL);
+  int n = 0;
+
+  if (dir)
+    {
+      while (g_dir_read_name (dir))
+        n++;
+      g_dir_close (dir);
+    }
+
+  return n;
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -332,6 +351,7 @@ main (int argc, char *argv[])
   GSubprocessLauncher *launcher;
   GMainLoop *loop;
   GPtrArray *client_argv;
+  int fds_at_start;
   const char *client = argc > 2 ? argv[2] : CLIENT_PATH;
   int i;
 
@@ -351,6 +371,8 @@ main (int argc, char *argv[])
       dump_ti_path = g_strdup_printf ("%s.text-input.png", dump_path);
       dump_composite_path = g_strdup_printf ("%s.composite", dump_path);
     }
+
+  fds_at_start = open_fds ();
 
   compositor = nested_compositor_new (&error);
   if (!compositor)
@@ -394,7 +416,8 @@ main (int argc, char *argv[])
 
   g_main_loop_run (loop);
 
-  g_print ("selftest: finished at step %zu\n", step_index);
+  g_print ("selftest: finished at step %zu, %d fds open (%d at start)\n",
+           step_index, open_fds (), fds_at_start);
 
   g_main_loop_unref (loop);
 

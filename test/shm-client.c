@@ -145,6 +145,7 @@ static int cursor_asks;
  * also how keyboard routing and popup_done dismissal get exercised.
  * --popup-reposition then moves the menu with a second set of rules. */
 static int use_popup;
+static int use_refused;
 static int use_popup_reposition;
 static int popups_opened;
 static int popup_repositioned;
@@ -2099,6 +2100,123 @@ static const struct wl_registry_listener registry_listener = {
   .global_remove = registry_global_remove,
 };
 
+/* ------------------------------------------------------------------ *
+ * resource limits (requests meant to be refused)                     *
+ * ------------------------------------------------------------------ *
+ *
+ * A run with --refused sends nothing the compositor should accept: imports of
+ * a buffer whose fourcc no one exports, and a pool bigger than any frame
+ * needs. What is being checked is the compositor's side of the answer — it has
+ * to stay up, and it has to give back the plane descriptors it was handed even
+ * when it could not use them. The oversized pool comes last because the
+ * compositor answers that one by killing this connection. */
+
+#define PROBE_IMPORTS 40
+#define PROBE_POOL_SIZE (300 * 1024 * 1024)
+
+static int refused_imports;
+
+static void
+probe_params_created (void *data, struct zwp_linux_buffer_params_v1 *params,
+                      struct wl_buffer *buffer)
+{
+  fprintf (stderr, "client: the compositor imported a buffer it should have refused\n");
+  wl_buffer_destroy (buffer);
+  zwp_linux_buffer_params_v1_destroy (params);
+}
+
+static void
+probe_params_failed (void *data, struct zwp_linux_buffer_params_v1 *params)
+{
+  refused_imports++;
+  zwp_linux_buffer_params_v1_destroy (params);
+}
+
+static const struct zwp_linux_buffer_params_v1_listener probe_params_listener = {
+  .created = probe_params_created,
+  .failed = probe_params_failed,
+};
+
+static void
+probe_refused_imports (void)
+{
+  struct gbm_device *device;
+  struct gbm_bo *bo;
+  int fd, i;
+
+  if (!dmabuf)
+    {
+      fprintf (stderr, "client: no dmabuf, cannot probe the import path\n");
+      return;
+    }
+
+  fd = open (render_node, O_RDWR | O_CLOEXEC);
+  if (fd < 0)
+    {
+      fprintf (stderr, "client: cannot open %s: %s\n", render_node, strerror (errno));
+      return;
+    }
+  device = gbm_create_device (fd); /* owns the fd, success or not */
+  if (!device)
+    return;
+
+  bo = gbm_bo_create (device, 64, 64, GBM_FORMAT_XRGB8888, GBM_BO_USE_LINEAR);
+  if (!bo)
+    {
+      fprintf (stderr, "client: no bo to probe with\n");
+      gbm_device_destroy (device);
+      return;
+    }
+
+  for (i = 0; i < PROBE_IMPORTS; i++)
+    {
+      struct zwp_linux_buffer_params_v1 *params =
+        zwp_linux_dmabuf_v1_create_params (dmabuf);
+      int plane_fd = gbm_bo_get_fd (bo);
+
+      if (plane_fd < 0)
+        break;
+
+      /* add() hands the descriptor over: libwayland closes this process's copy
+       * once the request has gone out, so it is not ours to close. */
+      zwp_linux_buffer_params_v1_add (params, plane_fd, 0, 0, 64 * 4, 0, 0);
+      zwp_linux_buffer_params_v1_add_listener (params, &probe_params_listener, NULL);
+      /* Not a fourcc any driver exports, so the import can only fail. */
+      zwp_linux_buffer_params_v1_create (params, 64, 64, 0x12345678, 0);
+      wl_display_roundtrip (display);
+    }
+
+  fprintf (stderr, "client: %d of %d impossible imports were refused\n",
+           refused_imports, PROBE_IMPORTS);
+
+  gbm_bo_destroy (bo);
+  gbm_device_destroy (device);
+}
+
+static void
+probe_oversized_pool (void)
+{
+  int fd = memfd_create ("shm-client-huge", MFD_CLOEXEC);
+
+  if (fd < 0 || ftruncate (fd, PROBE_POOL_SIZE) < 0)
+    {
+      fprintf (stderr, "client: cannot make an oversized pool: %s\n", strerror (errno));
+      if (fd >= 0)
+        close (fd);
+      return;
+    }
+
+  /* Nothing is written to it: the request alone is what the compositor has to
+   * answer, and a protocol error is the answer that ends this connection. */
+  wl_shm_create_pool (shm, fd, PROBE_POOL_SIZE);
+  if (wl_display_roundtrip (display) < 0)
+    fprintf (stderr, "client: the compositor refused the %d MB pool and dropped us\n",
+             PROBE_POOL_SIZE / (1024 * 1024));
+  else
+    fprintf (stderr, "client: the compositor accepted a %d MB pool\n",
+             PROBE_POOL_SIZE / (1024 * 1024));
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -2133,6 +2251,8 @@ main (int argc, char *argv[])
           use_popup = 1;
           use_popup_reposition = 1;
         }
+      else if (!strcmp (argv[i], "--refused"))
+        use_refused = 1;
       else
         fprintf (stderr, "client: ignoring unknown argument '%s'\n", argv[i]);
     }
@@ -2198,6 +2318,13 @@ main (int argc, char *argv[])
         }
       else if (dmabuf && !feedback.n_pairs)
         fprintf (stderr, "client: no dmabuf feedback received\n");
+    }
+
+  if (use_refused)
+    {
+      probe_refused_imports ();
+      probe_oversized_pool ();
+      return 0;
     }
 
   fprintf (stderr, "client: painting %s buffers, %d dmabuf formats and %d modifiers "

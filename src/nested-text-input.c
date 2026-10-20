@@ -371,8 +371,11 @@ text_input_manager_get_text_input (struct wl_client *client,
       return;
     }
 
-  input_resource = wl_resource_create (client, &zwp_text_input_v3_interface,
-                                       wl_resource_get_version (resource), id);
+  input_resource = resource_create (client, &zwp_text_input_v3_interface,
+                                    wl_resource_get_version (resource), id);
+  if (!input_resource)
+    return;
+
   input = g_new0 (TextInput, 1);
   input->resource = input_resource;
   input->compositor = self;
@@ -402,8 +405,11 @@ text_input_manager_bind (struct wl_client *client, void *data, uint32_t version,
 {
   struct wl_resource *resource;
 
-  resource = wl_resource_create (client, &zwp_text_input_manager_v3_interface,
-                                 version, id);
+  resource = resource_create (client, &zwp_text_input_manager_v3_interface,
+                              version, id);
+  if (!resource)
+    return;
+
   wl_resource_set_implementation (resource, &text_input_manager_impl, data, NULL);
 }
 

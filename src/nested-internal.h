@@ -19,6 +19,13 @@ G_BEGIN_DECLS
 #define NESTED_TEXT_INPUT_VERSION 1
 #define NESTED_CURSOR_SHAPE_VERSION 1
 
+/* The largest wl_shm pool a client may hand over. A 4K frame in ARGB8888 is
+ * about 33 MB, so this still leaves room for a handful of them. The cap is here
+ * because an shm buffer is copied out of the pool on every commit: without it
+ * one client could make the host allocate and read as much as it liked, once a
+ * frame. */
+#define NESTED_SHM_MAX_POOL ((int32_t) 256 * 1024 * 1024)
+
 typedef struct _Pool Pool;
 typedef struct _Buffer Buffer;
 typedef struct _BufferUser BufferUser;
@@ -239,6 +246,22 @@ struct _NestedCompositor {
 /* ------------------------------------------------------------------ *
  * Cross-module helpers                                               *
  * ------------------------------------------------------------------ */
+
+/* wl_resource_create() failing means the library could not allocate. Every
+ * caller here would go straight on to wl_resource_set_implementation() with the
+ * result, which takes the process down with it, so the failure is turned into
+ * the protocol's own no_memory error and the caller gets NULL to bail on. */
+static inline struct wl_resource *
+resource_create (struct wl_client *client, const struct wl_interface *interface,
+                 int version, uint32_t id)
+{
+  struct wl_resource *resource = wl_resource_create (client, interface, version, id);
+
+  if (!resource)
+    wl_client_post_no_memory (client);
+
+  return resource;
+}
 
 /* nested.c */
 void           nested_flush            (NestedCompositor *self);

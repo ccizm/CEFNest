@@ -465,9 +465,12 @@ seat_get_pointer (struct wl_client *client, struct wl_resource *resource, uint32
   if (sc->pointer)
     wl_resource_destroy (sc->pointer);
 
-  pointer = wl_resource_create (client, &wl_pointer_interface,
-                                MIN (wl_resource_get_version (resource),
-                                     NESTED_POINTER_VERSION), id);
+  pointer = resource_create (client, &wl_pointer_interface,
+                             MIN (wl_resource_get_version (resource),
+                                  NESTED_POINTER_VERSION), id);
+  if (!pointer)
+    return;
+
   sc->pointer = pointer;
   wl_resource_set_implementation (pointer, &pointer_impl, sc,
                                   pointer_resource_destroyed);
@@ -486,9 +489,12 @@ seat_get_keyboard (struct wl_client *client, struct wl_resource *resource, uint3
   if (sc->keyboard)
     wl_resource_destroy (sc->keyboard);
 
-  keyboard = wl_resource_create (client, &wl_keyboard_interface,
-                                 MIN (wl_resource_get_version (resource),
-                                      NESTED_KEYBOARD_VERSION), id);
+  keyboard = resource_create (client, &wl_keyboard_interface,
+                              MIN (wl_resource_get_version (resource),
+                                   NESTED_KEYBOARD_VERSION), id);
+  if (!keyboard)
+    return;
+
   sc->keyboard = keyboard;
   wl_resource_set_implementation (keyboard, &keyboard_impl, sc,
                                   keyboard_resource_destroyed);
@@ -563,7 +569,10 @@ seat_bind (struct wl_client *client, void *data, uint32_t version, uint32_t id)
   struct wl_resource *resource;
   SeatClient *sc;
 
-  resource = wl_resource_create (client, &wl_seat_interface, version, id);
+  resource = resource_create (client, &wl_seat_interface, version, id);
+  if (!resource)
+    return;
+
   sc = g_new0 (SeatClient, 1);
   sc->nested = self;
   sc->seat = resource;

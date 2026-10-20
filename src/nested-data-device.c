@@ -417,11 +417,10 @@ data_device_advertise (DataDevice *device, DataSource *source)
       return;
     }
 
-  offer_resource = wl_resource_create (client, &wl_data_offer_interface,
-                                       wl_resource_get_version (device->resource), 0);
+  offer_resource = resource_create (client, &wl_data_offer_interface,
+                                    wl_resource_get_version (device->resource), 0);
   if (!offer_resource)
     {
-      wl_client_post_no_memory (client);
       g_ptr_array_free (types, TRUE);
       return;
     }
@@ -757,8 +756,15 @@ data_device_manager_create_data_source (struct wl_client *client, struct wl_reso
   source->mime_types = g_ptr_array_new_with_free_func (g_free);
   wl_list_init (&source->offers);
 
-  source_resource = wl_resource_create (client, &wl_data_source_interface,
-                                        wl_resource_get_version (resource), id);
+  source_resource = resource_create (client, &wl_data_source_interface,
+                                     wl_resource_get_version (resource), id);
+  if (!source_resource)
+    {
+      g_clear_pointer (&source->mime_types, g_ptr_array_unref);
+      g_free (source);
+      return;
+    }
+
   source->resource = source_resource;
   wl_resource_set_implementation (source_resource, &data_source_impl, source,
                                   data_source_resource_destroyed);
@@ -776,8 +782,14 @@ data_device_manager_get_data_device (struct wl_client *client, struct wl_resourc
   device->compositor = self;
   wl_list_init (&device->offers);
 
-  device_resource = wl_resource_create (client, &wl_data_device_interface,
-                                        wl_resource_get_version (resource), id);
+  device_resource = resource_create (client, &wl_data_device_interface,
+                                     wl_resource_get_version (resource), id);
+  if (!device_resource)
+    {
+      g_free (device);
+      return;
+    }
+
   device->resource = device_resource;
   wl_resource_set_implementation (device_resource, &data_device_impl, device,
                                   data_device_resource_destroyed);
@@ -801,7 +813,10 @@ data_device_manager_bind (struct wl_client *client, void *data, uint32_t version
 {
   struct wl_resource *resource;
 
-  resource = wl_resource_create (client, &wl_data_device_manager_interface, version, id);
+  resource = resource_create (client, &wl_data_device_manager_interface, version, id);
+  if (!resource)
+    return;
+
   wl_resource_set_implementation (resource, &data_device_manager_impl, data, NULL);
 }
 
