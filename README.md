@@ -131,6 +131,12 @@ with `--dmabuf`, `--text-input`, `--cursor-shape`, `--popup`, `--refused`,
 `--dnd-requests`, `--gtk-client`. On a machine with no display they report
 `skipping` and exit 0.
 
+`--dmabuf` is scored on the compositor's side of the import: the client falls
+back to `wl_shm` on any refusal and still exits 0, so the run counts what the
+compositor actually imported from its own log and fails if a buffer was refused
+or none arrived while dmabuf was advertised. A machine with no usable render
+node says so — that run is fallback evidence, not import evidence.
+
 `--gtk-client` is not another flavour of `shm-client`: it finishes the run by
 launching a second copy of `seat-selftest` as a GTK client of its own
 compositor, and fails if that client is killed by an assertion of its own.

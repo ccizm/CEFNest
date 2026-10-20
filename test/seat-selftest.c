@@ -124,8 +124,34 @@ static char *dump_composite_path;
 static gboolean gtk_client_mode;
 static gboolean gtk_client_failed;
 static gboolean client_failed;
+static gboolean dmabuf_mode;
 static gboolean run_finished;
 static guint gtk_client_watchdog_id;
+
+/* The compositor runs in this process and reports its dmabuf doings through
+ * g_log under the "nested" domain. Counting those lines turns a silent shm
+ * fallback into something the run cannot paint over: --dmabuf with no import
+ * is a failed run, not a green one. */
+static int dmabuf_advertised; /* 1 advertised, -1 a node without 8888 formats */
+static int dmabuf_imports;
+static int dmabuf_refusals;
+
+static void
+count_dmabuf_lines (const char *log_domain, GLogLevelFlags log_level,
+                    const char *message, gpointer data)
+{
+  if (strstr (message, "probed dmabuf formats"))
+    dmabuf_advertised = 1;
+  else if (strstr (message, "supports no 8888 format"))
+    dmabuf_advertised = -1;
+  else if (strstr (message, "imported dmabuf"))
+    dmabuf_imports++;
+  else if (strstr (message, "cannot import a") ||
+           strstr (message, "GDK is not initialized"))
+    dmabuf_refusals++;
+
+  g_log_default_handler (log_domain, log_level, message, data);
+}
 
 /* The raw client checks the shape of what it is sent — an axis_stop may not ride
  * in the frame of the axis events it stops — and leaves non-zero when the
@@ -605,7 +631,10 @@ main (int argc, char *argv[])
     return run_as_gtk_client ();
 
   for (i = 3; i < argc; i++)
-    gtk_client_mode = gtk_client_mode || !strcmp (argv[i], "--gtk-client");
+    {
+      gtk_client_mode = gtk_client_mode || !strcmp (argv[i], "--gtk-client");
+      dmabuf_mode = dmabuf_mode || !strcmp (argv[i], "--dmabuf");
+    }
 
   dump_path = argc > 1 ? argv[1] : (char *) "/tmp/seat-selftest.png";
 
@@ -635,6 +664,9 @@ main (int argc, char *argv[])
     }
 
   fds_at_start = open_fds ();
+
+  if (dmabuf_mode)
+    g_log_set_handler ("nested", G_LOG_LEVEL_MASK, count_dmabuf_lines, NULL);
 
   compositor = nested_compositor_new (&error);
   if (!compositor)
@@ -703,8 +735,31 @@ main (int argc, char *argv[])
   g_free (dump_ti_path);
   g_free (dump_composite_path);
 
+  /* --dmabuf only proves something when the picture really came through the
+   * import: the client falls back to wl_shm on any refusal and still exits 0,
+   * so the counters, not the exit status, are the evidence. A machine with no
+   * render node never advertises dmabuf at all — there this run exercises the
+   * fallback, and says so instead of implying an import it did not do. */
+  if (dmabuf_mode)
+    {
+      if (dmabuf_refusals)
+        g_printerr ("selftest: the compositor refused %d dmabuf import(s)\n",
+                    dmabuf_refusals);
+      else if (dmabuf_advertised != 1)
+        g_print ("selftest: no usable render node, so no dmabuf was "
+                 "advertised — this run is fallback evidence, not import "
+                 "evidence\n");
+      else if (!dmabuf_imports)
+        g_printerr ("selftest: dmabuf was advertised but the compositor "
+                    "imported nothing\n");
+      else
+        g_print ("selftest: %d dmabuf buffer(s) imported from the client\n",
+                 dmabuf_imports);
+    }
+
   /* A client that died on what the compositor sent is a failure of the
    * compositor, not of the test — and that is true of the toolkit one as much
    * as of this raw one. */
-  return (gtk_client_failed || client_failed) ? 1 : 0;
+  return (gtk_client_failed || client_failed || dmabuf_refusals ||
+          (dmabuf_mode && dmabuf_advertised == 1 && !dmabuf_imports)) ? 1 : 0;
 }
