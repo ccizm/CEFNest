@@ -114,15 +114,25 @@ default display 要等 `gdk_display_open()` **返回之后**才设得上，此�
 | 修复后，外层 Wayland + 客户端 × 5 | 5/5 rc=0，且每个都打印 `clipboard holds 8 bytes`——晚来的客户端照样能粘贴 |
 | 宿主 → 嵌套 compositor → GTK4 客户端 的粘贴 | `the widget clipboard holds 8 bytes of text` → `offered the selection as id ...` → 客户端 `clipboard holds 8 bytes: Electron` |
 | helper（外层仍是宿主的 `GDK_BACKEND=x11`） | `helper ready` → `browser created` → `window created` → `loaded ... (HTTP 200)` → `helper stopped (stopped by the host)`，没有 `Bail out` |
-| `meson test -C builddir` | 8/8 OK，含 `--dnd-requests`（那条正是靠回放把 offer 送给第二个连接） |
+| `meson test -C builddir seat-selftest-gtk-client`（修复前的代码） | FAIL：子进程打印 `Gdk:ERROR:...gdk_display_should_use_portal: assertion failed: (display != NULL)` + `Bail out!`，父进程报 `gtk4 client killed by signal 6`，退出码 1 |
+| 同一条（修复后） | OK：子进程 `opened display 'wayland-1'` → `clipboard holds 'text from the nested client'`，父进程 `gtk4 client survived the events of its own display open` |
+| `meson test -C builddir` | 9/9 OK，含 `--dnd-requests`（那条正是靠回放把 offer 送给第二个连接） |
+
+守卫就是上面那两行的差别，它长这样：`--gtk-client` 让 seat-selftest 在脚本走完之后，把**自己**再
+启动一遍（`/proc/self/exe --as-gtk-client`），环境变量只有我们那个 socket——`WAYLAND_DISPLAY` 换成
+嵌套 socket、`GDK_BACKEND=wayland`、`DISPLAY` 抹掉，所以这个客户端不可能连到宿主上去。子进程只做三
+件事：`gtk_init_check()`（崩就崩在这里）、`gdk_clipboard_read_text_async()`、跑 1.2 秒主循环。offer 的
+来源是第一个客户端的 `--copy`（seat-selftest 在这个模式下会自动带上它），不依赖宿主机剪贴板里当时有
+没有东西——不然这条守卫在别的机器上就变成一次空跑。父进程等到子进程报告才结束，所以 `Bail out` 一定
+变成 FAIL 而不是碰巧的 OK。
 
 ## 7. 还没做的
 
-- **这个复现还在 `/tmp`**：它应该是仓库里的一个模式——让 seat-selftest 把自己再启动一遍，用
-  `WAYLAND_DISPLAY=<自己的 socket>` 连回来。这个 bug 的类别（事件时机把真 toolkit 打死）只有真
-  toolkit 客户端能守住，raw libwayland 的 shm-client 永远不会崩。
+- **只守住了 GTK**。这个 bug 的类别——事件时机把真 toolkit 打死——现在由
+  `seat-selftest --gtk-client` 守（第 6 节），但它守的是 GTK4 在 init 里要 `wl_data_device` 这一条路
+  径；Qt / SDL / Electron 客户端在 init 里收到 selection 会不会有类似问题，没测，仓库里也没有它们的客
+  户端。
 - **GDK 是 4.18.6**。这个 `g_assert` 后来有没有被 GTK 自己改掉、改掉以后是不是就安全，没查；我们的
   排队规则不依赖它改不改。
-- **别的 toolkit**：Qt / SDL / Electron 客户端在 init 里收到 selection 会不会有类似问题，没测。
 - **滚轮没跟真 Chromium 复测成功**：helper 现在起来了，`test/wheel.session` 的
   `document.scrollingElement.scrollTop` 在 `wheel 0 3` / `0 0.5` / `0 5` 之后**还是 0**。那是 #31。

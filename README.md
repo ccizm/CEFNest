@@ -113,13 +113,13 @@ of it is reproducible runs:
 ## Test
 
 ```bash
-meson test -C builddir                       # 8 tests
-meson test -C builddir --suite selftest      # the seven seat selftests
+meson test -C builddir                       # 9 tests
+meson test -C builddir --suite selftest      # the eight seat selftests
 meson test -C builddir --suite protocol      # the implementation-slot audit
 ```
 
 `seat-selftest` starts the nested compositor, launches `shm-client` against it,
-runs a scripted 27-step pointer/keyboard/text-input sequence and prints what the
+runs the scripted pointer/keyboard/text-input sequence and prints what the
 client saw. Each mode asks for a different set of protocol objects:
 
 ```bash
@@ -127,7 +127,15 @@ client saw. Each mode asks for a different set of protocol objects:
 ```
 
 with `--dmabuf`, `--text-input`, `--cursor-shape`, `--popup`, `--refused`,
-`--dnd-requests`. On a machine with no display they report `skipping` and exit 0.
+`--dnd-requests`, `--gtk-client`. On a machine with no display they report
+`skipping` and exit 0.
+
+`--gtk-client` is not another flavour of `shm-client`: it finishes the run by
+launching a second copy of `seat-selftest` as a GTK client of its own
+compositor, and fails if that client is killed by an assertion of its own.
+A raw client only ever sets a flag when an event arrives, so it cannot crash on
+a legal event sequence — a toolkit can, and did
+(`docs/clipboard-offer-during-client-init.md`).
 
 `test/audit-impl-slots.py` is the static half of the same idea: it reads the
 generated protocol headers and every `wl_*_interface` initializer in `src/`, and

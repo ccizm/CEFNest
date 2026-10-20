@@ -49,8 +49,12 @@ endif
 # objects; every one of them has to finish the scripted sequence and hand its
 # file descriptors back. A machine with no display gets a skip, not a failure —
 # see the gtk_init_check() guard in seat-selftest.c.
+#
+# gtk-client is the odd one: the shm client cannot crash on a legal event
+# sequence because it only ever sets flags, so that step brings in a second
+# copy of the test, built against GTK, as a client of its own compositor.
 foreach mode : [ 'plain', 'dmabuf', 'text-input', 'cursor-shape', 'popup',
-                 'refused', 'dnd-requests' ]
+                 'refused', 'dnd-requests', 'gtk-client' ]
   selftest_args = [ 'seat-selftest-' + mode + '.png', shm_client.full_path() ]
   if mode != 'plain'
     selftest_args += [ '--' + mode ]

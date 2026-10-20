@@ -9,7 +9,12 @@
  *
  * With a client that opens popups (--popup), the stack steps print where the
  * compositor placed them and a second PNG is composited from the whole stack,
- * which is what the embedding widget draws. */
+ * which is what the embedding widget draws.
+ *
+ * --gtk-client finishes the run by launching this same binary again as a GTK
+ * client of its own compositor. Raw libwayland clients accept whatever the
+ * compositor sends; a toolkit has state it builds while the events arrive and
+ * can die on that, so only a real client can prove a sequence is survivable. */
 #define G_LOG_DOMAIN "seat-selftest"
 
 #include <stdlib.h>
@@ -42,6 +47,7 @@ typedef enum {
   STEP_DUMP,
   STEP_DUMP_TI,
   STEP_DUMP_COMPOSITE,
+  STEP_GTK_CLIENT,
   N_STEP_KINDS
 } StepKind;
 
@@ -86,13 +92,16 @@ static const Step script[] = {
   { STEP_BUTTON_RELEASE, BTN_LEFT, 0, 120 },
   { STEP_STACK,           0,   0,   0 },
   { STEP_DUMP_COMPOSITE,  2,   0,   0 },
+  /* Last, so a client that dies takes nothing else down with it: the run has
+   * already printed its stack and written its pictures. */
+  { STEP_GTK_CLIENT,      0,   0,   0 },
 };
 
 static const char *step_names[N_STEP_KINDS] = {
   "settle", "pointer-enter", "pointer-motion", "keyboard-enter", "keyboard-leave",
   "button-press", "button-release", "axis", "key-down", "key-up",
   "text-input-state", "preedit", "commit", "delete-surrounding", "stack",
-  "dump", "dump-text-input", "dump-composite",
+  "dump", "dump-text-input", "dump-composite", "gtk-client",
 };
 
 #define PREEDIT_TEXT "nihao"
@@ -100,10 +109,14 @@ static const char *step_names[N_STEP_KINDS] = {
 
 static NestedCompositor *compositor;
 static GSubprocess *child;
+static GSubprocess *gtk_child;
 static size_t step_index;
 static char *dump_path;
 static char *dump_ti_path;
 static char *dump_composite_path;
+static gboolean gtk_client_mode;
+static gboolean gtk_client_failed;
+static guint gtk_client_watchdog_id;
 
 static void
 save_texture (const char *path)
@@ -232,13 +245,162 @@ save_composite (const char *path)
   g_list_free_full (stack, g_object_unref);
 }
 
+/* ---------------------------------------------------------- --gtk-client */
+
+/* The other half of --gtk-client: this same binary launched again with its GDK
+ * display pointed at the compositor of the process that started it. No picture
+ * is asked for here, and no window is needed to make the point — the sequence
+ * that killed the CEF helper was over long before a window could be mapped,
+ * because GDK asks for its wl_data_device while still inside gtk_init_check(),
+ * and an offer answered in that same dispatch makes it build a clipboard for a
+ * display that is not the default yet. See the walk-through in
+ * docs/clipboard-offer-during-client-init.md. */
+static void
+client_clipboard_read (GObject *clipboard, GAsyncResult *result, gpointer data)
+{
+  char *text = gdk_clipboard_read_text_finish (GDK_CLIPBOARD (clipboard), result, NULL);
+
+  /* Reaching this line at all is the result: an offer handled one dispatch too
+   * early aborts the process before the main loop has run anything. */
+  g_print ("selftest-client: clipboard holds '%s'\n", text ? text : "(nothing)");
+  g_free (text);
+}
+
+static gboolean
+client_read_clipboard (gpointer data)
+{
+  gdk_clipboard_read_text_async (gdk_display_get_clipboard (gdk_display_get_default ()),
+                                 NULL, client_clipboard_read, NULL);
+  return G_SOURCE_REMOVE;
+}
+
+static gboolean
+client_finish (gpointer loop)
+{
+  g_main_loop_quit (loop);
+  return G_SOURCE_REMOVE;
+}
+
+static int
+run_as_gtk_client (void)
+{
+  GMainLoop *loop;
+
+  if (!gtk_init_check ())
+    {
+      g_printerr ("selftest-client: cannot open the nested compositor as a display\n");
+      return 2;
+    }
+
+  g_print ("selftest-client: opened display '%s'\n",
+           gdk_display_get_name (gdk_display_get_default ()));
+
+  loop = g_main_loop_new (NULL, FALSE);
+  g_timeout_add (200, client_read_clipboard, NULL);
+  g_timeout_add (1200, client_finish, loop);
+  g_main_loop_run (loop);
+  g_main_loop_unref (loop);
+
+  return 0;
+}
+
+static gboolean
+gtk_client_watchdog (gpointer loop)
+{
+  gtk_client_watchdog_id = 0;
+  gtk_client_failed = TRUE;
+  g_printerr ("selftest: the gtk4 client never came back\n");
+  g_main_loop_quit (loop);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+gtk_client_waited (GObject *object, GAsyncResult *result, gpointer data)
+{
+  GMainLoop *loop = data;
+  GError *error = NULL;
+  GSubprocess *client = G_SUBPROCESS (object);
+
+  if (gtk_client_watchdog_id)
+    {
+      g_source_remove (gtk_client_watchdog_id);
+      gtk_client_watchdog_id = 0;
+    }
+
+  if (!g_subprocess_wait_finish (client, result, &error))
+    {
+      gtk_client_failed = TRUE;
+      g_printerr ("selftest: cannot wait for the gtk4 client: %s\n",
+                  error ? error->message : "?");
+    }
+  else if (g_subprocess_get_if_signaled (client))
+    {
+      /* A toolkit killed by its own assertion is exactly what this step exists
+       * to catch: the Bail out! line it printed is in the log above. */
+      gtk_client_failed = TRUE;
+      g_printerr ("selftest: gtk4 client killed by signal %d\n",
+                  g_subprocess_get_term_sig (client));
+    }
+  else if (g_subprocess_get_exit_status (client) != 0)
+    {
+      gtk_client_failed = TRUE;
+      g_printerr ("selftest: gtk4 client exited with status %d\n",
+                  g_subprocess_get_exit_status (client));
+    }
+  else
+    g_print ("selftest: gtk4 client survived the events of its own display open\n");
+
+  g_main_loop_quit (loop);
+}
+
+/* The step cannot answer on its own — the evidence is whether the child is
+ * still alive when it says so — so the run's loop is handed over and waits for
+ * the report instead of ending here. */
+static void
+start_gtk_client (GMainLoop *loop)
+{
+  GSubprocessLauncher *launcher;
+  const char *self_argv[] = { "/proc/self/exe", "--as-gtk-client", NULL };
+  GError *error = NULL;
+
+  launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_NONE);
+  /* Only our socket, and no X11 display to fall back on: the client has to be a
+   * client of the compositor under test or the step proves nothing. */
+  g_subprocess_launcher_setenv (launcher, "WAYLAND_DISPLAY",
+                                nested_compositor_get_socket_name (compositor), TRUE);
+  g_subprocess_launcher_setenv (launcher, "GDK_BACKEND", "wayland", TRUE);
+  g_subprocess_launcher_setenv (launcher, "XDG_SESSION_TYPE", "wayland", TRUE);
+  g_subprocess_launcher_unsetenv (launcher, "DISPLAY");
+
+  gtk_child = g_subprocess_launcher_spawnv (launcher, self_argv, &error);
+  g_object_unref (launcher);
+
+  if (!gtk_child)
+    {
+      gtk_client_failed = TRUE;
+      g_printerr ("selftest: cannot start the gtk4 client: %s\n",
+                  error ? error->message : "?");
+      g_main_loop_quit (loop);
+      return;
+    }
+
+  /* A client stuck on a display it cannot open would otherwise hold the test
+   * until meson's timeout, with no line saying what is stuck. */
+  gtk_client_watchdog_id = g_timeout_add_seconds (20, gtk_client_watchdog, loop);
+  g_subprocess_wait_async (gtk_child, NULL, gtk_client_waited, loop);
+}
+
 static gboolean
 run_step (gpointer data)
 {
   GMainLoop *loop = data;
   const Step *step = &script[step_index];
 
-  g_print ("selftest: %s\n", step_names[step->kind]);
+  /* The gtk4 step belongs to one mode, and a run of the other modes has nothing
+   * to report about it. */
+  if (step->kind != STEP_GTK_CLIENT || gtk_client_mode)
+    g_print ("selftest: %s\n", step_names[step->kind]);
 
   switch (step->kind)
     {
@@ -320,6 +482,13 @@ run_step (gpointer data)
         g_free (path);
       }
       break;
+    case STEP_GTK_CLIENT:
+      if (!gtk_client_mode)
+        break;
+
+      step_index++;
+      start_gtk_client (loop);
+      return G_SOURCE_REMOVE;
     default:
       break;
     }
@@ -367,6 +536,15 @@ main (int argc, char *argv[])
   int fds_at_start;
   const char *client = argc > 2 ? argv[2] : CLIENT_PATH;
   int i;
+
+  /* --gtk-client runs in two processes, and this is how the second one knows it
+   * is the client and not the compositor: argv[1] is the role, not the dump
+   * path. */
+  if (argc > 1 && !strcmp (argv[1], "--as-gtk-client"))
+    return run_as_gtk_client ();
+
+  for (i = 3; i < argc; i++)
+    gtk_client_mode = gtk_client_mode || !strcmp (argv[i], "--gtk-client");
 
   dump_path = argc > 1 ? argv[1] : (char *) "/tmp/seat-selftest.png";
 
@@ -419,6 +597,11 @@ main (int argc, char *argv[])
   g_ptr_array_add (client_argv, (gpointer) client);
   for (i = 3; i < argc; i++)
     g_ptr_array_add (client_argv, (gpointer) argv[i]);
+  /* An offer is only sent when something owns the selection, and the host
+   * clipboard may well be empty. Asking the client to take one makes the gtk4
+   * step send the same events on every machine it runs on. */
+  if (gtk_client_mode)
+    g_ptr_array_add (client_argv, (gpointer) "--copy");
   g_ptr_array_add (client_argv, NULL);
 
   child = g_subprocess_launcher_spawnv (launcher,
@@ -446,9 +629,16 @@ main (int argc, char *argv[])
 
   g_subprocess_force_exit (child);
   g_object_unref (child);
+  if (gtk_child)
+    {
+      g_subprocess_force_exit (gtk_child);
+      g_object_unref (gtk_child);
+    }
   g_object_unref (compositor);
   g_free (dump_ti_path);
   g_free (dump_composite_path);
 
-  return 0;
+  /* A real toolkit client that died on what the compositor sent is a failure of
+   * the compositor, not of the test. */
+  return gtk_client_failed ? 1 : 0;
 }

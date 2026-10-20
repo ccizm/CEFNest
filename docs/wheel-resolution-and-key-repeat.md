@@ -183,6 +183,7 @@ stop，客户端收到的是"这个方向现在不在滚"这个陈述，不会�
 | --- | --- |
 | `meson test --suite selftest` 七模式（plain / `--dmabuf` / `--text-input` / `--cursor-shape` / `--popup` / `--refused` / `--dnd-requests`） | 全部 `finished at step 27`；fd **净增 18**（`119 → 137` 这一轮，`--refused` 是 `119 → 132`，净增 13）——脚本多了 3 步但一个 fd 都没多漏，#19 那轮的净增数也是 18；五个能收输入的跑法都打出 `axis source wheel`、`axis 0 value120 +1200`、`stop (#1)(#2)`、`0 keys held` |
 | 同一脚本、把 `pressed_keys` 去重临时关掉 | 同一位置报 `1 keys held`（第 4 节） |
+| `meson test --suite selftest` 八模式（#32 之后多出 `--gtk-client`，闸门共 9 条） | 全部 OK、`finished at step 28`；净增 fd 与上一行同一模式一致（plain 17、`--refused` 12、`--dmabuf` 31），`--gtk-client` 那条自己再启一个 GTK 客户端也还是 17 |
 | `WAYLAND_DEBUG=server` | 第 4、5 节贴的块，一帧一次手势 |
 | `NESTED_SEAT_VERSION` 临时按回 5 | 降级路径按预期发 `axis_discrete`、半格无步数 |
 | `meson test --suite protocol`（`python3 test/audit-impl-slots.py builddir`） | `0 uncovered slot(s), 0 unknown interface(s), 29 implementation struct(s)`——抬 seat 版本以后仍是 0 |
