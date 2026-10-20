@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -40,6 +41,8 @@
 #include "include/cef_client.h"
 #include "include/cef_command_line.h"
 #include "include/cef_display_handler.h"
+#include "include/cef_download_handler.h"
+#include "include/cef_download_item.h"
 #include "include/cef_keyboard_handler.h"
 #include "include/cef_life_span_handler.h"
 #include "include/cef_load_handler.h"
@@ -70,6 +73,10 @@ constexpr char kJsResultMessage[] = "cefnest-helper-js-result";
  * that returns the whole DOM would stall Chromium and then be dropped anyway.
  * Say so instead. */
 constexpr size_t kMaxResultBytes = 64 * 1024;
+
+/* The smallest new-blob worth a download-progress event for a file whose total
+ * length the server never told. */
+constexpr int64_t kProgressByteStep = 256 * 1024;
 
 const char kDefaultUrl[] =
     "data:text/html;charset=utf-8,"
@@ -316,6 +323,128 @@ void EmitStatus(const std::string& message) {
   Emit(dict);
 }
 
+/* ------------------------------------------------------------------ *
+ * Downloads                                                          *
+ * ------------------------------------------------------------------ *
+ *
+ * A download is a decision the host has to make: nothing reaches the disk
+ * until it says where. OnBeforeDownload parks the gate callback here and asks;
+ * the answer comes back as download-accept (Continue) or download-reject.
+ * Only CEF's own item ids are used as keys, and nothing but scalars and the
+ * two callbacks outlives a handler call — CefDownloadItem must not be held
+ * past the method it was handed to. */
+
+struct Download {
+  CefRefPtr<CefBeforeDownloadCallback> gate;    // spent once the host has answered
+  CefRefPtr<CefDownloadItemCallback> item;      // the documented way to cancel
+  bool asked = false;   // OnBeforeDownload has run, so the host knows this id
+  int percent = -1;
+  int64_t reported_bytes = -1;
+  bool finished = false;
+};
+
+std::map<uint32_t, Download> g_downloads;  // UI thread only, like every CEF call here
+
+void EmitDownloadProgress(CefRefPtr<CefDownloadItem> item) {
+  CefRefPtr<CefDictionaryValue> dict = NewEvent("download-progress");
+  dict->SetInt("id", static_cast<int>(item->GetId()));
+  dict->SetDouble("received_bytes", static_cast<double>(item->GetReceivedBytes()));
+  dict->SetDouble("total_bytes", static_cast<double>(item->GetTotalBytes()));
+  dict->SetInt("percent", item->GetPercentComplete());
+  dict->SetDouble("speed", static_cast<double>(item->GetCurrentSpeed()));
+  Emit(dict);
+}
+
+void EmitDownloadEnd(CefRefPtr<CefDownloadItem> item) {
+  const char* state = item->IsComplete() ? "complete"
+                    : item->IsCanceled() ? "cancelled"
+                                         : "interrupted";
+  CefRefPtr<CefDictionaryValue> dict = NewEvent("download-end");
+  dict->SetInt("id", static_cast<int>(item->GetId()));
+  dict->SetString("state", state);
+  dict->SetString("path", item->GetFullPath().ToString());
+  dict->SetDouble("received_bytes", static_cast<double>(item->GetReceivedBytes()));
+  Emit(dict);
+}
+
+class HelperDownloadHandler : public CefDownloadHandler {
+ public:
+  // Answering here would be a second policy the host cannot see; the gate with
+  // a path is OnBeforeDownload, and everything the host needs to decide is in
+  // that one event.
+  bool CanDownload(CefRefPtr<CefBrowser> browser,
+                   const CefString& url,
+                   const CefString& request_method) override {
+    return true;
+  }
+
+  bool OnBeforeDownload(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefDownloadItem> download_item,
+                        const CefString& suggested_name,
+                        CefRefPtr<CefBeforeDownloadCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    Download& entry = g_downloads[download_item->GetId()];
+    entry.gate = callback;
+    entry.asked = true;
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("download-begin");
+    dict->SetInt("id", static_cast<int>(download_item->GetId()));
+    dict->SetString("url", download_item->GetURL().ToString());
+    dict->SetString("suggested_name", suggested_name.ToString());
+    dict->SetString("mime_type", download_item->GetMimeType().ToString());
+    dict->SetDouble("total_bytes",
+                    static_cast<double>(download_item->GetTotalBytes()));
+    Emit(dict);
+
+    // True means this helper owns the answer. CEF cancels the download if the
+    // callback is destroyed without Continue, so a host that never replies
+    // leaves the file unwritten rather than guessing a path for it.
+    return true;
+  }
+
+  void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                         CefRefPtr<CefDownloadItem> download_item,
+                         CefRefPtr<CefDownloadItemCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    Download& entry = g_downloads[download_item->GetId()];
+    entry.item = callback;
+
+    /* Measured against the real browser: Chromium ticks this before
+     * OnBeforeDownload as well — a 0 % update for an id the host has never been
+     * told about. The item callback is worth keeping because it is how a
+     * download gets cancelled, but there is nothing to report yet. */
+    if (!entry.asked)
+      return;
+
+    if (download_item->IsInProgress()) {
+      /* CEF calls this on every tick of its own clock, and the channel writes on
+       * the UI thread with a 200 ms send timeout: reporting each whole percent
+       * is the throttle. A download whose length the server never told has
+       * percent stuck at -1, so the byte count has to carry it as well. */
+      const int percent = download_item->GetPercentComplete();
+      const int64_t received = download_item->GetReceivedBytes();
+      if (percent != entry.percent ||
+          received - entry.reported_bytes >= kProgressByteStep) {
+        entry.percent = percent;
+        entry.reported_bytes = received;
+        EmitDownloadProgress(download_item);
+      }
+      return;
+    }
+
+    if (entry.finished)
+      return;
+    entry.finished = true;
+    EmitDownloadEnd(download_item);
+    g_downloads.erase(download_item->GetId());
+  }
+
+  IMPLEMENT_REFCOUNTING(HelperDownloadHandler);
+};
+
+
 // ExecuteJavaScript has no return value, so the code is wrapped: the page
 // evaluates it, turns the result into JSON itself, and hands that one text to
 // kReportFunction. Statements work as well as expressions because eval() yields
@@ -469,6 +598,53 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
+  if (name == "download-accept") {
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    auto it = g_downloads.find(id);
+    if (it == g_downloads.end() || !it->second.gate) {
+      EmitStatus("no-such-download");
+      return;
+    }
+    /* No empty path here on purpose: CEF reads that as "suggested name in the
+     * default temp directory", and a file the host never asked for appearing
+     * somewhere it does not know about is worse than no file at all. */
+    const std::string path = command->GetString("path").ToString();
+    if (path.empty()) {
+      EmitStatus("download-accept-needs-path");
+      return;
+    }
+    it->second.gate->Continue(path, false);
+    it->second.gate = nullptr;
+    return;
+  }
+
+  if (name == "download-reject") {
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    auto it = g_downloads.find(id);
+    if (it == g_downloads.end()) {
+      EmitStatus("no-such-download");
+      return;
+    }
+    if (it->second.item) {
+      /* Cancelling an in-flight download is the item callback's job, and the
+       * terminal download-end comes from OnDownloadUpdated afterwards. */
+      it->second.item->Cancel();
+      return;
+    }
+    /* The gate is the only thing here, so dropping it is the cancellation CEF
+     * documents. No update follows one that never started, so this is also
+     * where the host's terminal event has to come from. */
+    it->second.gate = nullptr;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("download-end");
+    dict->SetInt("id", static_cast<int>(id));
+    dict->SetString("state", "cancelled");
+    dict->SetString("path", "");
+    dict->SetDouble("received_bytes", 0.0);
+    Emit(dict);
+    g_downloads.erase(it);
+    return;
+  }
+
   if (name == "js") {
     const std::string code = command->GetString("code").ToString();
     if (code.empty()) {
@@ -609,6 +785,9 @@ class HelperClient : public CefClient,
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
   CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+  CefRefPtr<CefDownloadHandler> GetDownloadHandler() override {
+    return download_handler_;
+  }
 
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
                                 CefRefPtr<CefFrame> frame,
@@ -776,6 +955,9 @@ class HelperClient : public CefClient,
   }
 
   IMPLEMENT_REFCOUNTING(HelperClient);
+
+ private:
+  CefRefPtr<CefDownloadHandler> download_handler_{new HelperDownloadHandler};
 };
 
 class HelperBrowserViewDelegate : public CefBrowserViewDelegate {

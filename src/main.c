@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <glib/gstdio.h>
 #include <glib-unix.h>
 
 #include "chromium-session.h"
@@ -22,6 +23,7 @@ typedef struct {
   GtkWidget *address;
   GtkWidget *back;
   GtkWidget *forward;
+  GtkWidget *downloads;
 } Demo;
 
 static Demo demo;
@@ -194,6 +196,342 @@ session_script_result (ChromiumSession *session, int id, gboolean ok,
               message && *message ? message : "");
 }
 
+/* ------------------------------------------------------------------------ *
+ * Downloads
+ *
+ * ::download-begin is a question the host has to answer with a path, so this
+ * panel is the only place in the project that decides where a page's file
+ * lands. By default every download is accepted into the user's download
+ * directory, the way a browser does it; CEFNEST_DOWNLOAD_DIR moves the target
+ * and CEFNEST_DOWNLOAD_ASK=1 makes each one wait for a click (or for a
+ * download-accept script step). Both routes print the same transcript lines, so
+ * a scripted run can assert on the flow without a hand on the mouse.
+ * ------------------------------------------------------------------------ */
+
+typedef struct {
+  int id;
+  char *name;
+  gboolean decided;   /* a path or a refusal has gone to the helper */
+  gboolean finished;  /* download-end arrived */
+  GtkWidget *info;
+  GtkWidget *accept;
+  GtkWidget *reject;
+} DownloadRow;
+
+static void
+free_download_row (gpointer data)
+{
+  DownloadRow *row = data;
+
+  g_free (row->name);
+  g_free (row);
+}
+
+static DownloadRow *
+download_row_for (int id)
+{
+  GtkWidget *child;
+
+  for (child = demo.downloads ? gtk_widget_get_first_child (demo.downloads) : NULL;
+       child; child = gtk_widget_get_next_sibling (child))
+    {
+      DownloadRow *row = g_object_get_data (G_OBJECT (child), "cefnest-download");
+
+      if (row && row->id == id)
+        return row;
+    }
+  return NULL;
+}
+
+static DownloadRow *
+download_first_row (gboolean (*pick) (const DownloadRow *row))
+{
+  GtkWidget *child;
+
+  for (child = demo.downloads ? gtk_widget_get_first_child (demo.downloads) : NULL;
+       child; child = gtk_widget_get_next_sibling (child))
+    {
+      DownloadRow *row = g_object_get_data (G_OBJECT (child), "cefnest-download");
+
+      if (row && pick (row))
+        return row;
+    }
+  return NULL;
+}
+
+static gboolean
+row_undecided (const DownloadRow *row)
+{
+  return !row->decided && !row->finished;
+}
+
+static gboolean
+row_open (const DownloadRow *row)
+{
+  return !row->finished;
+}
+
+static void
+download_row_set_text (DownloadRow *row, const char *state)
+{
+  g_autofree char *text = g_strdup_printf ("%s — %s", row->name, state);
+
+  if (row->info)
+    gtk_label_set_text (GTK_LABEL (row->info), text);
+}
+
+static char *
+format_bytes (gint64 bytes)
+{
+  if (bytes < 0)
+    return g_strdup ("长度未知");
+  if (bytes >= 1024 * 1024)
+    return g_strdup_printf ("%.1f MiB", (double) bytes / (1024.0 * 1024.0));
+  if (bytes >= 1024)
+    return g_strdup_printf ("%.0f KiB", (double) bytes / 1024.0);
+  return g_strdup_printf ("%" G_GINT64_FORMAT " 字节", bytes);
+}
+
+/* The suggested name is a hint from the page, so it is reduced to one file name
+ * before it is ever joined to a directory: only the last component counts, both
+ * separators are honoured because a name can arrive with backslashes in it, and
+ * a control character in a terminal path is more trouble than it is worth. */
+static char *
+sanitise_download_name (const char *suggested)
+{
+  const char *base = suggested ? suggested : "";
+  const char *scan;
+  char *out;
+  char *p;
+
+  for (scan = base; *scan; scan++)
+    if (*scan == '/' || *scan == '\\')
+      base = scan + 1;
+
+  out = g_strdup (base);
+  for (p = out; *p; p++)
+    if (g_ascii_iscntrl ((unsigned char) *p))
+      *p = '_';
+  g_strstrip (out);
+
+  if (!*out || !strcmp (out, ".") || !strcmp (out, ".."))
+    {
+      g_free (out);
+      out = g_strdup ("download");
+    }
+  return out;
+}
+
+static const char *
+download_directory (void)
+{
+  const char *env = g_getenv ("CEFNEST_DOWNLOAD_DIR");
+  const char *dir;
+
+  if (env && *env)
+    dir = env;
+  else
+    {
+      dir = g_get_user_special_dir (G_USER_DIRECTORY_DOWNLOAD);
+      if (!dir || !*dir)
+        dir = g_get_home_dir ();
+    }
+
+  /* The helper does not create the directory for us, and XDG happily points at
+   * a Downloads that a fresh account has never opened. */
+  if (g_file_test (dir, G_FILE_TEST_IS_DIR))
+    return dir;
+  if (!g_mkdir_with_parents (dir, 0700))
+    return dir;
+
+  g_warning ("demo: cannot use %s as the download directory", dir);
+  return NULL;
+}
+
+/* A page can offer the same name twice, and the second file must not quietly
+ * replace a path the host already handed out and told the user about. */
+static char *
+download_target_path (const char *dir, const char *name)
+{
+  const char *dot = strrchr (name, '.');
+  g_autofree char *stem = dot && dot > name ? g_strndup (name, (gsize) (dot - name))
+                                           : g_strdup (name);
+  g_autofree char *ext = dot && dot > name ? g_strdup (dot) : g_strdup ("");
+  int n;
+
+  for (n = 0; n < 1000; n++)
+    {
+      g_autofree char *leaf = n ? g_strdup_printf ("%s (%d)%s", stem, n, ext)
+                               : g_strconcat (stem, ext, NULL);
+      char *path = g_build_filename (dir, leaf, NULL);
+
+      if (!g_file_test (path, G_FILE_TEST_EXISTS))
+        return path;
+      g_free (path);
+    }
+  return g_build_filename (dir, stem, ext, NULL);
+}
+
+static void
+download_accept (DownloadRow *row, const char *path)
+{
+  if (!row || row->decided || row->finished)
+    return;
+
+  row->decided = TRUE;
+  gtk_widget_set_visible (row->accept, FALSE);
+  g_printerr ("demo: download %d accept path=%s\n", row->id, path);
+  chromium_session_accept_download (demo.session, row->id, path);
+}
+
+static void
+download_reject (DownloadRow *row)
+{
+  if (!row || row->finished)
+    return;
+
+  /* One call covers both halves of "no": refusing a download that has not
+   * started and cancelling one that is halfway through. */
+  row->decided = TRUE;
+  gtk_widget_set_visible (row->accept, FALSE);
+  g_printerr ("demo: download %d reject\n", row->id);
+  chromium_session_reject_download (demo.session, row->id);
+}
+
+static void
+accept_clicked (GtkButton *button, gpointer data)
+{
+  DownloadRow *row = data;
+  const char *dir = download_directory ();
+  g_autofree char *path = NULL;
+
+  if (!dir)
+    return;
+  path = download_target_path (dir, row->name);
+  download_accept (row, path);
+}
+
+static void
+reject_clicked (GtkButton *button, gpointer data)
+{
+  download_reject ((DownloadRow *) data);
+}
+
+static void
+session_download_begin (ChromiumSession *session, int id, const char *url,
+                        const char *suggested_name, const char *mime_type,
+                        gint64 total_bytes, gpointer data)
+{
+  GtkWidget *row_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  GtkWidget *info = gtk_label_new ("");
+  GtkWidget *accept = gtk_button_new_with_label ("保存");
+  GtkWidget *reject = gtk_button_new_with_label ("丢弃");
+  DownloadRow *row = g_new0 (DownloadRow, 1);
+  g_autofree char *name = sanitise_download_name (suggested_name);
+  g_autofree char *human = format_bytes (total_bytes);
+  g_autofree char *path = NULL;
+
+  row->id = id;
+  row->name = g_steal_pointer (&name);
+  row->info = info;
+  row->accept = accept;
+  row->reject = reject;
+
+  gtk_label_set_xalign (GTK_LABEL (info), 0.0);
+  gtk_label_set_ellipsize (GTK_LABEL (info), PANGO_ELLIPSIZE_MIDDLE);
+  gtk_widget_set_hexpand (info, TRUE);
+  gtk_widget_set_tooltip_text (accept, "保存到下载目录 / Save to the download directory");
+  gtk_widget_set_tooltip_text (reject, "拒绝或取消 / Refuse or cancel");
+  g_signal_connect (accept, "clicked", G_CALLBACK (accept_clicked), row);
+  g_signal_connect (reject, "clicked", G_CALLBACK (reject_clicked), row);
+
+  gtk_box_append (GTK_BOX (row_box), info);
+  gtk_box_append (GTK_BOX (row_box), accept);
+  gtk_box_append (GTK_BOX (row_box), reject);
+  g_object_set_data_full (G_OBJECT (row_box), "cefnest-download", row,
+                          free_download_row);
+
+  gtk_widget_set_visible (demo.downloads, TRUE);
+  gtk_box_append (GTK_BOX (demo.downloads), row_box);
+
+  g_printerr ("demo: download %d begin name=%s mime=%s bytes=%" G_GINT64_FORMAT
+              " url=%s\n", id, row->name, mime_type, total_bytes, url);
+
+  download_row_set_text (row, human);
+
+  if (!g_getenv ("CEFNEST_DOWNLOAD_ASK"))
+    {
+      const char *dir = download_directory ();
+
+      if (!dir)
+        return;
+      path = download_target_path (dir, row->name);
+      download_accept (row, path);
+    }
+}
+
+static void
+session_download_progress (ChromiumSession *session, int id, gint64 received,
+                           gint64 total, int percent, gint64 speed,
+                           gpointer data)
+{
+  DownloadRow *row = download_row_for (id);
+
+  g_printerr ("demo: download %d progress percent=%d received=%" G_GINT64_FORMAT
+              " total=%" G_GINT64_FORMAT " speed=%" G_GINT64_FORMAT "\n",
+              id, percent, received, total, speed);
+
+  if (row)
+    {
+      g_autofree char *human = format_bytes (received);
+      g_autofree char *text = percent >= 0
+        ? g_strdup_printf ("%d%% %s", percent, human)
+        : g_strdup (human);
+
+      download_row_set_text (row, text);
+    }
+}
+
+static void
+session_download_end (ChromiumSession *session, int id, const char *state,
+                      const char *path, gint64 received, gpointer data)
+{
+  DownloadRow *row = download_row_for (id);
+
+  g_printerr ("demo: download %d end state=%s path=%s bytes=%" G_GINT64_FORMAT "\n",
+              id, state, path, received);
+
+  if (!row)
+    return;
+
+  row->decided = TRUE;
+  row->finished = TRUE;
+  gtk_widget_set_visible (row->accept, FALSE);
+  gtk_widget_set_visible (row->reject, FALSE);
+  download_row_set_text (row, *path ? path : "没有文件落盘");
+}
+
+static void
+build_download_panel (GtkBox *box)
+{
+  const char *dir = download_directory ();
+
+  demo.downloads = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
+
+  /* Which half of the policy is in force is a fact a scripted run has to be
+   * able to check without reading the source, so it says it once here. */
+  g_printerr ("demo: downloads: dir=%s ask=%d\n", dir ? dir : "none",
+              g_getenv ("CEFNEST_DOWNLOAD_ASK") != NULL);
+
+  gtk_widget_set_margin_start (demo.downloads, 8);
+  gtk_widget_set_margin_end (demo.downloads, 8);
+  gtk_widget_set_margin_top (demo.downloads, 4);
+  gtk_widget_set_margin_bottom (demo.downloads, 4);
+  /* Nothing to say until a page asks for a file. */
+  gtk_widget_set_visible (demo.downloads, FALSE);
+  gtk_box_append (box, demo.downloads);
+}
+
 static void
 session_closed (ChromiumSession *session, gpointer data)
 {
@@ -294,6 +632,12 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_renderer_exited), NULL);
   g_signal_connect (demo.session, "script-result",
                     G_CALLBACK (session_script_result), NULL);
+  g_signal_connect (demo.session, "download-begin",
+                    G_CALLBACK (session_download_begin), NULL);
+  g_signal_connect (demo.session, "download-progress",
+                    G_CALLBACK (session_download_progress), NULL);
+  g_signal_connect (demo.session, "download-end",
+                    G_CALLBACK (session_download_end), NULL);
   g_signal_connect (demo.session, "closed", G_CALLBACK (session_closed), NULL);
 
   if (!chromium_session_start (demo.session, initial_url (), &error))
@@ -511,7 +855,8 @@ script_run_next (void)
                             !strcmp (line, "back") || !strcmp (line, "forward") ||
                             !strcmp (line, "reload") || !strcmp (line, "reload-hard") ||
                             !strcmp (line, "stop") || !strcmp (line, "mute") ||
-                            !strcmp (line, "unmute")))
+                            !strcmp (line, "unmute") ||
+                            !strncmp (line, "download-", 9)))
         {
           g_warning ("demo: '%s' needs a Chromium helper session", line);
           continue;
@@ -575,6 +920,39 @@ script_run_next (void)
       else if (!strcmp (line, "unmute"))
         {
           chromium_session_set_muted (demo.session, FALSE);
+          continue;
+        }
+      else if (!strncmp (line, "download-accept ", 16))
+        {
+          /* The panel picks the row, not the script: a scripted run cannot know
+           * Chromium's download ids in advance, and standing in for the 保存
+           * button is the whole point of the step. */
+          DownloadRow *row = download_first_row (row_undecided);
+          const char *path = line + 16;
+
+          if (!*path)
+            {
+              g_warning ("demo: download-accept wants a path, got '%s'", line);
+              continue;
+            }
+          if (!row)
+            {
+              g_warning ("demo: no download is waiting for a path");
+              continue;
+            }
+          download_accept (row, path);
+          continue;
+        }
+      else if (!strcmp (line, "download-reject"))
+        {
+          DownloadRow *row = download_first_row (row_open);
+
+          if (!row)
+            {
+              g_warning ("demo: no download left to reject");
+              continue;
+            }
+          download_reject (row);
           continue;
         }
       else if (!strncmp (line, "hover ", 6))
@@ -857,6 +1235,7 @@ forget_widgets (void)
   demo.address = NULL;
   demo.back = NULL;
   demo.forward = NULL;
+  demo.downloads = NULL;
 }
 
 static gboolean
@@ -923,7 +1302,12 @@ activate (GApplication *application, gpointer data)
   header = gtk_header_bar_new ();
 
   if (use_session)
-    build_toolbar (GTK_HEADER_BAR (header));
+    {
+      /* The rows live in the window box rather than the header: a name and two
+       * buttons need more room than a toolbar has. */
+      build_download_panel (GTK_BOX (box));
+      build_toolbar (GTK_HEADER_BAR (header));
+    }
   else
     {
       button = gtk_button_new_with_label ("启动客户端");

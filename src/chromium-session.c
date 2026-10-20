@@ -25,6 +25,9 @@ enum {
   SIG_LOAD_ERROR,
   SIG_RENDERER_EXITED,
   SIG_SCRIPT_RESULT,
+  SIG_DOWNLOAD_BEGIN,
+  SIG_DOWNLOAD_PROGRESS,
+  SIG_DOWNLOAD_END,
   SIG_CLOSED,
   N_SIGNALS
 };
@@ -109,6 +112,26 @@ mark_closed (ChromiumSession *self, const char *why)
   g_message ("session: helper stopped (%s)", why);
   chromium_session_set_state (self, NULL, NULL, FALSE, FALSE, FALSE);
   g_signal_emit (self, signals[SIG_CLOSED], 0);
+}
+
+static const char *
+event_string (JsonObject *object, const char *key)
+{
+  /* The helper is a separate process, and a signal that documents a const char *
+   * must not be handed a NULL because one field went missing on the way. */
+  return json_object_has_member (object, key) ?
+           json_object_get_string_member (object, key) : "";
+}
+
+static gint64
+event_bytes (JsonObject *object, const char *key)
+{
+  /* CefDictionaryValue has no 64-bit setter, so the helper writes its byte
+   * counts as JSON doubles, exact to 2^53 — a file larger than that is not what
+   * this channel is for. -1 is CEF's own "the length was never told to me", and
+   * a missing field reports the same rather than inventing a zero. */
+  return json_object_has_member (object, key) ?
+           (gint64) json_object_get_double_member (object, key) : (gint64) -1;
 }
 
 static void
@@ -258,6 +281,48 @@ handle_event (ChromiumSession *self, const char *line)
                      json_text,
                      json_object_has_member (object, "message") ?
                        json_object_get_string_member (object, "message") : "");
+      return;
+    }
+
+  if (!strcmp (event, "download-begin"))
+    {
+      /* The one thing the helper cannot decide for itself: nothing reaches the
+       * disk until a host names a path with chromium_session_accept_download(),
+       * and a download that is never answered stays parked with no file. */
+      g_signal_emit (self, signals[SIG_DOWNLOAD_BEGIN], 0,
+                     (int) json_object_get_int_member (object, "id"),
+                     event_string (object, "url"),
+                     event_string (object, "suggested_name"),
+                     event_string (object, "mime_type"),
+                     event_bytes (object, "total_bytes"));
+      return;
+    }
+
+  if (!strcmp (event, "download-progress"))
+    {
+      /* One event per whole percent, so a large file is a hundred signals and
+       * not a firehose. @percent is -1 while the length is unknown, in which
+       * case only the byte counts move. */
+      g_signal_emit (self, signals[SIG_DOWNLOAD_PROGRESS], 0,
+                     (int) json_object_get_int_member (object, "id"),
+                     event_bytes (object, "received_bytes"),
+                     event_bytes (object, "total_bytes"),
+                     (int) json_object_get_int_member (object, "percent"),
+                     event_bytes (object, "speed"));
+      return;
+    }
+
+  if (!strcmp (event, "download-end"))
+    {
+      /* @state is "complete", "cancelled" or "interrupted", and @path is what
+       * CEF says it wrote rather than what was asked for — which is also the
+       * only way a host learns the name got uniquified on the way to disk. A
+       * download refused before it started ends here too, with an empty path. */
+      g_signal_emit (self, signals[SIG_DOWNLOAD_END], 0,
+                     (int) json_object_get_int_member (object, "id"),
+                     event_string (object, "state"),
+                     event_string (object, "path"),
+                     event_bytes (object, "received_bytes"));
       return;
     }
 
@@ -778,6 +843,47 @@ chromium_session_run_javascript (ChromiumSession *self, const char *code, int id
   send_json (self, root);
 }
 
+void
+chromium_session_accept_download (ChromiumSession *self, int id, const char *path)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  /* An empty path is a real answer in CEF's own terms — "the suggested name in
+   * the default temp directory" — which is a file the host never chose, in a
+   * place it does not know about. Refuse to send one. */
+  g_return_if_fail (path != NULL && *path != '\0');
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "download-accept");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  command_add_string (builder, "path", path);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_reject_download (ChromiumSession *self, int id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "download-reject");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
 const char *
 chromium_session_get_helper_path (ChromiumSession *self)
 {
@@ -864,6 +970,20 @@ chromium_session_class_init (ChromiumSessionClass *klass)
     g_signal_new ("script-result", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 4,
                   G_TYPE_INT, G_TYPE_BOOLEAN, G_TYPE_STRING, G_TYPE_STRING);
+  signals[SIG_DOWNLOAD_BEGIN] =
+    g_signal_new ("download-begin", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 5,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+                  G_TYPE_INT64);
+  signals[SIG_DOWNLOAD_PROGRESS] =
+    g_signal_new ("download-progress", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 5,
+                  G_TYPE_INT, G_TYPE_INT64, G_TYPE_INT64, G_TYPE_INT,
+                  G_TYPE_INT64);
+  signals[SIG_DOWNLOAD_END] =
+    g_signal_new ("download-end", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 4,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT64);
   signals[SIG_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);

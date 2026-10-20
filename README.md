@@ -110,18 +110,20 @@ of it is reproducible runs:
 | --- | --- |
 | `CHROMIUM_HELPER` | set (any value containing `/`) to enter session mode; the default is the path compiled in `src/meson.build` |
 | `CHROMIUM_URL` | page to open |
-| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `wheel`, `close`, `quit` — see `test/*.session` |
+| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `wheel`, `download-accept <path>`, `download-reject`, `close`, `quit` — see `test/*.session` |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_WINDOW` | `fullscreen` or `maximize`, for deterministic geometry |
 | `CHROMIUM_CLIPSET` / `CHROMIUM_CLIPWATCH` | seed the host clipboard, and bridge it into the page |
 | `CHROMIUM_HELPER_NO_SANDBOX` | set to exactly `1` to run the helper without Chromium's sandbox; anything else — including a typo — leaves it on (`docs/sandbox-policy.md`) |
+| `CEFNEST_DOWNLOAD_DIR` | where the demo panel auto-accepts a download; defaults to the XDG download directory (`docs/download-path.md`) |
+| `CEFNEST_DOWNLOAD_ASK` | any value: every download waits for the 保存/丢弃 buttons or a script step instead of landing on disk |
 | `G_MESSAGES_DEBUG` | **space-separated** domains: `all`, or `nested chromium-view chromium-session` — a comma list matches nothing |
 
 ## Test
 
 ```bash
-meson test -C builddir                       # 9 tests
-meson test -C builddir --suite selftest      # the eight seat selftests
+meson test -C builddir                       # 10 tests
+meson test -C builddir --suite selftest      # the nine seat selftests
 meson test -C builddir --suite protocol      # the implementation-slot audit
 ```
 
@@ -179,6 +181,17 @@ refusal, it aborts the compositor (`docs/empty-request-slot.md`).
 `test/uinput-inject.c` replays evdev events through `/dev/uinput` to drive the
 widget itself, which needs write access to the node (`sudo`).
 
+`test/download-gate.sh` is the download half, and it stays a documented manual
+gate because it opens real windows: ten runs against `test/fake-helper.py` and
+then against real Chromium, 41 assertions over the whole matrix — a file that
+lands, a name deduplicated, `../` in a suggested name that cannot escape the
+target directory, a refusal that leaves the directory empty, a mid-flight
+cancel, and a host that never answers at all. The real-Chromium cancel runs
+against a local server that trickles a 2 MiB body at 32 KiB per 100 ms: served
+in one write, a localhost download finishes before the script gets a chance to
+reject it, so the assertion would pass on a race instead of on the cancel path.
+`docs/download-path.md` §6 has the matrix.
+
 ## Using it as a library
 
 ```c
@@ -196,11 +209,18 @@ and the mute state landing), `::ready` (the helper answered its handshake),
 `::load-end` (uri, HTTP code — it fires for failed loads too, with code 0),
 `::load-error` (net error code, uri, name), `::renderer-exited` (termination
 status, error code, message), `::script-result` (id, ok, JSON value, message),
-`::closed` (the helper is gone and will not come back).
+`::download-begin` (id, url, suggested name, mime type, total bytes),
+`::download-progress` (id, received, total, percent, speed), `::download-end`
+(id, `complete`/`cancelled`/`interrupted`, path, received), `::closed` (the
+helper is gone and will not come back).
 `chromium_session_set_muted ()` silences the page — its sound leaves the helper
 through an unsandboxed audio process and lands on the host's speakers, and the
 stream stays open while muted, so the desktop mixer cannot see the switch
 (`docs/audio-path.md`).
+A download is a question, not a command: nothing reaches the disk until the host
+answers `::download-begin` with `chromium_session_accept_download (session, id,
+path)` or refuses it with `chromium_session_reject_download (session, id)`, and
+an unanswered one leaves no file at all (`docs/download-path.md`).
 `docs/control-channel.md` is the full command and event
 list, and the record of the commands decided against.
 
@@ -224,6 +244,7 @@ They are the record of *why* the code is shaped like this:
 | `control-channel.md` | every command and event on the socket, what a failed load and a dead renderer look like, and the commands decided against |
 | `audio-path.md` | where the page's sound actually goes: an unsandboxed audio service, straight to the host's speakers, and what muting it measures |
 | `protocol-ceilings.md` | what real clients bind against the nested compositor, and the measured verdict on every protocol and version ceiling left un-advertised |
+| `download-path.md` | the parked `OnBeforeDownload` gate, who decides the path, and the three CEF download behaviours only a measurement can tell you |
 
 ## Known limitations
 
@@ -246,6 +267,11 @@ They are the record of *why* the code is shaped like this:
 - **Only the renderer's death is reported.** `::renderer-exited` comes from CEF's
   render-process callback; when one of the other sandboxed children goes, the
   host hears nothing until the page stops answering.
+- **A download can be accepted, refused or cancelled — not paused.**
+  `CefDownloadItemCallback` also has `Pause` and `Resume`; nothing on the channel
+  carries them yet. Of the three end states, `interrupted` is the one
+  `test/download-gate.sh` cannot reach: the local server keeps answering until
+  Chromium gives up on its own (`docs/download-path.md`).
 - **The page's sound bypasses the widget entirely.** Audio lives in an
   unsandboxed `audio.mojom.AudioService` utility and reaches the host's speakers
   as an ordinary desktop app; the nested compositor never sees it, and GNOME's

@@ -55,6 +55,31 @@ void               chromium_session_run_javascript (ChromiumSession *self,
  * A new helper always starts unmuted. */
 void               chromium_session_set_muted     (ChromiumSession *self,
                                                    gboolean muted);
+/* Downloads. Nothing lands on disk until the host says where: ::download-begin
+ * (id, url, suggested_name, mime_type, total_bytes) is the question, and exactly
+ * one of the two calls below has to answer it. A download that is never answered
+ * stays parked and no file is written; @total_bytes is -1 when the server did not
+ * state a length.
+ *
+ * chromium_session_accept_download () names the full path to write to, so the
+ * directory — and therefore the whole of where a page's file can end up — is the
+ * host's choice, never the page's. The helper does not create parent directories.
+ * chromium_session_reject_download () refuses a pending download and cancels an
+ * in-flight one with the same call.
+ *
+ * ::download-progress (id, received_bytes, total_bytes, percent, speed) follows
+ * each whole percent; @speed is bytes/s. @percent is -1 for a download of unknown
+ * length. ::download-end (id, state, path, received_bytes) closes it, with state
+ * "complete", "cancelled" or "interrupted" and @path read back from Chromium —
+ * a refused-before-starting download ends there with an empty path, and both the
+ * accept and the reject routes finish here, so a host tracking rows has one
+ * place to look. */
+void               chromium_session_accept_download (ChromiumSession *self,
+                                                   int id,
+                                                   const char *path);
+void               chromium_session_reject_download (ChromiumSession *self,
+                                                   int id);
+
 const char        *chromium_session_get_helper_path (ChromiumSession *self);
 const char        *chromium_session_get_uri         (ChromiumSession *self);
 const char        *chromium_session_get_title       (ChromiumSession *self);
