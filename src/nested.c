@@ -1509,17 +1509,21 @@ frame_clock_tick (gpointer data)
 }
 
 /* The widget's display cycle. A client that asked for a frame is told to draw
- * at the start of one, so what it commits lands on the next cycle instead of
- * waiting an arbitrary software-timer quantum on top of it. While anyone still
- * waits, keep asking for update phases; with nobody waiting the clock idles
- * until a commit or a frame request speaks up again. */
+ * when the cycle has finished painting, so it owns the idle gap before the
+ * next cycle and what it commits is processed — through the socket, in the
+ * main loop — long before that cycle paints. Firing at the start of the cycle
+ * instead would leave the commit sitting in the socket while the same cycle
+ * paints, and every frame would land two cycles after its done instead of
+ * one. While anyone still waits, keep asking for after-paint phases; with
+ * nobody waiting the clock idles until a commit or a frame request speaks up
+ * again. */
 static void
-frame_clock_update (GdkFrameClock *clock, gpointer data)
+frame_clock_after_paint (GdkFrameClock *clock, gpointer data)
 {
   NestedCompositor *self = data;
 
   if (fire_pending_frame_callbacks (self))
-    gdk_frame_clock_request_phase (clock, GDK_FRAME_CLOCK_PHASE_UPDATE);
+    gdk_frame_clock_request_phase (clock, GDK_FRAME_CLOCK_PHASE_AFTER_PAINT);
 }
 
 static void
@@ -1542,7 +1546,7 @@ nested_start_frame_clock (NestedCompositor *self)
 
   if (self->frame_clock)
     gdk_frame_clock_request_phase (self->frame_clock,
-                                   GDK_FRAME_CLOCK_PHASE_UPDATE);
+                                   GDK_FRAME_CLOCK_PHASE_AFTER_PAINT);
   else if (!self->frame_timer_id)
     self->frame_timer_id = g_timeout_add (16, frame_clock_tick, self);
 }
@@ -2064,8 +2068,8 @@ nested_compositor_set_frame_clock (NestedCompositor *self, GdkFrameClock *clock)
 
   self->frame_clock = g_object_ref (clock);
   self->frame_clock_handler =
-    g_signal_connect (self->frame_clock, "update",
-                      G_CALLBACK (frame_clock_update), self);
+    g_signal_connect (self->frame_clock, "after-paint",
+                      G_CALLBACK (frame_clock_after_paint), self);
 
   /* A client may already be waiting for a frame: fold it into the display
    * cycle instead of leaving it on the timer until the next request. */
