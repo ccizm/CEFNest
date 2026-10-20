@@ -181,11 +181,11 @@ stop，客户端收到的是"这个方向现在不在滚"这个陈述，不会�
 
 | 跑法 | 结果 |
 | --- | --- |
-| `seat-selftest` 六模式（plain / `--dmabuf` / `--text-input` / `--cursor-shape` / `--popup` / `--refused`） | 全部 `finished at step 27`；fd **净增 18**（`119 → 137` 这一轮，`--refused` 是 `119 → 132`，净增 13）——脚本多了 3 步但一个 fd 都没多漏，#19 那轮的净增数也是 18；五个能收输入的跑法都打出 `axis source wheel`、`axis 0 value120 +1200`、`stop (#1)(#2)`、`0 keys held` |
+| `meson test --suite selftest` 七模式（plain / `--dmabuf` / `--text-input` / `--cursor-shape` / `--popup` / `--refused` / `--dnd-requests`） | 全部 `finished at step 27`；fd **净增 18**（`119 → 137` 这一轮，`--refused` 是 `119 → 132`，净增 13）——脚本多了 3 步但一个 fd 都没多漏，#19 那轮的净增数也是 18；五个能收输入的跑法都打出 `axis source wheel`、`axis 0 value120 +1200`、`stop (#1)(#2)`、`0 keys held` |
 | 同一脚本、把 `pressed_keys` 去重临时关掉 | 同一位置报 `1 keys held`（第 4 节） |
 | `WAYLAND_DEBUG=server` | 第 4、5 节贴的块，一帧一次手势 |
 | `NESTED_SEAT_VERSION` 临时按回 5 | 降级路径按预期发 `axis_discrete`、半格无步数 |
-| `python3 test/audit-impl-slots.py` | `0 uncovered slot(s), 0 unknown interface(s), 29 implementation struct(s)`——抬 seat 版本以后仍是 0 |
+| `meson test --suite protocol`（`python3 test/audit-impl-slots.py builddir`） | `0 uncovered slot(s), 0 unknown interface(s), 29 implementation struct(s)`——抬 seat 版本以后仍是 0 |
 | 真 Chromium（`test/wheel.session` + `test/wheel-page.html`） | **这次没跑成**，见第 8 节 |
 
 `shm-client` 也补了 `axis_source` / `axis_stop` / `axis_value120` 三个监听（`test/shm-client.c:1368`

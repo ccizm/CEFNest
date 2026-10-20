@@ -170,6 +170,10 @@ selftest: finished at step 27, 139 fds open (119 at start)
 | `test/audit-impl-slots.py` | 0 空槽 |
 | `seat-selftest --dnd-requests`（修复后） | exit=0，三条 nested 日志都出现：`supports actions 0x3`、`wants action 0x1 of 0x1`、`finished a drag that was never started` |
 | 同上，把三个槽再掏空（对照） | exit=134，`listener function for opcode 2 of wl_data_source is NULL`——仓库里第一次自己复现出这个死法 |
+| `meson test -C builddir`（含 #24 之后，现共 8 条） | 8/8 OK；上面这些跑法从此不用手敲，`--suite selftest` / `--suite protocol` 各跑一半 |
+
+注：表里 `step 24`、`fd 115 → 133` 是 #30 当时那轮的数，脚本后来在 #24 里长了 3 步（现在是
+`step 27`，fd 净增仍是 18）。净增数是稳定的，基线绝对值每轮都会飘。
 
 ## 8. 还没做的
 
@@ -177,8 +181,9 @@ selftest: finished at step 27, 139 fds open (119 at start)
   要真做拖放得先有"往 widget 外面放"的目标，那是另一件事。
 - ~~dndprobe 还在 `/tmp`~~：已经落成 `test/shm-client.c` 的 `--dnd-requests`（第 6 节），`/tmp` 那份
   可以扔了。seat-selftest 不用改——它本来就把 `argv[3:]` 转交给客户端。
-- **`--dnd-requests` 不在默认闸门里**：六模式那条命令不带它。要让它每次自测都跑，就得把它加进
-  #26 的 `meson test`，而不是让每个跑的人记一条命令行。
+- **`--dnd-requests` 已经在默认闸门里**：`meson test -C builddir` 现在跑 8 条——槽位审计 +
+  七个 seat-selftest 模式，`--dnd-requests` 是其中一个（`meson test --suite selftest`）。没有
+  显示设备时 seat-selftest 自己报 skipping 并退 0，所以这套闸门在没人坐的机器上也能跑。
 - **seat-selftest 没有拖拽回归**：现在只有 demo 脚本这条路径会碰到 `set_actions`。
 - **#28 升版本前必须先跑审计**：`xdg_toplevel_impl` 连 `.close` 都没填，这类空槽在别的接口上一旦
   版本抬起来就是同一个死法。
