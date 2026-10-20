@@ -48,6 +48,24 @@ see a command cross the wire. A select with nothing pending is answered with the
 no-context-menu status the real helper sends; a dismiss with nothing pending is
 silent, exactly as there.
 
+A URL containing "permission" asks for one permission, which is how the host's
+prompt layer is driven without a browser. perm=<name> picks which ask, out of the
+set docs/permission-prompt.md measured — audio, video, both, geolocation,
+notifications, clipboard, midi, storage, network, empty — and origin= names the
+requesting origin. The two queues behave the way the real browser's do: a media
+ask the host has not answered holds the queue, and an ask made behind it arrives
+as its own request only once the slot is free again, while a prompt the host has
+not answered is dismissed as "ignore" the moment the next prompt shows up. That is
+where the replay stops: measured, a prompt the host sits on also makes the ask
+made immediately after it vanish without ever reaching the helper
+(docs/permission-prompt.md §3), and a host cannot answer that differently, so it
+is not simulated here.
+auto=1 closes the request itself about half a second later, which is the shape of
+Chromium taking a prompt back. The one answer the real helper takes
+(permission-respond, with accept, deny or dismiss) has no reply of its own, so
+the fake writes what it received on stderr; an id that is already gone gets the
+no-permission-request status the real helper sends.
+
 Run it as the helper:
 
   CHROMIUM_HELPER=$(pwd)/test/fake-helper.py \\
@@ -295,6 +313,100 @@ def log(text):
     print("fake: " + text, file=sys.stderr, flush=True)
 
 
+# The asks docs/permission-prompt.md measured out of a real CEF 154, spelled the
+# way they arrive on the channel: the two queues carry the two CEF callbacks, a
+# media ask names capture bits and a prompt ask names permission types with their
+# raw bit values.
+PERM_ASKS = {
+    "audio": ("media", ["device-audio"], 1),
+    "video": ("media", ["device-video"], 2),
+    "both": ("media", ["device-audio", "device-video"], 3),
+    "geolocation": ("prompt", ["geolocation"], 256),
+    "notifications": ("prompt", ["notifications"], 32768),
+    "clipboard": ("prompt", ["clipboard"], 16),
+    "midi": ("prompt", ["midi-sysex"], 8192),
+    "storage": ("prompt", ["storage-access"], 1048576),
+    "network": ("prompt", ["local-network", "loopback-network"], 201326592),
+    "empty": ("prompt", [], 0),
+}
+
+# One request per queue that the fake is holding for the host to answer, plus the
+# asks waiting behind it.
+permissions = {"media": None, "prompt": None}
+permission_queue = []
+next_permission_id = 1
+
+
+def send_permission(kind, names, raw, origin):
+    global next_permission_id
+
+    request = {"id": next_permission_id, "kind": kind, "names": names, "raw": raw,
+               "dismiss_at": None}
+    next_permission_id += 1
+    permissions[kind] = request
+    send({"event": "permission-request", "id": request["id"], "kind": kind,
+          "origin": origin, "permissions": names, "raw": raw})
+
+
+def begin_permission(url):
+    picked = query("perm", url, "geolocation")
+    ask = PERM_ASKS.get(picked)
+    if ask is None:
+        send({"event": "status", "message": "unknown-permission"})
+        return
+
+    kind, names, raw = ask
+    origin = query("origin", url, "http://fake.invalid/")
+    # "auto" stands in for Chromium closing a prompt the host never answered —
+    # the page navigating, or the next ask pushing it out.
+    auto = query("auto", url, "0") not in ("0", "")
+
+    if permissions[kind]:
+        if kind == "media":
+            # Measured: a media ask the host has not answered is queued by
+            # Chromium, and the ask made behind it arrives as its own request the
+            # moment the slot is free again. Nothing is lost, and nothing arrives
+            # early.
+            permission_queue.append((kind, names, raw, origin, auto))
+            return
+        # Measured again: prompts do not queue. The one being held is dismissed as
+        # "ignore" a moment before the new one shows up, and the host has to take
+        # its own row down when it hears that.
+        held = permissions[kind]
+        permissions[kind] = None
+        send({"event": "permission-dismissed", "id": held["id"], "result": "ignore"})
+
+    send_permission(kind, names, raw, origin)
+    if auto:
+        permissions[kind]["dismiss_at"] = time.monotonic() + 0.5
+
+
+def deliver_queued():
+    """The asks Chromium was holding behind a slot that is now empty. One per
+    queue: delivering the next fills the slot again."""
+    for entry in list(permission_queue):
+        kind = entry[0]
+        if permissions[kind]:
+            continue
+        permission_queue.remove(entry)
+        send_permission(kind, entry[1], entry[2], entry[3])
+        if entry[4]:
+            permissions[kind]["dismiss_at"] = time.monotonic() + 0.5
+
+
+def tick_permissions():
+    for kind, request in permissions.items():
+        if not request or not request["dismiss_at"]:
+            continue
+        if time.monotonic() < request["dismiss_at"]:
+            continue
+        request["dismiss_at"] = None
+        permissions[kind] = None
+        send({"event": "permission-dismissed", "id": request["id"],
+              "result": "ignore"})
+        deliver_queued()
+
+
 while True:
     # A 50 ms timeout is what lets an accepted download advance while the fake
     # waits for the next command: the real helper's ticks come from Chromium.
@@ -302,6 +414,7 @@ while True:
     if not ready:
         tick_downloads()
         tick_menu()
+        tick_permissions()
         continue
 
     line = channel.readline()
@@ -360,6 +473,29 @@ while True:
             continue
         menu["pending"] = False
         log("context-menu-dismiss")
+        continue
+
+    if command.get("cmd") == "permission-respond":
+        respond_id = command.get("id")
+        held = None
+        for request in permissions.values():
+            if request and request["id"] == respond_id:
+                held = request
+                break
+
+        if not held:
+            # The real helper's answer for a request that is already gone: the
+            # callback slot is empty, so nothing happens and only a status is left.
+            send({"event": "status", "message": "no-permission-request"})
+            continue
+
+        permissions[held["kind"]] = None
+        # Continue() and Cancel() have no reply of their own, so the trace a gate
+        # can assert on is the fake saying what it was handed.
+        log("permission-respond id=%s result=%s kind=%s names=%s" %
+            (held["id"], command.get("result"), held["kind"],
+             "+".join(held["names"])))
+        deliver_queued()
         continue
 
     if command.get("cmd") == "download-accept":
@@ -426,6 +562,9 @@ while True:
 
     if "menu" in url:
         begin_context_menu(url)
+
+    if "permission" in url:
+        begin_permission(url)
 
     if crash_after:
         crashed_at = time.monotonic() + crash_after

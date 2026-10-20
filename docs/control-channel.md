@@ -17,6 +17,11 @@
 > 一问一答"，这一条要补的是**一个必须由宿主作答、否则右键就再也问不出第二个问题**的请求。
 > `RunContextMenu` 把 CEF 的模型交给宿主画，答案必须回来。实测到的那条硬约束（helper 那边
 > 同一时刻只持有**一个**没答的菜单）写在 `docs/context-menu.md` §2。
+>
+> 2026-10-21 更新（任务 #57–#62）：权限提示也做了。它是**第四种**形状，和菜单同族但更狠：菜单不答是
+> 右键坏掉，权限不答是页面的 promise 挂住、**而且页面紧接着的下一次问法会凭空消失**（实测两次，
+> `docs/permission-prompt.md` §3）。它还带来一个菜单没有的结构问题：media 和 prompt 是**两条互不相干的
+> 队列、各自一个槽**，所以 session 这边握的是一张表而不是一个布尔。§3、§4、§5、§6 第四次跟着改。
 
 ## 1. 缺的那一条为什么必须是一条信号
 
@@ -73,7 +78,7 @@ demo: renderer exited status=1 error=9 9
 
 ## 3. 现在通道上有的东西
 
-命令 14 条，事件 17 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
+命令 15 条，事件 19 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
 
 | 方向 | 名字 | 载荷 |
 | --- | --- | --- |
@@ -87,6 +92,7 @@ demo: renderer exited status=1 error=9 9
 | host → helper | `find-stop` | `clear`（缺省 true：连高亮一起撤） |
 | host → helper | `context-menu-select` | `id`、`flags`（可选，API 上没开）（**`context-menu` 必须被答**：helper 同时只持有一个请求，不答就再也问不出第二个） |
 | host → helper | `context-menu-dismiss` | 无（`Cancel()`：关掉而不执行任何命令，这条回答的意思是"什么也没选"） |
+| host → helper | `permission-respond` | `id`、`result`（`accept`/`deny`/`dismiss`；**`permission-request` 必须被答**，而且 media 那边的 `accept` 只能是"整份给"——`Continue()` 要求 `allowed_permissions` 等于请求里的 `required`） |
 | helper → host | `ready` | `cef`、`pid`、`url` |
 | helper → host | `address` | `url`（只有真正提交的导航才发） |
 | helper → host | `title` | `title` |
@@ -102,6 +108,8 @@ demo: renderer exited status=1 error=9 9
 | helper → host | `find-result` | `identifier`、`count`、`active_ordinal`、`final`（没有命中矩形，理由见 `docs/find-path.md` §2.4） |
 | helper → host | `context-menu` | `x`、`y`、`items`（每项 `id`、`label`、`type`、`enabled`、`checked`；只发 `IsVisibleAt` 为真的行） |
 | helper → host | `context-menu-dismissed` | 无（**只在 helper 还握着那个回调时发**：宿主自己答过之后 CEF 关菜单也算 dismiss，那一条被滤掉了） |
+| helper → host | `permission-request` | `id`、`kind`（`media`/`prompt`）、`origin`、`permissions[]`、`raw`（mask 原值；两套枚举只存在于 `include/internal/cef_types.h`，公共头文件一个都不列） |
+| helper → host | `permission-dismissed` | `id`、`result`（**只有 prompt 有这条**：`CefMediaAccessCallback` 上没有"宿主没答、被浏览器自己关掉"的回调，media 只能一直握着） |
 | helper → host | `status` `closed` | 文本 / 无 |
 
 字节数一律走 JSON 的 double：`CefDictionaryValue` **只有 `SetInt(int)`，没有 64 位 setter**，
@@ -125,16 +133,28 @@ demo: renderer exited status=1 error=9 9
 宿主不接管就画 CEF 给的默认菜单，宿主接管了则由宿主的 `select`/`dismiss` 作答，宿主既没接管
 又答不了（没有 view、或模型里一条命令都没有）时会话自己 `dismiss`。
 
+`permission-request` 是第四种，形状和菜单一样（一条必须回答的问题 + 一条不带回答的答案），代价却大得
+多。菜单不答是"下一次右键安静地没了"；权限不答是**页面站在答案上**：Alloy 的默认处理是 media deny、
+prompt IGNORE，而 IGNORE 传到你手上就是一条永远不 settle 的 promise（`Notification.requestPermission()`、
+`clipboard.readText()`、`requestMIDIAccess()` 三个在基线里全是 `pending`）。更实测的是队列：media 一次
+只走一条，扣着的那条没答，后面的 media 问法**根本不到宿主**，答掉之后才作为它自己的新 id 到达；prompt
+之间会互相顶掉（旧的一条在新的到达**之前**先被 dismiss 成 `ignore`）；两条队列互不影响。还有一条没有
+解释但复现了两次的：**面板扣着一条 prompt 时，页面紧接着的下一次问法会凭空消失**——不是排队，因为
+它再也没有出现过。所以规则仍然是"会话永远会答"，只是这里的答案只有一个方向：宿主不接管就 deny。
+`id` 是 media 和 prompt 共用的一个递增序号，槽位则是各自的，所以 session 握的是一张
+`GHashTable`（`permission_held`），不是一个布尔。细节和全部转录在 `docs/permission-prompt.md`。
+
 `ChromiumSession` 的信号：`::changed`、`::ready`、`::load-end`、`::load-error`、
 `::renderer-exited`、`::script-result`、`::download-begin`、`::download-progress`、
-`::download-end`、`::find-result`、`::context-menu`（最后五条新）、`::closed`。`::changed`
+`::download-end`、`::find-result`、`::context-menu`、`::permission-request`、
+`::permission-dismissed`（最后三条新）、`::closed`。`::changed`
 现在也会随 `muted` 事件落地。
 
-`::context-menu` 是这套信号里**唯一一个有返回值的**：`gboolean`，handler 返回 TRUE 表示"菜单
-我自己画，答案我来负责"，返回 FALSE 表示"交给会话画默认菜单"。答案取的是 handler 的返回值
+`::context-menu` 和 `::permission-request` 是这套信号里**唯二有返回值的**：`gboolean`，handler 返回 TRUE 表示"这个问题我接了，答案我来负责"，返回 FALSE 表示"交给会话"（菜单→画 CEF 给的默认菜单，权限→直接 deny）。答案取的是 handler 的返回值
 ——GType 为 `G_TYPE_BOOLEAN` 且没注册累加器的信号，累加的就是最后一个 handler 的返回值，
 `g_signal_emit` 那个 `&handled` 位置**不会**传进 handler（它声明成出参写进去就是段错误，
-`docs/context-menu.md` §7 记了这次的现场）。
+`docs/context-menu.md` §7 记了这次的现场）。`::permission-request` 用的是同一条规则，第一版 demo 差点
+把同一个坑再踩一遍。
 
 `load-error` 和 `renderer-exited` 都是 3 个参数，`renderer-exited` 那两个 int 一个是 CEF 的
 枚举、一个是平台错误码——刻意不合并成一条"出错了"信号：一个是"这一页没来"，另一个是
@@ -158,10 +178,11 @@ demo: renderer exited status=1 error=9 9
 | 打印 / 存 PDF | `PrintToPdf` | **不做** | 形状和下载是同一套（挂住的回调 + `id` + 落盘路径），照抄就行；但 `docs/download-path.md` 那三条实测还没给它，不做没有证据的功能 |
 | 自定义 UA | `CefRequestContext` | **不做** | 走环境变量比走命令合适：它是一次性设定，不该中途变 |
 | 上下文菜单 | `CefContextMenuHandler::RunContextMenu` + `CefMenuModel` + `CefRunContextMenuCallback` | **已做**（2026-10-21） | 判据到这里已经不够用了：`download-*` 是"挂着等回答"，`find-*` 是"不发回答"，而 `context-menu` 是**必须回答**——CEF 只有这一条路把菜单交给宿主，`RunContextMenu` 返回 true 之后画与不画、答与不答全在宿主手上，而实测（`docs/context-menu.md` §2）证明 Chromium 同时只允许一个没答的请求，不答就等于把右键弄坏。形状是最省的一种：模型（`items` 五条属性）+ 坐标上线，答案下去，中间没有任何进度。`CefContextMenuParams` 留在 helper：模型本身已经是它的回答，`link URL` 这类"宿主想加自己的行"的信息是下一个增量，不是这次没有量的部分 |
+| 权限提示 | `CefPermissionHandler` + `CefMediaAccessCallback` + `CefPermissionPromptCallback` | **已做**（2026-10-21） | 和菜单同一个判据：`OnRequestMediaAccessPermission` / `OnShowPermissionPrompt` 返回 true 之后，**页面就站在宿主的回答上**，不答不是安静而是 promise 永不 settle（基线实测：通知、剪贴板读、MIDI sysex 三条全 `pending`）。形状仍然最省：问题（origin + 名单 + mask）上线，一个词的答案回去，中间没有进度。两处"不能替宿主决定"留在原地：media 的 `accept` 只能整份给（`Continue()` 要求 `allowed` 等于 `required`），所以 API 上没开名单参数；反过来，`storage.persist()`、`permissions.query()` 和 idle 那三种问法根本不走 `CefPermissionHandler`（通知是走的，实测过），通道上因此没有它们——不是没做，是 CEF 那边没有可以问的地方（`docs/permission-prompt.md` §1、§10） |
 
-反过来，**这 14 条够用**的证据还是这套组件的全部交互：导航（`load`/`back`/`forward`/
+反过来，**这 15 条够用**的证据还是这套组件的全部交互：导航（`load`/`back`/`forward`/
 `reload`/`stop`）、任意脚本（`js` 一条顶十条，页内状态、标题、当前 URL 都能自己读）、退出
-（`quit`）、加上现在这几条要回话的（`download-*`、`find-*`、`context-menu-*`）。要加的新命令
+（`quit`）、加上现在这几条要回话的（`download-*`、`find-*`、`context-menu-*`、`permission-*`）。要加的新命令
 得先说明它不能用 `js` 表达——上面那张表里除了 DevTools，其余几条其实都能用 `js` 大致凑出来，
 只是凑得不干净；下载**不能**凑，因为它落盘、要宿主给路径，而 `js` 那条通道一个字一个字都在
 页面里。查找也**不该**凑：Blink 的命中序号、跨帧的"第 M 处"、以及把命中滚进视野那套行为都在
@@ -219,6 +240,17 @@ demo: renderer exited status=1 error=9 9
 自己就是一个 xdg_popup 子面（`docs/context-menu.md` §1 量的正是这一点），所以 `shot` 抓不到它，
 真机那半的"画出来了"证据用的是会话自己那条 `context menu mapped=1 size=` 调试行。
 
+`permission-*` 这一组同样是先量再做，而且量的次数比前几组多——因为它的规则不在头文件里。
+`test/permission-gate.sh` 十次运行（七次假 helper、三次真 Chromium）、58 条断言。假 helper 复刻的是
+`docs/permission-prompt.md` §2 那两条队列和顶掉：media 槽满时后来的 media 问法不上线、答掉之后才作为
+新 id 到达；prompt 槽满时先补一条 `permission-dismissed ignore` 再上新的一条。真 Chromium 那一半钉的是
+**页面上发生了什么**：`real-deny` 逐字对十项回读（同一篇 §1 的右列），`real-answer` 证明宿主给的答案
+真的走到了页面（定位 deny → `code1`，通知 accept → `granted`），`real-park` 用四次回读加两条**顺序**断言钉住 media 队列是浏览器的
+而不是仿造品的——为了这件事门禁里新加了一个 `expect_after`（比较两处匹配的行号），两次 grep 说不清
+"这条请求是那条答案放出来的"。三次真机运行各自一份 `XDG_CACHE_HOME`，于是 helper 每次冷启动要三秒
+才报 `ready`：正是这个把 demo 里一个早就存在的坑照了出来——会话脚本原来靠 800 ms 定时器起步，第一条
+`load` 发在通道打开之前，整段脚本静默地什么都没做。现在 session 模式下脚本从 `::ready` 起步。
+
 ## 6. 还没做的
 
 * **一条命令都没有应答机制**。`js` 有 `id`，其余命令发出去就完了；宿主不知道 `load` 有没有
@@ -228,7 +260,9 @@ demo: renderer exited status=1 error=9 9
   现在得补一句：这个判据在 `context-menu` 上**不成立**了。它反过来是一条必须回答的问题，"没有
   ack"不再是安全默认，所以会话侧给它加了一条不变量：**`context-menu` 请求一定活到一个答案**
   （要么宿主的 `select`/`dismiss`，要么会话自己 dismiss）。`no-such-download` 那种"日志而不是
-  回执"在这里也用了——宿主答一个已经结束的菜单，helper 只回 `status`。
+  回执"在这里也用了——宿主答一个已经结束的菜单，helper 只回 `status`。**`permission-request` 是同族里
+  更贵的一个**：菜单不答是下一次右键安静地没了，权限不答是页面的 promise 永远不 settle（基线三条
+  `pending`），实测还额外赔上"紧接着的下一次问法凭空消失"。所以会话给的默认只有一个方向：deny。
 * **utility 进程（网络、音频）掉了没人报**。CEF 只为渲染进程发这个回调，§2 实测过杀另一个
   是没有声音的。音频现在确认就住在一个 `Seccomp=0` 的 `audio.mojom.AudioService` utility
   里（`docs/audio-path.md`），宿主能看到的兜底只有 `::closed`。
@@ -253,3 +287,18 @@ demo: renderer exited status=1 error=9 9
 * **一条挂起的菜单请求在 helper 退出时会怎么样，没测**。`context-menu-select` 发不出去、宿主那边
   `menu_pending` 还立着、session 已经关了。这是 §6 第一条（没有 ack）真正疼的地方：宿主没法知道自己
   的回答有没有吃到。等 `docs/session-lifecycle.md` 那侧有结论一起看。
+* **一条挂起的 media 请求同样没测，而且它连回调都没有**。`CefMediaAccessCallback` 上只有
+  `Continue`/`Cancel`，CEF 不会关一条宿主扣着的 media 请求（prompt 会，`permission-dismissed`），所以
+  换页、关窗、helper 退出这三种情况下那条 `getUserMedia` 变成什么，通道上没有任何证据。
+  `docs/permission-prompt.md` §10 把这条列在"没做"里而不是"没写"里。
+* **prompt 之间那条"吞掉"规则没有解释**。面板扣着一条 prompt 时，页面紧接着的下一次问法既不到宿主、
+  也不再补来（复现两次，`docs/permission-prompt.md` §3）。它没有对应的宿主侧动作——唯一的对策是每条都
+  答，而那已经是门禁钉的不变量——所以 fake 没有复刻它，别把它当成仿造品漏掉的特性。
+* **`DISMISS` 这个答案只在假 helper 上走过线**。真机上它和 `DENY` 在页面上的区别没测（media 那边
+  根本没有第三种答案：`Cancel()` 把"收起"和"拒绝"合成一件事）。
+* **`storage.persist()`、`permissions.query()`、idle detection 到不了宿主**。不是没做：它们不走
+  `CefPermissionHandler`，helper 这边没有一个可以问的地方。想在宿主侧管持久化存储的许可，得等 CEF
+  接线，或者绕到 content settings 那一层——那是另一个 API。
+* **`--enable-media-stream` 是一个回归地雷**。头文件明说：带这个开关时
+  `OnRequestMediaAccessPermission` **不会被调用**，它等于对摄像头和麦克风全部放行。现在 helper 没加它，
+  将来谁加开关时应当先看 `real-park` 有没有变红。

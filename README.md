@@ -38,7 +38,7 @@ Three pieces, and each only does one job:
 | --- | --- | --- |
 | `NestedCompositor` | `src/nested.c` + `src/nested-{seat,dmabuf,xdg,cursor,text-input,data-device}.c` | the compositor: globals, surfaces, damage, input, clipboard |
 | `ChromiumView` | `src/chromium-view.c` | the widget: hands its GdkSurface's input to the compositor, paints the composition |
-| `ChromiumSession` | `src/chromium-session.c` | the control plane: starts and stops the helper, tracks page state, runs JavaScript, brokers downloads, find, and the page's context menu |
+| `ChromiumSession` | `src/chromium-session.c` | the control plane: starts and stops the helper, tracks page state, runs JavaScript, brokers downloads, find, the page's context menu, and its permission requests |
 
 Globals the compositor advertises, at the versions in `src/nested-internal.h`:
 `wl_compositor`, `wl_shm`, `wl_seat` (8, so pointer and keyboard can carry
@@ -110,13 +110,14 @@ of it is reproducible runs:
 | --- | --- |
 | `CHROMIUM_HELPER` | set (any value containing `/`) to enter session mode; the default is the path compiled in `src/meson.build` |
 | `CHROMIUM_URL` | page to open |
-| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `close`, `quit` — see `test/*.session` |
+| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `perm-accept <id>`, `perm-deny <id>`, `perm-dismiss <id>`, `close`, `quit` — see `test/*.session` |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_WINDOW` | `fullscreen` or `maximize`, for deterministic geometry |
 | `CHROMIUM_CLIPSET` / `CHROMIUM_CLIPWATCH` | seed the host clipboard, and bridge it into the page |
 | `CHROMIUM_HELPER_NO_SANDBOX` | set to exactly `1` to run the helper without Chromium's sandbox; anything else — including a typo — leaves it on (`docs/sandbox-policy.md`) |
 | `CEFNEST_DOWNLOAD_DIR` | where the demo panel auto-accepts a download; defaults to the XDG download directory (`docs/download-path.md`) |
 | `CEFNEST_DOWNLOAD_ASK` | any value: every download waits for the 保存/丢弃 buttons or a script step instead of landing on disk |
+| `CEFNEST_PERMISSION` | `ask` (default: a row with 允许/拒绝 per request), `deny` / `allow` (answer on arrival, the row stays as the record), or `ignore` (do not take the question at all — the session then denies it, which is what a host with no permission UI does) (`docs/permission-prompt.md`) |
 | `G_MESSAGES_DEBUG` | **space-separated** domains: `all`, or `nested chromium-view chromium-session` — a comma list matches nothing |
 
 ## Test
@@ -232,6 +233,24 @@ command ran in Blink and not in the host. Asserting that a menu appeared uses th
 session's `context menu mapped=1 size=` line, not a `shot` — on Wayland the
 popover is a surface of its own, outside the widget the grab covers.
 
+`test/permission-gate.sh` is the permission half, ten runs — seven against
+`test/fake-helper.py`, three against real Chromium on `test/permission-page.html`
+— and 58 assertions. It never opens a camera or a microphone: every media ask in
+the file ends in a deny, and the one accepted grant it asserts is a notification,
+which has no device behind it. What the fake replays is the queue shape measured
+against the browser — a media ask the host has not answered holds the media queue,
+and the ask made behind it arrives as its own request only once the answer is back;
+a prompt the host has not answered is dismissed as `ignore` the moment the next
+prompt shows up. The real runs assert on what the page sees rather than on the
+trace: `real-deny` compares ten readbacks word for word, `real-answer` proves the
+host's answer reached the page (a denied geolocation is `code1`, an accepted
+notification is `granted`), and `real-park` pins the media queue with two ordering
+assertions plus four page readbacks. Each real run gets its own `XDG_CACHE_HOME`,
+which is also how the cold-profile start was found: the helper needs about three
+seconds to report `ready` on a profile nobody has used before, and a session
+script that starts on a fixed timer loses its first `load` on the floor. Session
+mode now starts the script from `::ready`.
+
 ## Using it as a library
 
 ```c
@@ -254,7 +273,10 @@ status, error code, message), `::script-result` (id, ok, JSON value, message),
 (id, `complete`/`cancelled`/`interrupted`, path, received), `::find-result`
 (search id, count, active ordinal, final), `::context-menu` (the click's x, y and
 the model as a `GList` of rows — returning TRUE means the host draws it),
-`::closed` (the helper is gone and will not come back).
+`::permission-request` (the helper's id, `media` or `prompt`, the requesting
+origin, a `GList` of permission names and the raw mask — returning TRUE means the
+host answers it), `::permission-dismissed` (id, result: the request Chromium took
+back from under the host), `::closed` (the helper is gone and will not come back).
 `chromium_session_set_muted ()` silences the page — its sound leaves the helper
 through an unsandboxed audio process and lands on the host's speakers, and the
 stream stays open while muted, so the desktop mixer cannot see the switch
@@ -271,7 +293,7 @@ it replies even more silently — nothing). The demo wires both to a find bar th
 opens with Ctrl+F and closes with Esc; the key controller runs in the capture
 phase, because a `GtkEntry` would otherwise take Esc before the view forwards it
 (`docs/find-path.md`).
-A right click is the third shape, and the only one that must be answered: CEF hands
+A right click is the third shape, and one of two that must be answered: CEF hands
 over its menu model and expects exactly one reply, and while that reply is
 outstanding the browser will not ask again — five unanswered right clicks are one
 event. `::context-menu` returns TRUE to take the menu over, and then exactly one of
@@ -280,6 +302,15 @@ that id — 全选 measured as selecting in the page) or
 `chromium_session_context_menu_dismiss (session)` has to follow. Return FALSE, or
 connect nothing, and the session draws the model itself as a `GtkPopoverMenu` over
 the view, so a right click is never a dead gesture (`docs/context-menu.md`).
+A permission request is the fourth shape and the same contract with a page standing
+on the answer: an unanswered `getUserMedia` leaves the promise pending *and* holds
+the media queue behind it, and an unanswered prompt is dismissed as `ignore` the
+moment Chromium shows the next one. `chromium_session_permission_respond (session,
+id, result)` sends the answer, and `accept` means "all of it" — CEF requires the
+granted mask to equal the requested one, so a host cannot give the microphone
+without the camera; half a grant is a deny. Return FALSE, or connect nothing, and
+the session denies on arrival rather than leaving the page waiting
+(`docs/permission-prompt.md`).
 `docs/control-channel.md` is the full command and event
 list, and the record of the commands decided against.
 
@@ -307,6 +338,7 @@ They are the record of *why* the code is shaped like this:
 | `find-path.md` | a command that answers nothing, the reply shape only a measurement gives (one identifier per request, one to three updates per request), and what actually scrolls the page |
 | `drag-loop.md` | the in-page drag choreography, the measured proof that a `wl_data_device.enter` reaches the page, what the destination actually accepts, and why the fd relay is not what carries a same-page payload |
 | `context-menu.md` | the one constraint that decided the whole design (Chromium holds a single unanswered menu request), what CEF's default model really contains — the same five rows for a link, an image and a blank page — and `Continue(id)` proven inside the page |
+| `permission-prompt.md` | which asks never reach the host at all, the two queues that make an unanswered request cost the page its next question too, and why `accept` can only ever mean "the whole mask" |
 
 ## Known limitations
 
@@ -352,6 +384,16 @@ They are the record of *why* the code is shaped like this:
   (`docs/context-menu.md` has the table). Check and radio marks are not drawn and a
   submenu row does not open — the menu is rebuilt from a fresh model after every
   command, so a mark would have nothing to remember.
+- **A permission can be granted or denied, not narrowed.** A media request has to be
+  answered with the exact mask it asked for — `Continue()` requires `allowed_permissions`
+  to match what was requested — so "microphone yes, camera no" does not exist here. And a request the host sits on
+  costs more than silence: the page's promise never settles, the media queue stays
+  blocked behind it, and measured twice, the ask made immediately after a held
+  prompt disappears without ever reaching the host. Three asks never reach it at
+  all (`navigator.storage.persist()`, `permissions.query()`, idle detection — they
+  do not go through `CefPermissionHandler`), so no host policy can cover them, and
+  nothing is remembered between requests: asking the same permission twice reaches
+  the handler twice (`docs/permission-prompt.md`).
 - **The page's sound bypasses the widget entirely.** Audio lives in an
   unsandboxed `audio.mojom.AudioService` utility and reaches the host's speakers
   as an ordinary desktop app; the nested compositor never sees it, and GNOME's

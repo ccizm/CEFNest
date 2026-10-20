@@ -49,6 +49,7 @@
 #include "include/cef_life_span_handler.h"
 #include "include/cef_load_handler.h"
 #include "include/cef_parser.h"
+#include "include/cef_permission_handler.h"
 #include "include/cef_process_message.h"
 #include "include/cef_render_process_handler.h"
 #include "include/cef_request_handler.h"
@@ -582,6 +583,226 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
   IMPLEMENT_REFCOUNTING(HelperContextMenuHandler);
 };
 
+/* ------------------------------------------------------------------ *
+ * Permission prompts                                                  *
+ * ------------------------------------------------------------------ *
+ *
+ * Measured against real Chromium (docs/permission-prompt.md): getUserMedia
+ * arrives as OnRequestMediaAccessPermission, and geolocation, clipboard-read,
+ * midi-sysex and notifications arrive as OnShowPermissionPrompt. The two kinds
+ * run on queues of their own — a held media ask does not stop a prompt from
+ * arriving — and each holds exactly one request: a second media ask is not
+ * delivered until the first is answered, and the second prompt replaces the
+ * first, which Chromium dismisses as "ignore" a moment before the new one shows.
+ * A prompt the host sits on also costs the page the ask made right after it,
+ * which reaches neither handler. What never reaches this process at all is
+ * navigator.storage.persist(), permissions.query() and idle detection, so there
+ * is no host that could be asked about those.
+ *
+ * What an unanswered ask costs the page is the reason nothing is left lying: with
+ * Alloy style there is no UI to answer it with, and the page's promise simply
+ * stays pending. So every request goes out as permission-request and comes back
+ * as permission-respond, and the session answers one the host does not take with
+ * a deny — which is both what a page sees today and the only answer that unblocks
+ * it. */
+
+struct PermissionRequest {
+  bool is_media = false;
+  CefRefPtr<CefMediaAccessCallback> media_callback;
+  CefRefPtr<CefPermissionPromptCallback> prompt_callback;
+  // Continue() has to be handed exactly the mask CEF asked for, so it is kept.
+  uint32_t required = 0;
+  // CEF's own id for a prompt, kept only to recognise its dismiss callback.
+  uint64_t prompt_id = 0;
+};
+
+std::map<uint32_t, PermissionRequest> g_permissions;  // wire id, UI thread only
+uint32_t g_permission_seq = 0;
+std::map<uint64_t, uint32_t> g_prompt_wire;  // CEF's prompt id -> the wire id
+
+const struct {
+  uint32_t bit;
+  const char* name;
+} kPermissionTypes[] = {
+    {CEF_PERMISSION_TYPE_AR_SESSION, "ar-session"},
+    {CEF_PERMISSION_TYPE_CAMERA_PAN_TILT_ZOOM, "camera-pan-tilt-zoom"},
+    {CEF_PERMISSION_TYPE_CAMERA_STREAM, "camera-stream"},
+    {CEF_PERMISSION_TYPE_CAPTURED_SURFACE_CONTROL, "captured-surface-control"},
+    {CEF_PERMISSION_TYPE_CLIPBOARD, "clipboard"},
+    {CEF_PERMISSION_TYPE_TOP_LEVEL_STORAGE_ACCESS, "top-level-storage-access"},
+    {CEF_PERMISSION_TYPE_DISK_QUOTA, "disk-quota"},
+    {CEF_PERMISSION_TYPE_LOCAL_FONTS, "local-fonts"},
+    {CEF_PERMISSION_TYPE_GEOLOCATION, "geolocation"},
+    {CEF_PERMISSION_TYPE_HAND_TRACKING, "hand-tracking"},
+    {CEF_PERMISSION_TYPE_IDENTITY_PROVIDER, "identity-provider"},
+    {CEF_PERMISSION_TYPE_IDLE_DETECTION, "idle-detection"},
+    {CEF_PERMISSION_TYPE_MIC_STREAM, "mic-stream"},
+    {CEF_PERMISSION_TYPE_MIDI_SYSEX, "midi-sysex"},
+    {CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS, "multiple-downloads"},
+    {CEF_PERMISSION_TYPE_NOTIFICATIONS, "notifications"},
+    {CEF_PERMISSION_TYPE_KEYBOARD_LOCK, "keyboard-lock"},
+    {CEF_PERMISSION_TYPE_POINTER_LOCK, "pointer-lock"},
+    {CEF_PERMISSION_TYPE_PROTECTED_MEDIA_IDENTIFIER, "protected-media"},
+    {CEF_PERMISSION_TYPE_REGISTER_PROTOCOL_HANDLER, "protocol-handler"},
+    {CEF_PERMISSION_TYPE_STORAGE_ACCESS, "storage-access"},
+    {CEF_PERMISSION_TYPE_VR_SESSION, "vr-session"},
+    {CEF_PERMISSION_TYPE_WEB_APP_INSTALLATION, "web-app-installation"},
+    {CEF_PERMISSION_TYPE_WINDOW_MANAGEMENT, "window-management"},
+    {CEF_PERMISSION_TYPE_FILE_SYSTEM_ACCESS, "file-system-access"},
+    {CEF_PERMISSION_TYPE_LOCAL_NETWORK, "local-network"},
+    {CEF_PERMISSION_TYPE_LOOPBACK_NETWORK, "loopback-network"},
+    {CEF_PERMISSION_TYPE_SENSORS, "sensors"},
+};
+
+std::vector<std::string> PermissionTypeNames(uint32_t types) {
+  std::vector<std::string> names;
+  for (const auto& entry : kPermissionTypes) {
+    if (types & entry.bit)
+      names.push_back(entry.name);
+  }
+  return names;
+}
+
+std::vector<std::string> MediaPermissionNames(uint32_t permissions) {
+  std::vector<std::string> names;
+  if (permissions & CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE)
+    names.push_back("device-audio");
+  if (permissions & CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE)
+    names.push_back("device-video");
+  if (permissions & CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE)
+    names.push_back("desktop-audio");
+  if (permissions & CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE)
+    names.push_back("desktop-video");
+  return names;
+}
+
+std::string JoinNames(const std::vector<std::string>& names) {
+  std::string out;
+  for (const auto& name : names) {
+    if (!out.empty())
+      out += "+";
+    out += name;
+  }
+  return out.empty() ? "none" : out;
+}
+
+CefRefPtr<CefListValue> NameList(const std::vector<std::string>& names) {
+  CefRefPtr<CefListValue> list = CefListValue::Create();
+  for (size_t i = 0; i < names.size(); ++i)
+    list->SetString(i, names[i]);
+  return list;
+}
+
+void EmitPermissionRequest(uint32_t id,
+                           bool is_media,
+                           const std::string& origin,
+                           uint32_t mask) {
+  const std::vector<std::string> names =
+      is_media ? MediaPermissionNames(mask) : PermissionTypeNames(mask);
+
+  CefRefPtr<CefDictionaryValue> dict = NewEvent("permission-request");
+  dict->SetInt("id", id);
+  dict->SetString("kind", is_media ? "media" : "prompt");
+  dict->SetString("origin", origin);
+  dict->SetList("permissions", NameList(names));
+  // The mask too: a name list is for a human, and a host that wants to match on
+  // "exactly these bits" should not have to re-derive them from the names.
+  dict->SetInt("raw", static_cast<int>(mask));
+  Emit(dict);
+
+  fprintf(stderr, "helper: permission %u %s from %s wants %s\n", id,
+          is_media ? "media" : "prompt", origin.c_str(),
+          JoinNames(names).c_str());
+}
+
+const char* PermissionResultName(cef_permission_request_result_t result) {
+  switch (result) {
+    case CEF_PERMISSION_RESULT_ACCEPT:
+      return "accept";
+    case CEF_PERMISSION_RESULT_DENY:
+      return "deny";
+    case CEF_PERMISSION_RESULT_DISMISS:
+      return "dismiss";
+    case CEF_PERMISSION_RESULT_IGNORE:
+      return "ignore";
+    default:
+      return "unknown";
+  }
+}
+
+class HelperPermissionHandler : public CefPermissionHandler {
+ public:
+  bool OnRequestMediaAccessPermission(
+      CefRefPtr<CefBrowser> browser,
+      CefRefPtr<CefFrame> frame,
+      const CefString& requesting_origin,
+      uint32_t requested_permissions,
+      CefRefPtr<CefMediaAccessCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    const uint32_t id = ++g_permission_seq;
+    PermissionRequest& entry = g_permissions[id];
+    entry.is_media = true;
+    entry.media_callback = callback;
+    entry.required = requested_permissions;
+
+    EmitPermissionRequest(id, true, requesting_origin.ToString(),
+                          requested_permissions);
+
+    // True: this helper draws nothing and the host owes the answer. Default
+    // handling here is a denial the page cannot be told about.
+    return true;
+  }
+
+  bool OnShowPermissionPrompt(CefRefPtr<CefBrowser> browser,
+                              uint64_t prompt_id,
+                              const CefString& requesting_origin,
+                              uint32_t requested_permissions,
+                              CefRefPtr<CefPermissionPromptCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    const uint32_t id = ++g_permission_seq;
+    PermissionRequest& entry = g_permissions[id];
+    entry.prompt_callback = callback;
+    entry.prompt_id = prompt_id;
+    g_prompt_wire[prompt_id] = id;
+
+    EmitPermissionRequest(id, false, requesting_origin.ToString(),
+                          requested_permissions);
+    return true;
+  }
+
+  void OnDismissPermissionPrompt(CefRefPtr<CefBrowser> browser,
+                                 uint64_t prompt_id,
+                                 cef_permission_request_result_t result) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    // Only a request this helper still holds can be dismissed under it. Once the
+    // host has answered, CEF runs the same callback on the way out and the host
+    // already knows what it said.
+    auto wire = g_prompt_wire.find(prompt_id);
+    if (wire == g_prompt_wire.end())
+      return;
+    g_prompt_wire.erase(wire);
+
+    auto held = g_permissions.find(wire->second);
+    if (held == g_permissions.end())
+      return;
+    const uint32_t id = held->first;
+    g_permissions.erase(held);
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("permission-dismissed");
+    dict->SetInt("id", id);
+    dict->SetString("result", PermissionResultName(result));
+    Emit(dict);
+
+    fprintf(stderr, "helper: permission %u dismissed as %s\n", id,
+            PermissionResultName(result));
+  }
+
+  IMPLEMENT_REFCOUNTING(HelperPermissionHandler);
+};
+
 
 // ExecuteJavaScript has no return value, so the code is wrapped: the page
 // evaluates it, turns the result into JSON itself, and hands that one text to
@@ -849,6 +1070,43 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
+  if (name == "permission-respond") {
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    const std::string result = command->GetString("result").ToString();
+
+    auto it = g_permissions.find(id);
+    if (it == g_permissions.end()) {
+      EmitStatus("no-permission-request");
+      return;
+    }
+
+    // Drop the slot before answering: the dismiss callback CEF runs on the way
+    // out has to find nothing held, which is how it knows the host already spoke.
+    PermissionRequest entry = std::move(it->second);
+    g_permissions.erase(it);
+    if (entry.prompt_id)
+      g_prompt_wire.erase(entry.prompt_id);
+
+    // Anything that is not accept or dismiss is a deny — the safe reading of a
+    // word this side does not know. Media access has no third answer: Cancel()
+    // closes a dismissed ask the same way it closes a refused one.
+    if (entry.is_media && entry.media_callback) {
+      if (result == "accept")
+        entry.media_callback->Continue(entry.required);
+      else
+        entry.media_callback->Cancel();
+    } else if (entry.prompt_callback) {
+      entry.prompt_callback->Continue(result == "accept"
+                                          ? CEF_PERMISSION_RESULT_ACCEPT
+                                      : result == "dismiss"
+                                          ? CEF_PERMISSION_RESULT_DISMISS
+                                          : CEF_PERMISSION_RESULT_DENY);
+    }
+
+    fprintf(stderr, "helper: permission %u answered %s\n", id, result.c_str());
+    return;
+  }
+
   if (name == "js") {
     const std::string code = command->GetString("code").ToString();
     if (code.empty()) {
@@ -995,6 +1253,9 @@ class HelperClient : public CefClient,
   CefRefPtr<CefFindHandler> GetFindHandler() override { return find_handler_; }
   CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override {
     return context_menu_handler_;
+  }
+  CefRefPtr<CefPermissionHandler> GetPermissionHandler() override {
+    return permission_handler_;
   }
 
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
@@ -1169,6 +1430,8 @@ class HelperClient : public CefClient,
   CefRefPtr<CefFindHandler> find_handler_{new HelperFindHandler};
   CefRefPtr<CefContextMenuHandler> context_menu_handler_{
       new HelperContextMenuHandler};
+  CefRefPtr<CefPermissionHandler> permission_handler_{
+      new HelperPermissionHandler};
 };
 
 class HelperBrowserViewDelegate : public CefBrowserViewDelegate {

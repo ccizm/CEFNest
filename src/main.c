@@ -24,6 +24,7 @@ typedef struct {
   GtkWidget *back;
   GtkWidget *forward;
   GtkWidget *downloads;
+  GtkWidget *permissions;
   GtkWidget *find_bar;
   GtkWidget *find_entry;
   GtkWidget *find_case;
@@ -35,6 +36,8 @@ static Demo demo;
 #ifndef CLIENT_PATH
 #define CLIENT_PATH "shm-client"
 #endif
+
+static void session_ready (ChromiumSession *session, gpointer data);
 
 static void
 update_title (void)
@@ -741,6 +744,252 @@ build_find_bar (GtkBox *box)
   gtk_box_prepend (box, demo.find_bar);
 }
 
+/* ------------------------------------------------------------------ *
+ * Permissions                                                        *
+ * ------------------------------------------------------------------ *
+ *
+ * ::permission-request is a question the page is waiting on, and the session
+ * never leaves one unanswered: the host decides it if it takes the signal, and
+ * denies it if it does not. This panel is the half that asks a human, and
+ * CEFNEST_PERMISSION says how. "ask" (the default) leaves a row up until 允许 or
+ * 拒绝 is pressed, or until a perm-accept / perm-deny / perm-dismiss step presses
+ * it for the pointer; "deny" and "allow" answer on arrival and keep the row only
+ * as the record of what was decided; "ignore" hands the question back, which is
+ * what a host with no permission UI does — and what the session then answers with
+ * a deny.
+ *
+ * Asking is both the honest default and the dangerous one: Chromium works
+ * through one media request at a time, and the next prompt dismisses the prompt
+ * before it. A row left up is therefore not a page waiting politely — it is the
+ * page's later requests arriving as "already gone". The panel says so in the
+ * same line the gate asserts on. */
+
+typedef struct {
+  int id;
+  gboolean decided;
+  GtkWidget *info;
+  GtkWidget *allow;
+  GtkWidget *deny;
+} PermissionRow;
+
+static const char *
+permission_policy (void)
+{
+  const char *env = g_getenv ("CEFNEST_PERMISSION");
+
+  if (env && !strcmp (env, "deny"))
+    return "deny";
+  if (env && !strcmp (env, "allow"))
+    return "allow";
+  /* Declining to take the question at all is the one policy that belongs to the
+   * session, not to this panel: it is what a host with no UI does. */
+  if (env && !strcmp (env, "ignore"))
+    return "ignore";
+  return "ask";
+}
+
+static const char *
+permission_verdict_name (ChromiumPermissionResult result)
+{
+  switch (result)
+    {
+    case CHROMIUM_PERMISSION_ACCEPT:
+      return "accept";
+    case CHROMIUM_PERMISSION_DISMISS:
+      return "dismiss";
+    default:
+      return "deny";
+    }
+}
+
+static const char *
+permission_verdict_text (ChromiumPermissionResult result)
+{
+  switch (result)
+    {
+    case CHROMIUM_PERMISSION_ACCEPT:
+      return "已允许";
+    case CHROMIUM_PERMISSION_DISMISS:
+      return "已收起";
+    default:
+      return "已拒绝";
+    }
+}
+
+static PermissionRow *
+permission_row_for (int id)
+{
+  GtkWidget *child;
+
+  for (child = demo.permissions ? gtk_widget_get_first_child (demo.permissions) : NULL;
+       child; child = gtk_widget_get_next_sibling (child))
+    {
+      PermissionRow *row = g_object_get_data (G_OBJECT (child), "cefnest-permission");
+
+      if (row && row->id == id)
+        return row;
+    }
+  return NULL;
+}
+
+static void
+permission_answer (PermissionRow *row, ChromiumPermissionResult result)
+{
+  if (!row || row->decided)
+    return;
+
+  row->decided = TRUE;
+  gtk_widget_set_visible (row->allow, FALSE);
+  gtk_widget_set_visible (row->deny, FALSE);
+  gtk_label_set_text (GTK_LABEL (row->info), permission_verdict_text (result));
+
+  chromium_session_permission_respond (demo.session, row->id, result);
+  g_printerr ("demo: permission %d %s\n", row->id, permission_verdict_name (result));
+}
+
+static void
+permission_allow_clicked (GtkButton *button, gpointer data)
+{
+  permission_answer ((PermissionRow *) data, CHROMIUM_PERMISSION_ACCEPT);
+}
+
+static void
+permission_deny_clicked (GtkButton *button, gpointer data)
+{
+  permission_answer ((PermissionRow *) data, CHROMIUM_PERMISSION_DENY);
+}
+
+/* True when the step named a row this side is holding, so a scripted run cannot
+ * answer the same request twice by accident. */
+static gboolean
+permission_step (const char *line, const char *verb, ChromiumPermissionResult result)
+{
+  gsize n = strlen (verb);
+  PermissionRow *row;
+  int id = 0;
+
+  if (strncmp (line + 5, verb, n) != 0 || line[5 + n] != ' ')
+    return FALSE;
+
+  if (1 != sscanf (line + 5 + n + 1, "%d", &id))
+    {
+      g_warning ("demo: perm-%s wants a permission id, got '%s'", verb, line);
+      return TRUE;
+    }
+
+  row = permission_row_for (id);
+  if (!row)
+    g_warning ("demo: no permission row %d to answer", id);
+  else if (row->decided)
+    /* The row that has already answered — or that Chromium took back — is the one
+     * a step must not send a second answer for. The session guards this too, but
+     * a host with a panel is the one that knows the row is dead. */
+    g_warning ("demo: permission %d was already answered", id);
+  else
+    permission_answer (row, result);
+
+  return TRUE;
+}
+
+static gboolean
+session_permission_request (ChromiumSession *session, int id, const char *kind,
+                            const char *origin, GList *names, int raw, gpointer data)
+{
+  GtkWidget *row_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  GtkWidget *info = gtk_label_new ("");
+  GtkWidget *allow = gtk_button_new_with_label ("允许");
+  GtkWidget *deny = gtk_button_new_with_label ("拒绝");
+  g_autoptr (GString) joined = g_string_new ("");
+  g_autofree char *text = NULL;
+  PermissionRow *row = g_new0 (PermissionRow, 1);
+  const char *policy = permission_policy ();
+  GList *l;
+
+  for (l = names; l; l = l->next)
+    {
+      if (joined->len)
+        g_string_append_c (joined, '+');
+      g_string_append (joined, (const char *) l->data);
+    }
+
+  /* The id is what a script step answers by, and the names what it asserts on,
+   * so both are on this line even when the panel is not on screen. */
+  g_printerr ("demo: permission %d kind=%s names=%s raw=%d origin=%s policy=%s\n",
+              id, kind, joined->str, raw, origin, policy);
+
+  if (!strcmp (policy, "ignore"))
+    return FALSE;
+
+  row->id = id;
+  row->info = info;
+  row->allow = allow;
+  row->deny = deny;
+
+  text = g_strdup_printf ("%s · %s · %s", kind, joined->str, origin);
+  gtk_label_set_text (GTK_LABEL (info), text);
+  gtk_label_set_xalign (GTK_LABEL (info), 0.0);
+  gtk_label_set_ellipsize (GTK_LABEL (info), PANGO_ELLIPSIZE_MIDDLE);
+  gtk_widget_set_hexpand (info, TRUE);
+  gtk_widget_set_tooltip_text (allow, "允许这个来源的这次请求 / Grant this request");
+  gtk_widget_set_tooltip_text (deny, "拒绝 / Deny it");
+  g_signal_connect (allow, "clicked", G_CALLBACK (permission_allow_clicked), row);
+  g_signal_connect (deny, "clicked", G_CALLBACK (permission_deny_clicked), row);
+
+  gtk_box_append (GTK_BOX (row_box), info);
+  gtk_box_append (GTK_BOX (row_box), allow);
+  gtk_box_append (GTK_BOX (row_box), deny);
+  g_object_set_data_full (G_OBJECT (row_box), "cefnest-permission", row, g_free);
+
+  gtk_widget_set_visible (demo.permissions, TRUE);
+  gtk_box_append (GTK_BOX (demo.permissions), row_box);
+
+  if (strcmp (policy, "ask") != 0)
+    permission_answer (row, strcmp (policy, "allow") == 0
+                             ? CHROMIUM_PERMISSION_ACCEPT
+                             : CHROMIUM_PERMISSION_DENY);
+
+  /* Taking the signal is taking the question: from here the answer is this
+   * panel's to give, and the session will not second-guess it. */
+  return TRUE;
+}
+
+static void
+session_permission_dismissed (ChromiumSession *session, int id, const char *result,
+                              gpointer data)
+{
+  PermissionRow *row = permission_row_for (id);
+
+  g_printerr ("demo: permission %d dismissed as %s\n", id, result);
+
+  if (!row || row->decided)
+    return;
+
+  /* Nothing to answer any more — the button that would have answered it is the
+   * one thing that must not stay on screen. */
+  row->decided = TRUE;
+  gtk_widget_set_visible (row->allow, FALSE);
+  gtk_widget_set_visible (row->deny, FALSE);
+  gtk_label_set_text (GTK_LABEL (row->info), "页面已经不再等这个答案");
+}
+
+static void
+build_permission_panel (GtkBox *box)
+{
+  demo.permissions = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
+
+  /* Which policy is in force is a fact a scripted run has to be able to check
+   * without reading the source, so it says it once here. */
+  g_printerr ("demo: permissions: policy=%s\n", permission_policy ());
+
+  gtk_widget_set_margin_start (demo.permissions, 8);
+  gtk_widget_set_margin_end (demo.permissions, 8);
+  gtk_widget_set_margin_top (demo.permissions, 4);
+  gtk_widget_set_margin_bottom (demo.permissions, 4);
+  /* Nothing to say until a page asks for something. */
+  gtk_widget_set_visible (demo.permissions, FALSE);
+  gtk_box_append (box, demo.permissions);
+}
+
 static void
 session_closed (ChromiumSession *session, gpointer data)
 {
@@ -833,6 +1082,7 @@ build_toolbar (GtkHeaderBar *header)
 
   demo.session = chromium_session_new (NULL);
   chromium_session_set_view (demo.session, demo.view);
+  g_signal_connect (demo.session, "ready", G_CALLBACK (session_ready), NULL);
   g_signal_connect (demo.session, "changed", G_CALLBACK (session_changed), NULL);
   g_signal_connect (demo.session, "load-end", G_CALLBACK (session_load_end), NULL);
   g_signal_connect (demo.session, "load-error",
@@ -851,6 +1101,10 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_find_result), NULL);
   g_signal_connect (demo.session, "context-menu",
                     G_CALLBACK (session_context_menu), NULL);
+  g_signal_connect (demo.session, "permission-request",
+                    G_CALLBACK (session_permission_request), NULL);
+  g_signal_connect (demo.session, "permission-dismissed",
+                    G_CALLBACK (session_permission_dismissed), NULL);
   g_signal_connect (demo.session, "closed", G_CALLBACK (session_closed), NULL);
 
   if (!chromium_session_start (demo.session, initial_url (), &error))
@@ -975,6 +1229,7 @@ dump_view (gpointer data)
  * "wheel <dx> <dy>", "mute", "unmute", "download-accept <path>",
  * "download-reject", "find <pattern>", "find-case <pattern>", "find-next",
  * "find-prev", "find-stop", "menu-pick <id>", "menu-dismiss",
+ * "perm-accept <id>", "perm-deny <id>", "perm-dismiss <id>",
  * "close", "quit". This is how a headless run proves navigation, history and
  * repaint all work together, and "close" is
  * how it proves the way out of the window stops the helper with it. A "js" step
@@ -1248,6 +1503,27 @@ script_run_next (void)
           g_printerr ("demo: menu dismiss\n");
           continue;
         }
+      else if (!strncmp (line, "perm-", 5))
+        {
+          /* The id from the "demo: permission" lines, standing in for whichever
+           * button the panel would have put under a finger. */
+          static const struct {
+            const char *verb;
+            ChromiumPermissionResult result;
+          } verdicts[] = {
+            { "accept",  CHROMIUM_PERMISSION_ACCEPT },
+            { "deny",    CHROMIUM_PERMISSION_DENY },
+            { "dismiss", CHROMIUM_PERMISSION_DISMISS },
+          };
+          gsize i;
+
+          for (i = 0; i < G_N_ELEMENTS (verdicts); i++)
+            if (permission_step (line, verdicts[i].verb, verdicts[i].result))
+              break;
+          if (i == G_N_ELEMENTS (verdicts))
+            g_warning ("demo: not a permission verdict: '%s'", line);
+          continue;
+        }
       else if (!strncmp (line, "hover ", 6))
         {
           int x = 0, y = 0;
@@ -1478,8 +1754,22 @@ start_session_script (void)
       return;
     }
 
-  /* Give the helper time to report ready before the first command lands. */
-  g_timeout_add (800, script_wait_done, NULL);
+  /* A script that drives a helper page waits for the helper itself: without
+   * CHROMIUM_HELPER there is no session to report ready, so the plain client
+   * path keeps a fixed guess. */
+  if (!demo.session)
+    g_timeout_add (800, script_wait_done, NULL);
+}
+
+/* The first command of a session script lands here rather than on a timer. A
+ * cold Chromium profile takes seconds to come up, and a load sent before the
+ * channel is open is simply lost — the script then waits for a page that was
+ * never asked for. */
+static void
+session_ready (ChromiumSession *session, gpointer data)
+{
+  if (session_script.steps && session_script.index == 0)
+    g_idle_add (script_wait_done, NULL);
 }
 
 static void
@@ -1665,6 +1955,7 @@ activate (GApplication *application, gpointer data)
        * buttons need more room than a toolbar has. */
       build_find_bar (GTK_BOX (box));
       build_download_panel (GTK_BOX (box));
+      build_permission_panel (GTK_BOX (box));
       build_toolbar (GTK_HEADER_BAR (header));
 
       /* Ctrl+F belongs to the window, not to the page: the widget forwards

@@ -1,0 +1,136 @@
+<!doctype html>
+<!-- permission-page.html is the fixture for permission prompts. Every ask is a
+     button at a fixed, known position, because a permission request only counts
+     as a request when the browser sees a user gesture behind it — a scripted
+     window.ask() called from the control channel has no activation, and its
+     outcome would measure the gesture rule instead of the permission rule.
+     Buttons are centred at (left + 150, top + 22), and the tops are the
+     multiples of 60 in the style attributes below, because a gate clicks
+     coordinates rather than ids.
+     An ask that has not settled is reported as "what:pending" rather than left
+     out: a promise that rejects and a promise nobody ever answers look the same
+     to a log that only records outcomes, and the second one is the interesting
+     case for a host that has to answer. -->
+<html>
+<head><title>PERM-PAGE</title></head>
+<body style="margin:0;font:16px sans-serif;background:#fff;color:#036">
+<button id="audio"   style="position:fixed;left:20px;top:20px;width:300px;height:44px">ask microphone</button>
+<button id="video"   style="position:fixed;left:20px;top:80px;width:300px;height:44px">ask camera</button>
+<button id="both"    style="position:fixed;left:20px;top:140px;width:300px;height:44px">ask mic and camera</button>
+<button id="geo"     style="position:fixed;left:20px;top:200px;width:300px;height:44px">ask geolocation</button>
+<button id="notify"  style="position:fixed;left:20px;top:260px;width:300px;height:44px">ask notifications</button>
+<button id="clip"    style="position:fixed;left:20px;top:320px;width:300px;height:44px">ask clipboard read</button>
+<button id="persist" style="position:fixed;left:20px;top:380px;width:300px;height:44px">ask persistent storage</button>
+<button id="query"   style="position:fixed;left:20px;top:440px;width:300px;height:44px">ask permissions.query</button>
+<button id="midi"    style="position:fixed;left:340px;top:20px;width:300px;height:44px">ask midi sysex</button>
+<button id="idle"    style="position:fixed;left:340px;top:80px;width:300px;height:44px">ask idle detection</button>
+
+<pre id="log" style="position:fixed;left:20px;bottom:20px;width:820px;height:90px;margin:0;pointer-events:none;overflow:hidden"></pre>
+<script>
+  /* ask name -> the outcome text, or "pending" until a promise settles. */
+  window.permOut = {};
+  window.permOrder = [];
+
+  function draw() {
+    var lines = window.permOrder.map(function (name) {
+      return name + ':' + window.permOut[name];
+    });
+    document.getElementById('log').textContent = lines.join(' | ');
+    document.title = 'PERM-' + window.permOrder.length;
+  }
+
+  /* One recorder for three shapes of answer: a settled promise, a callback, or
+   * a synchronous return. The value read out is the *name* of the outcome,
+   * because what a host decides on is which permission went which way. */
+  function record(name, promise) {
+    window.permOrder.push(name);
+    window.permOut[name] = 'pending';
+    draw();
+    promise.then(function (value) {
+      window.permOut[name] = describe(value);
+      draw();
+    }, function (error) {
+      window.permOut[name] = describe(error);
+      draw();
+    });
+  }
+
+  function describe(value) {
+    if (value === undefined)
+      return 'undefined';
+    if (value === null)
+      return 'null';
+    if (typeof value === 'object') {
+      /* PermissionStatus carries both name and state, and a recorder that
+       * prefers name measured the permission instead of its state — so state
+       * comes first here and name is the fallback. */
+      if (value.state)
+        return value.state;
+      if (value.name)
+        return value.name;
+      if (value.code !== undefined)
+        return 'code' + value.code;
+      if (value.toString && value.toString() !== '[object Object]')
+        return value.toString();
+      return 'object';
+    }
+    return String(value);
+  }
+
+  window.context = function () {
+    return 'secure=' + window.isSecureContext + ' origin=' + location.origin +
+           ' focus=' + document.hasFocus() + ' vis=' + document.visibilityState;
+  };
+
+  /* Everything the page knows, as one line a gate can read back with "js". */
+  window.outcome = function () {
+    return window.context() + '||' + (window.permOrder.map(function (name) {
+      return name + ':' + window.permOut[name];
+    }).join('|') || 'none');
+  };
+
+  function media(constraints) {
+    return navigator.mediaDevices.getUserMedia(constraints);
+  }
+
+  document.getElementById('audio').addEventListener('click', function () {
+    record('audio', media({ audio: true }));
+  });
+  document.getElementById('video').addEventListener('click', function () {
+    record('video', media({ video: true }));
+  });
+  document.getElementById('both').addEventListener('click', function () {
+    /* Both at once is the shape whose answer has to match the ask: the header
+     * says allowed_permissions must equal required_permissions here. */
+    record('both', media({ audio: true, video: true }));
+  });
+  document.getElementById('geo').addEventListener('click', function () {
+    record('geo', new Promise(function (resolve, reject) {
+      navigator.geolocation.getCurrentPosition(
+        function () { resolve('position'); },
+        function (error) { reject(error); },
+        { timeout: 5000 });
+    }));
+  });
+  document.getElementById('notify').addEventListener('click', function () {
+    record('notify', Notification.requestPermission());
+  });
+  document.getElementById('clip').addEventListener('click', function () {
+    record('clipboard', navigator.clipboard.readText());
+  });
+  document.getElementById('persist').addEventListener('click', function () {
+    record('persist', navigator.storage.persist());
+  });
+  document.getElementById('query').addEventListener('click', function () {
+    record('query-camera', navigator.permissions.query({ name: 'camera' }));
+  });
+  document.getElementById('midi').addEventListener('click', function () {
+    record('midi', navigator.requestMIDIAccess({ sysex: true }));
+  });
+  document.getElementById('idle').addEventListener('click', function () {
+    record('idle', navigator.idle ? navigator.idle.query()
+                                  : Promise.reject({ name: 'no-idle-api' }));
+  });
+</script>
+</body>
+</html>

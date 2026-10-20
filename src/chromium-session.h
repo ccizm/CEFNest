@@ -138,6 +138,37 @@ void               chromium_session_context_menu_select (ChromiumSession *self,
                                                    int id);
 void               chromium_session_context_menu_dismiss (ChromiumSession *self);
 
+/* Permission requests. A page's ask for a microphone, a location or the clipboard
+ * is a question CEF lets only the host answer, and leaving it unanswered costs
+ * more than silence: the page's promise stays pending, and a second media ask
+ * never arrives until the first is answered (docs/permission-prompt.md has the
+ * measurements).
+ *
+ * ::permission-request (id, kind, origin, permissions) arrives first. @kind is
+ * "media" for a getUserMedia ask and "prompt" for one of Chromium's permission
+ * prompts, and @permissions is a GList of owned-by-the-session name strings
+ * ("device-audio", "geolocation", "clipboard", "midi-sysex", …) — @raw is the
+ * mask CEF was asked about, for a host that would rather match bits than names.
+ *
+ * A handler that shows its own prompt returns TRUE and owns the answer, exactly
+ * as for ::context-menu, and chromium_session_permission_respond () is how it
+ * sends it. Returning FALSE — or connecting nothing — gets a deny from the
+ * session, which is what a page with no host at all sees today.
+ *
+ * A prompt still held when the page asks for the next permission is dismissed
+ * under the host's feet: ::permission-dismissed (id, result) says so, with @result
+ * "ignore" for that case, and answering an id this side no longer holds does
+ * nothing. Media asks have no dismiss callback at all. */
+typedef enum {
+  CHROMIUM_PERMISSION_ACCEPT,
+  CHROMIUM_PERMISSION_DENY,
+  CHROMIUM_PERMISSION_DISMISS
+} ChromiumPermissionResult;
+
+void               chromium_session_permission_respond (ChromiumSession *self,
+                                                   int id,
+                                                   ChromiumPermissionResult result);
+
 const char        *chromium_session_get_helper_path (ChromiumSession *self);
 const char        *chromium_session_get_uri         (ChromiumSession *self);
 const char        *chromium_session_get_title       (ChromiumSession *self);

@@ -30,6 +30,8 @@ enum {
   SIG_DOWNLOAD_END,
   SIG_FIND_RESULT,
   SIG_CONTEXT_MENU,
+  SIG_PERMISSION_REQUEST,
+  SIG_PERMISSION_DISMISSED,
   SIG_CLOSED,
   N_SIGNALS
 };
@@ -40,6 +42,8 @@ static void chromium_session_finalize (GObject *object);
 
 static void handle_context_menu         (ChromiumSession *self, JsonObject *object);
 static void handle_context_menu_dismissed (ChromiumSession *self);
+static void handle_permission_request   (ChromiumSession *self, JsonObject *object);
+static void handle_permission_dismissed (ChromiumSession *self, JsonObject *object);
 
 struct _ChromiumSession {
   GObject parent_instance;
@@ -72,6 +76,11 @@ struct _ChromiumSession {
   GtkWidget *menu_popover;
   GSimpleActionGroup *menu_actions;
   guint menu_release_source;
+
+  /* Permission requests this side has asked about and not yet answered. Unlike a
+   * menu, several are open at once, so it is a set of ids rather than a flag —
+   * and an id leaves the set as soon as the helper dismisses it under the host. */
+  GHashTable *permission_held;
 };
 
 G_DEFINE_TYPE (ChromiumSession, chromium_session, G_TYPE_OBJECT)
@@ -383,6 +392,23 @@ handle_event (ChromiumSession *self, const char *line)
       return;
     }
 
+  if (!strcmp (event, "permission-request"))
+    {
+      /* A question the page is waiting on: an unanswered ask leaves the promise
+       * pending forever, so this side always answers it — the host if it takes
+       * the signal, a deny if it does not. */
+      handle_permission_request (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "permission-dismissed"))
+    {
+      /* Chromium closed a prompt this side still held. Nothing to answer any
+       * more, and the host has to hear that its own prompt is now dead. */
+      handle_permission_dismissed (self, object);
+      return;
+    }
+
   if (!strcmp (event, "status"))
     {
       g_message ("session: helper status: %s",
@@ -457,6 +483,10 @@ attach_connection (ChromiumSession *self, GSocketConnection *connection)
   self->connection = g_object_ref (connection);
   self->output = g_object_ref (g_io_stream_get_output_stream (G_IO_STREAM (connection)));
   self->input = g_data_input_stream_new (g_io_stream_get_input_stream (G_IO_STREAM (connection)));
+
+  /* The helper numbers its permission requests from one again, so an id left over
+   * from a previous helper would answer a different request than it belongs to. */
+  g_hash_table_remove_all (self->permission_held);
 
   g_data_input_stream_read_line_async (self->input, G_PRIORITY_DEFAULT,
                                        self->cancellable, read_line_done,
@@ -939,6 +969,128 @@ chromium_session_context_menu_dismiss (ChromiumSession *self)
     gtk_popover_popdown (GTK_POPOVER (self->menu_popover));
   else
     menu_release (self);
+}
+
+/* ------------------------------------------------------------------------ *
+ * Permissions
+ *
+ * A page's ask for a microphone, a location or the clipboard is a question CEF
+ * only lets the host answer, and — unlike a download or a search — the page is
+ * standing on the answer. Measured against real Chromium (docs/permission-prompt.md):
+ * an unanswered media ask leaves getUserMedia pending *and* stops the next ask
+ * from ever arriving, and a prompt left held is dismissed with "ignore" the
+ * moment the page asks for anything else. So this side always answers: the host's
+ * decision when it takes the signal, and a deny when it does not, which is what a
+ * page with no host at all sees today.
+ * ------------------------------------------------------------------------ */
+
+static const char *
+permission_result_name (ChromiumPermissionResult result)
+{
+  switch (result)
+    {
+    case CHROMIUM_PERMISSION_ACCEPT:
+      return "accept";
+    case CHROMIUM_PERMISSION_DISMISS:
+      return "dismiss";
+    default:
+      return "deny";
+    }
+}
+
+static void
+permission_respond_send (ChromiumSession *self, int id, ChromiumPermissionResult result)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "permission-respond");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  command_add_string (builder, "result", permission_result_name (result));
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+static void
+handle_permission_request (ChromiumSession *self, JsonObject *object)
+{
+  gboolean handled = FALSE;
+  GList *names = NULL;
+  int id;
+  int raw = 0;
+  const char *kind;
+  const char *origin;
+  gsize i;
+
+  id = (int) json_object_get_int_member (object, "id");
+  kind = event_string (object, "kind");
+  origin = event_string (object, "origin");
+  if (json_object_has_member (object, "raw"))
+    raw = (int) json_object_get_int_member (object, "raw");
+
+  if (json_object_has_member (object, "permissions") &&
+      json_node_get_node_type (json_object_get_member (object, "permissions")) == JSON_NODE_ARRAY)
+    {
+      JsonArray *array = json_object_get_array_member (object, "permissions");
+
+      for (i = 0; i < json_array_get_length (array); i++)
+        names = g_list_append (names,
+                               g_strdup (json_array_get_string_element (array, i)));
+    }
+
+  /* Held before the emission rather than after: a host that answers from inside
+   * the signal has to find the id still there, and one that never answers has to
+   * leave an id this side can still deny. */
+  g_hash_table_add (self->permission_held, GINT_TO_POINTER (id));
+
+  g_signal_emit (self, signals[SIG_PERMISSION_REQUEST], 0,
+                 id, kind, origin, names, raw, &handled);
+
+  g_debug ("session: permission %d (%s) from %s with %u names, host took it: %d",
+           id, kind, origin, g_list_length (names), handled);
+
+  g_list_free_full (names, g_free);
+
+  if (!handled)
+    {
+      permission_respond_send (self, id, CHROMIUM_PERMISSION_DENY);
+      g_hash_table_remove (self->permission_held, GINT_TO_POINTER (id));
+    }
+}
+
+static void
+handle_permission_dismissed (ChromiumSession *self, JsonObject *object)
+{
+  int id = (int) json_object_get_int_member (object, "id");
+  const char *result = event_string (object, "result");
+
+  /* An id this side already answered is Chromium closing up shop on the way out,
+   * and an id it never held belongs to a request older than this session. Both
+   * are silent, because the host has nothing left to take down. */
+  if (!g_hash_table_remove (self->permission_held, GINT_TO_POINTER (id)))
+    return;
+
+  g_debug ("session: permission %d dismissed as %s", id, result);
+  g_signal_emit (self, signals[SIG_PERMISSION_DISMISSED], 0, id, result);
+}
+
+void
+chromium_session_permission_respond (ChromiumSession *self, int id,
+                                     ChromiumPermissionResult result)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  if (!g_hash_table_remove (self->permission_held, GINT_TO_POINTER (id)))
+    {
+      g_debug ("session: no permission request %d to answer", id);
+      return;
+    }
+
+  permission_respond_send (self, id, result);
 }
 
 static void
@@ -1477,6 +1629,18 @@ chromium_session_class_init (ChromiumSessionClass *klass)
     g_signal_new ("context-menu", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_BOOLEAN, 3,
                   G_TYPE_INT, G_TYPE_INT, G_TYPE_POINTER);
+  /* The names list is a GList of char * owned by the session for the duration of
+   * the emission. A handler that shows UI answers TRUE, and then owes exactly one
+   * reply; FALSE leaves the request to the session, which denies it. */
+  signals[SIG_PERMISSION_REQUEST] =
+    g_signal_new ("permission-request", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_BOOLEAN, 5,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_POINTER,
+                  G_TYPE_INT);
+  signals[SIG_PERMISSION_DISMISSED] =
+    g_signal_new ("permission-dismissed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_STRING);
   signals[SIG_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
@@ -1493,6 +1657,7 @@ chromium_session_init (ChromiumSession *self)
   self->uri = g_strdup ("");
   self->title = g_strdup ("");
   self->cancellable = g_cancellable_new ();
+  self->permission_held = g_hash_table_new (g_direct_hash, g_direct_equal);
   /* Nothing has started, so there is nothing to report as closed yet. */
   self->closed_emitted = TRUE;
 }
@@ -1541,6 +1706,7 @@ chromium_session_finalize (GObject *object)
   g_free (self->uri);
   g_free (self->title);
   g_free (self->startup_url);
+  g_hash_table_destroy (self->permission_held);
 
   G_OBJECT_CLASS (chromium_session_parent_class)->finalize (object);
 }
