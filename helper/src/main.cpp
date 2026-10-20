@@ -573,6 +573,15 @@ class HelperApp : public CefApp {
       fprintf(stderr, "helper: forcing --ozone-platform=wayland\n");
     }
 
+    // Assistive tech: Chromium enables its accessibility tree when it sees an
+    // AT-SPI client, but detection in an embedded helper is unreliable — make
+    // it deterministic for hosts that know a screen reader is in play.
+    if (EnvOrEmpty("CHROMIUM_A11Y") == "1")
+      {
+        command_line->AppendSwitch("force-renderer-accessibility");
+        fprintf(stderr, "helper: accessibility forced on\n");
+      }
+
     if (EnvOrEmpty("CHROMIUM_HELPER_DISABLE_GPU") == "1") {
       command_line->AppendSwitch("disable-gpu");
       fprintf(stderr, "helper: --disable-gpu\n");
@@ -623,6 +632,17 @@ class HelperClient : public CefClient,
     dict->SetInt("pid", static_cast<int>(::getpid()));
     dict->SetString("url", browser->GetMainFrame()->GetURL().ToString());
     Emit(dict);
+
+    // Deterministic accessibility enablement: a windowed browser in
+    // STATE_ENABLED runs Chromium's complete mode — all platform (AT-SPI)
+    // accessibility objects are created and managed by Chromium itself. The
+    // client only has to detect a screen reader and call this; hosts can do
+    // that from their side, the env knob makes it explicit here.
+    if (EnvOrEmpty("CHROMIUM_A11Y") == "1")
+      {
+        browser->GetHost()->SetAccessibilityState(STATE_ENABLED);
+        fprintf(stderr, "helper: browser accessibility = enabled\n");
+      }
 
     if (g_auto_quit_ms > 0) {
       fprintf(stderr, "helper: auto-quit in %ld ms\n", g_auto_quit_ms);
