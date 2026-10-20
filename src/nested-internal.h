@@ -217,6 +217,10 @@ struct _NestedCompositor {
   uint64_t frame_count;
 
   NestedSurface *primary;
+  /* What the page asked for vs what the host window actually is: the states
+   * array advertises the latter only. */
+  gboolean window_fullscreen_requested;
+  gboolean window_fullscreen;
 
   /* Injected input state. The focus follows "primary"; xkb only tracks the
    * modifier bits, so the keymap is compiled but never used to resolve
@@ -337,6 +341,8 @@ void        output_send_state_all (NestedCompositor *self);
 void        xdg_wm_base_bind      (struct wl_client *client, void *data,
                                    uint32_t version, uint32_t id);
 void        xdg_surface_configure (NestedSurface *self);
+void        nested_request_window_fullscreen (NestedSurface *self,
+                                      gboolean enter);
 /* Work a popup's copied-out positioner rules into popup_x/popup_y. Called when
  * the client names the rules and again whenever the surface it hangs off
  * changes size, because the anchor rectangle lives in the parent. */

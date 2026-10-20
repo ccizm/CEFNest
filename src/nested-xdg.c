@@ -685,7 +685,13 @@ xdg_surface_configure (NestedSurface *self)
       uint32_t *state;
 
       wl_array_init (&states);
-      if (self->width == nested->width && self->height == nested->height)
+      if (nested->window_fullscreen)
+        {
+          state = wl_array_add (&states, sizeof (*state));
+          if (state)
+            *state = XDG_TOPLEVEL_STATE_FULLSCREEN;
+        }
+      else if (self->width == nested->width && self->height == nested->height)
         {
           state = wl_array_add (&states, sizeof (*state));
           if (state)
@@ -946,6 +952,14 @@ static void
 xdg_toplevel_set_fullscreen (struct wl_client *client, struct wl_resource *resource,
                              struct wl_resource *output)
 {
+  g_debug ("xdg: set_fullscreen request received");
+  nested_request_window_fullscreen (wl_resource_get_user_data (resource), TRUE);
+}
+
+static void
+xdg_toplevel_unset_fullscreen (struct wl_client *client, struct wl_resource *resource)
+{
+  nested_request_window_fullscreen (wl_resource_get_user_data (resource), FALSE);
 }
 
 static const struct xdg_toplevel_interface xdg_toplevel_impl = {
@@ -961,7 +975,7 @@ static const struct xdg_toplevel_interface xdg_toplevel_impl = {
   .set_maximized = xdg_noop,
   .unset_maximized = xdg_noop,
   .set_fullscreen = xdg_toplevel_set_fullscreen,
-  .unset_fullscreen = xdg_noop,
+  .unset_fullscreen = xdg_toplevel_unset_fullscreen,
   .set_minimized = xdg_noop,
 };
 

@@ -86,6 +86,7 @@ const char kDefaultUrl[] =
 bool g_quit_requested = false;
 long g_auto_quit_ms = 0;
 CefRefPtr<CefBrowser> g_browser;
+CefRefPtr<CefWindow> g_window;
 
 void QuitOnce() {
   if (g_quit_requested)
@@ -648,6 +649,16 @@ class HelperClient : public CefClient,
     Emit(dict);
   }
 
+  // Alloy leaves the platform fullscreen transition to the client: the page
+  // says what it wants, and the window does it. This is the pairing the
+  // CefDisplayHandler documents for windowed Alloy.
+  void OnFullscreenModeChange(CefRefPtr<CefBrowser> browser,
+                              bool fullscreen) override {
+    fprintf(stderr, "helper: page fullscreen mode = %d\n", fullscreen);
+    if (g_window)
+      g_window->SetFullscreen(fullscreen);
+  }
+
   void OnTitleChange(CefRefPtr<CefBrowser> browser,
                      const CefString& title) override {
     CefRefPtr<CefDictionaryValue> dict = NewEvent("title");
@@ -724,6 +735,19 @@ class HelperClient : public CefClient,
     if (!escape && !ctrl_q)
       return false;
 
+    // In fullscreen the user means "leave the page's fullscreen", not
+    // "close the browser": the CefBrowserHost documentation names Esc as the
+    // Alloy exit path and says exiting window fullscreen should also exit
+    // browser fullscreen.
+    if (escape && browser->GetHost()->IsFullscreen())
+      {
+        fprintf(stderr, "helper: leaving fullscreen on Esc\n");
+        browser->GetHost()->ExitFullscreen(true);
+        if (g_window)
+          g_window->SetFullscreen(false);
+        return true;
+      }
+
     fprintf(stderr, "helper: closing on %s\n", escape ? "Esc" : "Ctrl+Q");
     if (is_keyboard_shortcut)
       *is_keyboard_shortcut = true;
@@ -750,6 +774,7 @@ class HelperWindowDelegate : public CefWindowDelegate {
 
   void OnWindowCreated(CefRefPtr<CefWindow> window) override {
     CEF_REQUIRE_UI_THREAD();
+    g_window = window;
     window->AddChildView(browser_view_);
     window->Show();
     browser_view_->RequestFocus();
@@ -758,6 +783,7 @@ class HelperWindowDelegate : public CefWindowDelegate {
 
   void OnWindowDestroyed(CefRefPtr<CefWindow> window) override {
     CEF_REQUIRE_UI_THREAD();
+    g_window = nullptr;
     fprintf(stderr, "helper: window destroyed\n");
     browser_view_ = nullptr;
     QuitOnce();
@@ -766,6 +792,17 @@ class HelperWindowDelegate : public CefWindowDelegate {
   // The page is the whole window: the GTK host draws the chrome.
   bool IsFrameless(CefRefPtr<CefWindow> window) override { return true; }
   bool CanResize(CefRefPtr<CefWindow> window) override { return true; }
+
+  // The window left fullscreen by a user action (WM shortcut, title bar):
+  // Alloy does not exit browser fullscreen on its own, so the page follows
+  // the window only if we ask it to.
+  void OnWindowFullscreenTransition(CefRefPtr<CefWindow> window,
+                                    bool is_completed) override {
+    if (!is_completed)
+      return;
+    if (!window->IsFullscreen() && g_browser && g_browser->GetHost())
+      g_browser->GetHost()->ExitFullscreen(true);
+  }
 
   // Ignored once the compositor configures us; the widget's size wins.
   CefRect GetInitialBounds(CefRefPtr<CefWindow> window) override {

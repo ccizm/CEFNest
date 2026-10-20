@@ -60,6 +60,12 @@ void              nested_compositor_set_clipboard   (NestedCompositor *self,
  * commits is on screen one cycle later — and a hidden window pauses the
  * clients along with it. Without a clock (tests, headless runs) a plain 16 ms
  * timer keeps callbacks flowing instead. */
+/* Reports the platform window's real fullscreen state back to the compositor,
+ * so the states array a client sees in configure matches the window the page
+ * is displayed in. The widget keeps this in sync from its root window's
+ * notify::fullscreened; a host may drive it instead. */
+void              nested_compositor_set_window_fullscreen (NestedCompositor *self,
+                                                           gboolean fullscreen);
 void              nested_compositor_set_frame_clock (NestedCompositor *self,
                                                      GdkFrameClock *clock);
 NestedSurface    *nested_compositor_get_surface     (NestedCompositor *self);

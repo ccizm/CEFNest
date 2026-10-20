@@ -58,6 +58,7 @@ enum {
 enum {
   SIGNAL_FRAME,
   SIGNAL_TEXT_INPUT_STATE,
+  SIGNAL_WINDOW_FULLSCREEN_REQUEST,
   N_SIGNALS,
 };
 
@@ -1860,6 +1861,20 @@ nested_compositor_class_init (NestedCompositorClass *klass)
   signals[SIGNAL_TEXT_INPUT_STATE] =
     g_signal_new ("text-input-state", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+
+  /**
+   * NestedCompositor::window-fullscreen-request:
+   * @enter: %TRUE when the displayed toplevel asked to go fullscreen.
+   *
+   * Emitted when the page (an HTML5 requestFullscreen or a video control)
+   * asked for the platform window to change fullscreen state. The widget
+   * answers by fullscreening its root window; hosts that want to intercept
+   * or redirect can connect instead.
+   */
+  signals[SIGNAL_WINDOW_FULLSCREEN_REQUEST] =
+    g_signal_new ("window-fullscreen-request", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1,
+                  G_TYPE_BOOLEAN);
 }
 
 NestedCompositor *
@@ -2034,6 +2049,54 @@ nested_compositor_get_frame_count (NestedCompositor *self)
 {
   g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), 0);
   return self->frame_count;
+}
+
+void
+nested_compositor_set_window_fullscreen (NestedCompositor *self, gboolean fullscreen)
+{
+  NestedSurface *surface;
+
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  fullscreen = fullscreen != FALSE;
+  if (self->window_fullscreen == fullscreen)
+    return;
+
+  self->window_fullscreen = fullscreen;
+
+  /* The states array rides on every configure; resending now tells Chromium
+   * the platform window changed state without waiting for a size change that
+   * may never come. */
+  wl_list_for_each (surface, &self->surfaces, nested_link)
+    {
+      if (surface->xdg_surface)
+        xdg_surface_configure (surface);
+    }
+}
+
+/* A displayed toplevel asked for the window to change fullscreen state (an
+ * HTML5 requestFullscreen or a video control routed through Chromium). Only
+ * the surface tree that is on screen may ask — a hidden toplevel must not
+ * move the user's window, and popups have no business asking at all. The
+ * widget turns this into gtk_window_fullscreen() on its root and reports the
+ * window's real state back through set_window_fullscreen(). */
+void
+nested_request_window_fullscreen (NestedSurface *self, gboolean enter)
+{
+  g_return_if_fail (NESTED_IS_SURFACE (self));
+
+  if (!self->nested || !self->is_toplevel || !surface_is_painted (self))
+    return;
+
+  g_debug ("fullscreen: request enter=%d painted=%d toplevel=%d", enter,
+           self->nested ? surface_is_painted (self) : -1, self->is_toplevel);
+  enter = enter != FALSE;
+  if (self->nested->window_fullscreen_requested == enter)
+    return;
+
+  self->nested->window_fullscreen_requested = enter;
+  g_signal_emit (self->nested, signals[SIGNAL_WINDOW_FULLSCREEN_REQUEST], 0,
+                 enter);
 }
 
 void

@@ -93,6 +93,7 @@ static struct wp_cursor_shape_device_v1 *cursor_shape_device;
 
 static struct gbm_device *gbm;
 static int use_dmabuf;
+static int use_fullscreen, fs_enter_sent, fs_exit_sent;
 static int dmabuf_failed;
 
 /* Clipboard. --copy makes the client take a selection, --paste makes it ask
@@ -682,6 +683,26 @@ frame_done (void *data, struct wl_callback *callback, uint32_t time)
         }
       else
         fprintf (stderr, "client: no data device, cannot copy\n");
+    }
+
+  /* --fullscreen: exercise both edges of the toplevel fullscreen request at
+   * real frame cadence — enter at ~0.5 s, leave at ~2.5 s — so the selftest
+   * can assert it saw the signal twice and the client kept drawing in
+   * between. */
+  if (use_fullscreen && mapped)
+    {
+      if (frames >= 30 && !fs_enter_sent)
+        {
+          fs_enter_sent = 1;
+          fprintf (stderr, "client: requesting toplevel fullscreen\n");
+          xdg_toplevel_set_fullscreen (toplevel, NULL);
+        }
+      else if (frames >= 150 && !fs_exit_sent)
+        {
+          fs_exit_sent = 1;
+          fprintf (stderr, "client: leaving toplevel fullscreen\n");
+          xdg_toplevel_unset_fullscreen (toplevel);
+        }
     }
 
   /* Same timing rule as the copy: the seat may only have advertised its
@@ -2461,6 +2482,8 @@ main (int argc, char *argv[])
     {
       if (!strcmp (argv[i], "--dmabuf"))
         use_dmabuf = 1;
+        else if (!strcmp (argv[i], "--fullscreen"))
+          use_fullscreen = 1;
       else if (!strcmp (argv[i], "--copy"))
         use_copy = 1;
       else if (!strcmp (argv[i], "--dnd-requests"))

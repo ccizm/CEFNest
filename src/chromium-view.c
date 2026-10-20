@@ -18,6 +18,8 @@ struct _ChromiumView {
   GtkIMContext *im_context;
   GArray *im_keys;        /* evdev codes the input method claimed on press */
   gboolean im_focused;
+  gulong fullscreen_notify_handler;
+  GtkWidget *fullscreen_window;
 };
 
 G_DEFINE_TYPE (ChromiumView, chromium_view, GTK_TYPE_WIDGET)
@@ -168,6 +170,60 @@ chromium_view_unwatch_scale (ChromiumView *self)
 }
 
 static void
+chromium_view_on_fullscreen_request (NestedCompositor *compositor, gboolean enter,
+                                     gpointer data)
+{
+  ChromiumView *self = data;
+  GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (self));
+
+  g_debug ("fullscreen: widget got request enter=%d root=%p", enter, (void *) root);
+  if (!GTK_IS_WINDOW (root))
+    return;
+
+  /* The page asked; the window answers. The resize comes back through
+   * size_allocate and reaches the client as an ordinary configure. */
+  if (enter)
+    gtk_window_fullscreen (GTK_WINDOW (root));
+  else
+    gtk_window_unfullscreen (GTK_WINDOW (root));
+}
+
+static void
+chromium_view_on_fullscreen_notify (GObject *window, GParamSpec *pspec,
+                                    gpointer data)
+{
+  ChromiumView *self = data;
+
+  /* Whoever moved the window — the page's request above, the user, the WM —
+   * the client is told the real state, never the requested one. */
+  nested_compositor_set_window_fullscreen (self->compositor,
+                                           gtk_window_is_fullscreen (GTK_WINDOW (window)));
+}
+
+static void
+chromium_view_watch_fullscreen (ChromiumView *self)
+{
+  GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (self));
+
+  if (!GTK_IS_WINDOW (root) || root == GTK_ROOT (self->fullscreen_window))
+    return;
+
+  if (self->fullscreen_notify_handler)
+    {
+      g_signal_handler_disconnect (self->fullscreen_window,
+                                   self->fullscreen_notify_handler);
+      self->fullscreen_notify_handler = 0;
+    }
+
+  self->fullscreen_window = GTK_WIDGET (root);
+  self->fullscreen_notify_handler =
+    g_signal_connect (root, "notify::fullscreened",
+                      G_CALLBACK (chromium_view_on_fullscreen_notify), self);
+  nested_compositor_set_window_fullscreen (self->compositor,
+                                           gtk_window_is_fullscreen (GTK_WINDOW (root)));
+}
+
+static void
 chromium_view_on_map (GtkWidget *widget, gpointer data)
 {
   ChromiumView *self = data;
@@ -184,6 +240,13 @@ chromium_view_on_map (GtkWidget *widget, gpointer data)
    * later — and a hidden window pauses the clients along with it. */
   nested_compositor_set_frame_clock (self->compositor,
                                      gtk_widget_get_frame_clock (GTK_WIDGET (widget)));
+  /* Page fullscreen requests turn into window fullscreen here, and the
+   * window's real state flows back to the client. */
+  g_signal_connect_object (self->compositor, "window-fullscreen-request",
+                           G_CALLBACK (chromium_view_on_fullscreen_request),
+                           self, 0);
+  chromium_view_watch_fullscreen (self);
+
 
   surface = gtk_native_get_surface (GTK_NATIVE (gtk_widget_get_native (GTK_WIDGET (self))));
 
@@ -209,6 +272,14 @@ chromium_view_on_unmap (GtkWidget *widget, gpointer data)
   chromium_view_unwatch_scale (self);
   nested_compositor_set_clipboard (self->compositor, NULL);
   nested_compositor_set_frame_clock (self->compositor, NULL);
+
+  if (self->fullscreen_notify_handler)
+    {
+      g_signal_handler_disconnect (self->fullscreen_window,
+                                   self->fullscreen_notify_handler);
+      self->fullscreen_notify_handler = 0;
+      self->fullscreen_window = NULL;
+    }
   nested_compositor_set_cursor_target (self->compositor, NULL);
 }
 

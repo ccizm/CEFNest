@@ -115,6 +115,7 @@ static const char *step_names[N_STEP_KINDS] = {
 #define COMMIT_TEXT  "你好" /* two characters, six bytes */
 
 static NestedCompositor *compositor;
+static int fs_enter_seen, fs_exit_seen, fullscreen_gate;
 static GSubprocess *child;
 static GSubprocess *gtk_child;
 static size_t step_index;
@@ -613,6 +614,22 @@ open_fds (void)
   return n;
 }
 
+static void
+fullscreen_request_seen (NestedCompositor *compositor, gboolean enter, gpointer data)
+{
+  (void) compositor; (void) data;
+  if (enter)
+    {
+      fs_enter_seen++;
+      g_print ("selftest: fullscreen-request ENTER (%d)\n", fs_enter_seen);
+    }
+  else
+    {
+      fs_exit_seen++;
+      g_print ("selftest: fullscreen-request EXIT (%d)\n", fs_exit_seen);
+    }
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -677,6 +694,11 @@ main (int argc, char *argv[])
 
   g_print ("selftest: compositor on %s, client %s\n",
            nested_compositor_get_socket_name (compositor), client);
+  g_signal_connect (compositor, "window-fullscreen-request",
+                    G_CALLBACK (fullscreen_request_seen), NULL);
+  for (int i = 3; i < argc; i++)
+    if (!strcmp (argv[i], "--fullscreen"))
+      fullscreen_gate = 1;
 
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_NONE);
   g_subprocess_launcher_setenv (launcher, "WAYLAND_DISPLAY",
@@ -760,6 +782,17 @@ main (int argc, char *argv[])
   /* A client that died on what the compositor sent is a failure of the
    * compositor, not of the test — and that is true of the toolkit one as much
    * as of this raw one. */
+  if (fullscreen_gate)
+    {
+      if (fs_enter_seen && fs_exit_seen)
+        g_print ("selftest: fullscreen edges seen (%d enter, %d exit)\n",
+                 fs_enter_seen, fs_exit_seen);
+      else
+        g_printerr ("selftest: fullscreen gate FAILED: enter=%d exit=%d\n",
+                    fs_enter_seen, fs_exit_seen);
+    }
+
   return (gtk_client_failed || client_failed || dmabuf_refusals ||
+          (fullscreen_gate && !(fs_enter_seen && fs_exit_seen)) ||
           (dmabuf_mode && dmabuf_advertised == 1 && !dmabuf_imports)) ? 1 : 0;
 }
