@@ -2,7 +2,7 @@
 #
 # test/dnd-gate.sh — drives the in-page drag loop and asserts on it.
 #
-# All four runs need the real browser: what is under test is the choreography
+# All five runs need the real browser: what is under test is the choreography
 # between a page's HTML5 drag and wl_data_device, and only Chromium does the
 # page half of it. The fake helper has no window to drag inside.
 #
@@ -14,7 +14,10 @@
 #      behind rather than from the first's objects;
 #   4. a drag held open — the drag image appears in the paint stack while the
 #      button is down and is gone after the release, and the page takes a click
-#      afterwards, which is how the seat is shown to have been handed back.
+#      afterwards, which is how the seat is shown to have been handed back;
+#   5. a drag that leaves the window — the compositor reads the payload itself,
+#      calls the page's drag off and hands the whole thing to the host, and the
+#      page sees a leave and an end with no drop in between.
 #
 # It opens a real demo window per run, so it is a documented manual gate rather
 # than a meson test — the same convention as test/*.session,
@@ -30,11 +33,13 @@
 # through tee.
 #
 #   ./test/dnd-gate.sh
-#   ./test/dnd-gate.sh loop      # only one of the four
+#   ./test/dnd-gate.sh loop      # only one of the five
 #
 # The protocol-error half is already covered by meson test: the
 # seat-selftest-dnd-requests case sends wl_data_device_manager version 3
-# requests at the compositor and asserts that both connections stay alive.
+# requests at the compositor and asserts that both connections stay alive, and
+# seat-selftest-drag-out drives the handover of run 5 from a fake client that
+# offers the same three types, with no browser and no window in the loop.
 
 set -u -o pipefail
 
@@ -285,6 +290,60 @@ EOF
   # The drag held the pointer; the click says the seat gave it back.
   expect 'click@target 400,400 clicks=1' "$WORK/held.log" held
   no_protocol_error "$WORK/held.log" held
+fi
+
+# ---------------------------------------------------------------------------
+# 5. A drag that leaves the window.
+# ---------------------------------------------------------------------------
+
+if [ "$WHICH" = all ] || [ "$WHICH" = out ]; then
+  # 900 is below the widget, so the pointer runs out of the page on the way down
+  # and the compositor is left holding a drag whose destination is not one of its
+  # clients. CEFNEST_DRAG_OUT=take stops the demo at the read: carrying the
+  # payload on into a real GdkDrag needs a button press GDK can cite, and no
+  # script can give it one, so that leg is measured by hand.
+  script out <<EOF
+load $PAGE
+wait 4000
+js window.dndLog=[]; 'reset'
+drag 150 100 150 900
+wait 1500
+js window.dndLog.join('|')
+wait 1000
+quit
+EOF
+  run_demo out "$WORK/out.log" "$HELPER" CEFNEST_DRAG_OUT=take
+
+  # The three lines the handover is made of, in the shape measured off this page:
+  # one type picked out of three, the payload the page set, and the host told.
+  expect 'nested: the pointer left the page mid-drag: taking text/plain;charset=utf-8 of 3 types' "$WORK/out.log" out
+  expect 'nested: the drag left the page as text/plain;charset=utf-8 \(11 bytes, 3 types\)' "$WORK/out.log" out
+  expect 'demo: drag out: text/plain;charset=utf-8, 11 bytes, types: text/plain;charset=utf-8\|text/plain\|chromium/x-web-custom-data' "$WORK/out.log" out
+  expect 'demo: drag out: taken, not carried' "$WORK/out.log" out
+
+  # The page's side, measured: it is told the pointer left and then ends, and the
+  # payload never comes back into it — it went to the host instead.
+  log=$(page_log "$WORK/out.log")
+  if printf '%s' "$log" | grep -qaE 'drop\('; then
+    bad "out: the page took a drop it should not have had — log was $log"
+  else
+    ok "out: no drop reached the page"
+  fi
+  for want in 'dragleave\[[^]]*\]@target' 'dragend\[text/plain\]@source'; do
+    if printf '%s' "$log" | grep -qaE "$want"; then
+      ok "out: the page saw /$want/"
+    else
+      bad "out: the page never saw /$want/ — log was $log"
+    fi
+  done
+  if printf '%s' "$log" | grep -qaE 'dnd-payload'; then
+    bad "out: the payload came back into the page — log was $log"
+  else
+    ok "out: the payload stayed out of the page"
+  fi
+
+  expect_no 'nested: dropped' "$WORK/out.log" out
+  no_protocol_error "$WORK/out.log" out
 fi
 
 echo

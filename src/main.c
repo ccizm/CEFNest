@@ -1221,6 +1221,86 @@ dump_view (gpointer data)
   return G_SOURCE_REMOVE;
 }
 
+/* ------------------------------------------------------------------ *
+ * A drag that leaves the page                                          *
+ *                                                                      *
+ * The compositor is the only thing that can read the payload out of a   *
+ * page's wl_data_source; deciding what to do with it is the host's      *
+ * job, so the drag below is the demo's own. COPY and nothing else: the  *
+ * page's drag has already been called off by the time the bytes are     *
+ * here, and there is no source left to move.                            *
+ * ------------------------------------------------------------------ */
+
+/* Only one handover is ever in flight — a widget has one pointer — and a drag
+ * whose compositor never answered it is not worth keeping a second one for. */
+static GdkDrag *demo_out_drag;
+
+static void
+demo_out_drag_end (GdkDrag *drag, gpointer data)
+{
+  if (demo_out_drag == drag)
+    g_clear_object (&demo_out_drag);
+}
+
+static void
+demo_out_drag_drop (GdkDrag *drag, gpointer data)
+{
+  g_print ("demo: drag out: dropped as 0x%x\n", gdk_drag_get_selected_action (drag));
+
+  /* Nothing to wait for: the payload was copied out of the page and is already
+   * in this process, so the transfer is complete as it stands. */
+  gdk_drag_drop_done (drag, TRUE);
+}
+
+static void
+demo_drag_out (NestedCompositor *compositor, const char *mime, GBytes *bytes,
+               char **types, gpointer data)
+{
+  GdkDisplay *display = gdk_display_get_default ();
+  GdkSeat *seat = display ? gdk_display_get_default_seat (display) : NULL;
+  GdkDevice *pointer = seat ? gdk_seat_get_pointer (seat) : NULL;
+  GdkSurface *surface = demo.view ? gtk_native_get_surface (GTK_NATIVE (demo.view)) : NULL;
+  GdkContentProvider *provider;
+  GdkDrag *drag;
+
+  g_print ("demo: drag out: %s, %u bytes, types: %s\n", mime,
+           (unsigned) g_bytes_get_size (bytes),
+           types && *types ? g_strjoinv ("|", types) : "(none)");
+
+  /* The payload is across the process boundary by now; whether this host wants
+   * to put the window into a drag of its own is a separate question, and a run
+   * that only wants to see what came out says so. */
+  if (g_strcmp0 (g_getenv ("CEFNEST_DRAG_OUT"), "take") == 0)
+    {
+      g_print ("demo: drag out: taken, not carried\n");
+      return;
+    }
+
+  if (!pointer || !surface)
+    {
+      g_print ("demo: drag out: no pointer and window to carry it with\n");
+      return;
+    }
+
+  provider = gdk_content_provider_new_for_bytes (mime, bytes);
+  drag = gdk_drag_begin (surface, pointer, provider, GDK_ACTION_COPY, 0, 0);
+  g_object_unref (provider);
+
+  if (!drag)
+    {
+      g_print ("demo: drag out: the compositor this window lives on refused it\n");
+      return;
+    }
+
+  g_print ("demo: drag out: carrying it in a GTK drag\n");
+
+  g_clear_object (&demo_out_drag);
+  demo_out_drag = drag;
+  g_signal_connect (drag, "drop", G_CALLBACK (demo_out_drag_drop), NULL);
+  g_signal_connect (drag, "failed", G_CALLBACK (demo_out_drag_end), NULL);
+  g_signal_connect (drag, "ended", G_CALLBACK (demo_out_drag_end), NULL);
+}
+
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "hover <x> <y>",
@@ -1939,8 +2019,19 @@ activate (GApplication *application, gpointer data)
   demo.view = g_object_new (CHROMIUM_TYPE_VIEW, NULL);
 
   if (chromium_view_get_compositor (demo.view))
-    g_signal_connect (chromium_view_get_compositor (demo.view), "notify::surface",
-                      G_CALLBACK (on_surface_notify), NULL);
+    {
+      NestedCompositor *compositor = chromium_view_get_compositor (demo.view);
+
+      g_signal_connect (compositor, "notify::surface",
+                        G_CALLBACK (on_surface_notify), NULL);
+
+      /* Connecting to ::drag-out is what tells the compositor that a host can
+       * carry a page's drag out of the window. A run that wants the page to keep
+       * its drag until the button lets go — which is what a host with no such
+       * handler gets — says so with CEFNEST_DRAG_OUT=off. */
+      if (g_strcmp0 (g_getenv ("CEFNEST_DRAG_OUT"), "off") != 0)
+        g_signal_connect (compositor, "drag-out", G_CALLBACK (demo_drag_out), NULL);
+    }
 
   box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (demo.view));

@@ -49,10 +49,29 @@ void              nested_compositor_get_size        (NestedCompositor *self,
 /* Bridges the nested wl_data_device_manager with a GTK clipboard in both
  * directions: a client's copy lands on @clipboard, and whatever @clipboard
  * holds is offered to clients as the selection. Pass NULL to disconnect, which
- * the embedding widget does when it is unmapped. Drag-and-drop is not part of
- * this: start_drag is ignored. */
+ * the embedding widget does when it is unmapped. A drag is not a copy: one that
+ * leaves the widget is handed to the host through ::drag-out, not to @clipboard. */
 void              nested_compositor_set_clipboard   (NestedCompositor *self,
                                                      GdkClipboard *clipboard);
+/* Carrying a page's drag outside the window. While a drag is in flight its
+ * payload lives in the client's wl_data_source, and this compositor is the only
+ * thing that can read it: the destination it would go to is not one of ours. So
+ * the host asks, and the compositor takes the best type it can pick from the
+ * offered ones, calls the page's drag off (its destination was never in this
+ * window), and emits ::drag-out with the mime, the bytes and every type the page
+ * offered. The return value only says a drag was there to take — nothing is in
+ * the host's hands until the signal arrives, and no signal at all means the
+ * client answered nothing.
+ *
+ * The embedding widget asks on the host's behalf when its pointer leaves the
+ * widget over a live drag and a host is listening to ::drag-out; a host with no
+ * such handler leaves the page's drag alone, exactly as it was before this
+ * existed. */
+gboolean          nested_compositor_drag_take_out   (NestedCompositor *self);
+/* The mime types the drag in flight offers, as a %NULL-terminated string array
+ * the caller owns, or an empty array when no drag is live. A host uses this to
+ * decide before ::drag-out names the one type that actually came across. */
+char            **nested_compositor_drag_get_types  (NestedCompositor *self);
 /* Paces client frame callbacks with the embedding widget's display cycle: pass
  * gtk_widget_get_frame_clock() on map and NULL on unmap, like set_clipboard().
  * While attached, a client waiting for a frame is told to draw after a cycle

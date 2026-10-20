@@ -59,6 +59,7 @@ enum {
   SIGNAL_FRAME,
   SIGNAL_TEXT_INPUT_STATE,
   SIGNAL_WINDOW_FULLSCREEN_REQUEST,
+  SIGNAL_DRAG_OUT,
   N_SIGNALS,
 };
 
@@ -1715,6 +1716,29 @@ nested_surfaces_changed (NestedCompositor *self)
   g_signal_emit (self, signals[SIGNAL_FRAME], 0);
 }
 
+/* Whether anybody would use a payload taken out of a page's drag. The seat
+ * calls this instead of reading one on every pointer leave: a host that never
+ * connects to ::drag-out has no use for the bytes, and taking them means
+ * calling the page's drag off early for nothing. */
+gboolean
+nested_has_drag_out_host (NestedCompositor *self)
+{
+  g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), FALSE);
+
+  return g_signal_has_handler_pending (self, signals[SIGNAL_DRAG_OUT], 0, TRUE);
+}
+
+void
+nested_emit_drag_out (NestedCompositor *self, const char *mime, GBytes *bytes,
+                      char **types)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+  g_return_if_fail (mime != NULL);
+  g_return_if_fail (bytes != NULL);
+
+  g_signal_emit (self, signals[SIGNAL_DRAG_OUT], 0, mime, bytes, types);
+}
+
 void
 nested_update_primary (NestedCompositor *self)
 {
@@ -1929,6 +1953,28 @@ nested_compositor_class_init (NestedCompositorClass *klass)
     g_signal_new ("window-fullscreen-request", G_TYPE_FROM_CLASS (klass),
                   G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1,
                   G_TYPE_BOOLEAN);
+
+  /**
+   * NestedCompositor::drag-out:
+   * @mime: the type the payload actually came as
+   * @bytes: (transfer none): the bytes taken out of the client's drag source
+   * @types: (transfer none) (element-type utf8): every type the drag offered
+   *
+   * Emitted when a drag that the page (or any other client) started has left
+   * the widget and its payload has been read out of the client's
+   * wl_data_source. The page's own drag is over by then — it was called off,
+   * because the destination that would have taken this payload is not one of
+   * ours — so this is the host's chance to carry it on with a drag of its own,
+   * usually gdk_drag_begin() with a provider built from @bytes.
+   *
+   * @bytes and @types belong to the compositor and are only valid while the
+   * handler runs: ref or copy what is kept. A drag whose client answered
+   * nothing emits nothing at all.
+   */
+  signals[SIGNAL_DRAG_OUT] =
+    g_signal_new ("drag-out", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+                  G_TYPE_STRING, G_TYPE_BYTES, G_TYPE_STRV);
 }
 
 NestedCompositor *

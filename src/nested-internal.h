@@ -214,6 +214,11 @@ struct _NestedCompositor {
   DataSource *selection_source;
   Drag *drag;                       /* the wl_data_device drag in progress, or NULL */
   ClipboardTransfer *clipboard_transfer;
+  /* The payload of a drag that left the widget, read out of the client's
+   * wl_data_source for the host to carry on. Its own slot because a copy can be
+   * in flight at the same moment, and one payload must not take the other's
+   * pipe away. */
+  ClipboardTransfer *drag_out_transfer;
   GdkClipboard *clipboard;          /* the embedding widget's, may be NULL */
   gulong clipboard_handler;         /* notify::content */
   GBytes *clipboard_bytes;
@@ -293,6 +298,12 @@ uint32_t       nested_now_msec         (void);
 /* A surface tree change (a popup mapped, a toplevel gone) both retargets the
  * seat and tells the widget to draw again. */
 void           nested_surfaces_changed (NestedCompositor *self);
+/* Whether a host listens to NestedCompositor::drag-out, and the way to emit it.
+ * A payload is only worth reading out of a client's drag source if somebody can
+ * carry it on, so the seat asks before it asks the client for anything. */
+gboolean       nested_has_drag_out_host  (NestedCompositor *self);
+void           nested_emit_drag_out      (NestedCompositor *self, const char *mime,
+                                          GBytes *bytes, char **types);
 /* The painted surface under a point in the widget's logical pixels, or NULL.
  * Popups sit on the toplevel, so this is where the pointer learns what it is
  * really over. */

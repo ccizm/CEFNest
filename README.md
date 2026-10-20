@@ -118,13 +118,14 @@ of it is reproducible runs:
 | `CEFNEST_DOWNLOAD_DIR` | where the demo panel auto-accepts a download; defaults to the XDG download directory (`docs/download-path.md`) |
 | `CEFNEST_DOWNLOAD_ASK` | any value: every download waits for the 保存/丢弃 buttons or a script step instead of landing on disk |
 | `CEFNEST_PERMISSION` | `ask` (default: a row with 允许/拒绝 per request), `deny` / `allow` (answer on arrival, the row stays as the record), or `ignore` (do not take the question at all — the session then denies it, which is what a host with no permission UI does) (`docs/permission-prompt.md`) |
+| `CEFNEST_DRAG_OUT` | what the demo does with a page drag that leaves the window. Default: take the payload and start the window's own `GdkDrag` with it. `take`: read and log what came out but do not start a drag of our own — what the automated runs use, because a scripted press leaves GDK no serial to begin one with. `off`: do not connect to `::drag-out` at all, so the page keeps its drag until the button lets go, which is what a host with no handler gets (`docs/drag-loop.md`) |
 | `G_MESSAGES_DEBUG` | **space-separated** domains: `all`, or `nested chromium-view chromium-session` — a comma list matches nothing |
 
 ## Test
 
 ```bash
-meson test -C builddir                       # 10 tests
-meson test -C builddir --suite selftest      # the nine seat selftests
+meson test -C builddir                       # 11 tests
+meson test -C builddir --suite selftest      # the ten seat selftests
 meson test -C builddir --suite protocol      # the implementation-slot audit
 ```
 
@@ -205,19 +206,27 @@ filtered on the host side, and they read `scrollTop` twice — before and after 
 step — because the measurement that says a search does not move the page while a
 step scrolls the match in is the whole reason no match rectangle is on the wire.
 
-`test/dnd-gate.sh` is the drag half, four real-Chromium runs on
-`test/dnd-page.html` and 35 assertions. It answers the question the whole
+`test/dnd-gate.sh` is the drag half, five real-Chromium runs on
+`test/dnd-page.html` and 41 assertions. It answers the question the whole
 in-process route hanged on: whether a browser inside a widget honours a
 `wl_data_device.enter` at all, or settles an in-window drag through its own
 internal drag manager. The page's own event log says it honours it — the
 coordinates the script fed the seat are the coordinates the page reports on
-`dragenter`, `dragover` and `drop`. The other three runs are the ones that catch
-a state machine left behind: a destination that will not take the payload, a
-second drag after the first, and a drag held open so the drag image can be seen
-joining and leaving the paint stack, then a click that says the seat came back.
-It pipes stderr through `tee` because GLib's writer drops DEBUG messages when
-stderr is a plain file, and the compositor's own trace is half of what is
-asserted.
+`dragenter`, `dragover` and `drop`. The other runs are the ones that catch a
+state machine left behind: a destination that will not take the payload, a
+second drag after the first, a drag held open so the drag image can be seen
+joining and leaving the paint stack and then a click that says the seat came
+back, and a drag that leaves the window entirely — which the compositor answers
+for by reading the payload off the page's own source, calling that drag off, and
+printing what it handed to the host. That last run is also the measurement that
+settles whether Blink serves a `send` for a mime no destination ever accepted,
+and it runs with `CEFNEST_DRAG_OUT=take` so no host drag can be started under a
+real pointer. The handover itself does not need a browser:
+`meson test -C builddir --suite selftest` has `seat-selftest-drag-out`, where
+`shm-client --drag-out` is both the origin and the destination of a drag of the
+three measured types. The gate pipes stderr through `tee` because GLib's writer
+drops DEBUG messages when stderr is a plain file, and the compositor's own trace
+is half of what is asserted.
 
 `test/menu-gate.sh` is the context-menu half, eight runs — six against
 `test/fake-helper.py`, two against real Chromium on `test/menu-page.html` — and
@@ -336,19 +345,22 @@ They are the record of *why* the code is shaped like this:
 | `protocol-ceilings.md` | what real clients bind against the nested compositor, and the measured verdict on every protocol and version ceiling left un-advertised |
 | `download-path.md` | the parked `OnBeforeDownload` gate, who decides the path, and the three CEF download behaviours only a measurement can tell you |
 | `find-path.md` | a command that answers nothing, the reply shape only a measurement gives (one identifier per request, one to three updates per request), and what actually scrolls the page |
-| `drag-loop.md` | the in-page drag choreography, the measured proof that a `wl_data_device.enter` reaches the page, what the destination actually accepts, and why the fd relay is not what carries a same-page payload |
+| `drag-loop.md` | the in-page drag choreography, the measured proof that a `wl_data_device.enter` reaches the page, what the destination actually accepts, why the fd relay is not what carries a same-page payload, and how a drag that crosses the window edge is read off the page's source and handed to the host |
 | `context-menu.md` | the one constraint that decided the whole design (Chromium holds a single unanswered menu request), what CEF's default model really contains — the same five rows for a link, an image and a blank page — and `Continue(id)` proven inside the page |
 | `permission-prompt.md` | which asks never reach the host at all, the two queues that make an unanswered request cost the page its next question too, and why `accept` can only ever mean "the whole mask" |
 
 ## Known limitations
 
-- **Drag and drop stops at the window edge.** A drag that starts and ends inside
-  one page works: the compositor runs the whole `wl_data_device` negotiation, the
-  page's own drag image is composited on top of everything, and the drop lands
-  where the pointer says (`docs/drag-loop.md`). What is missing is the two
-  directions that leave it: a drag out of the page into the host, and a drop
-  from the host into the page. There is nothing outside this window for a
-  surface-in-a-widget to be dropped on yet.
+- **Drag and drop stops at the window edge in one direction only.** A drag that
+  starts and ends inside one page works: the compositor runs the whole
+  `wl_data_device` negotiation, the page's own drag image is composited on top of
+  everything, and the drop lands where the pointer says. A drag that crosses the
+  edge going out works too: the compositor reads the payload off the page's own
+  source, calls that drag off and hands mime, bytes and the full type list to the
+  host, which can start a `GdkDrag` of its own (`docs/drag-loop.md` §6). What is
+  missing is the reverse — a drop from the host into the page — and the host leg
+  of the outbound drag is measured by hand, because a scripted press leaves GDK no
+  serial to begin one with.
 - **One seat, one pointer, no touch.** The embedding widget is the only device
   the compositor knows about.
 - **No pinch zoom, no tablet input, no middle-click paste.** Chromium binds

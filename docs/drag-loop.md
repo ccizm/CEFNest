@@ -1,4 +1,4 @@
-# 页内拖放环：谁在什么时候发哪一条
+# 拖放环，和它越过窗口边界时的一跳：谁在什么时候发哪一条
 
 日期：2026-10-21
 问题：P2「拖拽三段式」的第一段——一次在**同一个页面里**开始并结束的 HTML5 拖放，要经
@@ -6,7 +6,7 @@
 拽当成浏览器内部的事，用 views 自己的 `DragDropManager` 处理掉，根本不理会我们发的
 `wl_data_device.enter`。这一篇钉住它**确实**理会了，并且把只有实测才知道的六条写下来。
 
-三段式的后两段——出界交给 GTK 的 drag、以及反向拖入——还没做，见 §6。
+三段式的第二段——拖拽越过窗口边界时交给宿主——在 §6。第三段（反向拖入）还没做，见 §7。
 
 ## 1. 形状：一端是页面，另一端也是页面
 
@@ -155,8 +155,9 @@ Chromium 在普通复制时也可能发这几条——为了一个不存在的�
 ## 5. 怎么验
 
 ```sh
-./test/dnd-gate.sh              # loop / refused / twice / held，35 项
+./test/dnd-gate.sh              # loop / refused / twice / held / out
 ./test/dnd-gate.sh held         # 只看拖动图标那一段
+./test/dnd-gate.sh out          # 只看越界移交那一段
 ```
 
 跑之前先 `ninja -C builddir`。要看 compositor 的 trace，得把 stderr 接成管道：GLib 默认的
@@ -164,12 +165,87 @@ log writer 在 stderr 是**普通文件**时会丢掉 DEBUG 级消息，
 `G_MESSAGES_DEBUG=all ./builddir/src/cefnest-demo 2>log` 里一条 `nested:` 都不会出现，
 `2>&1 | tee log` 才有。门禁里 `run_demo` 用 `tee` 就是为了这个。
 
-协议错误那半边由 `meson test -C builddir` 的 `seat-selftest-dnd-requests` 覆盖。
+协议错误那半边由 `meson test -C builddir` 的 `seat-selftest-dnd-requests` 覆盖；§6 的移交则由
+`seat-selftest-drag-out` 用一个假客户端重放一遍，不需要浏览器，也不需要窗口。
 
-## 6. 还没有
+## 6. 第二段：越界的移交（预取 + `::drag-out`）
 
-- **出界的 GTK drag 桥**（第二段）：把页面里的拖拽在越过窗口边界时移交成 GTK 的
-  `GdkContentProvider`。需要先在拖拽还活着的时候把载荷预取过来——§2.3 说明页内这一圈不会
-  替我们调 `receive`，出界时得由宿主自己发起读取。
+### 6.1 为什么读的人必须是 compositor
+
+§2.3 说过页内那一圈没人调 `receive`。越界时目的地更不是我们的客户端——对面是宿主，是 GTK——
+所以「目的地 accept，再 receive」这两步只能由 compositor 自己扮演：先 `wl_data_source.target(mime)`
+说清楚要哪一个类型，再 `send(mime, fd)`，把管道读空，然后 `cancelled` 把页面的拖拽收掉，最后
+`::drag-out (mime, bytes, types)` 交给宿主。公开的三样是
+`nested_compositor_drag_take_out()`、`nested_compositor_drag_get_types()` 和那个信号；返回值只说明
+「有拖拽可拿」，东西要等信号到了才算到手，`bytes` 和 `types` 也只在 handler 里有效。空载荷不发
+信号：源端不回答，就等于没有移交。上限仍是复制那一份 4 MiB。
+
+两处的顺序都是被重入教出来的：传输对象在调用 finish **之前**销毁（finish 会取消拖拽，取消又会来
+销毁这条传输），类型列表在取消**之前**抄下来（源一旦被告知 `cancelled`，客户端随时可能销毁它）。
+
+### 6.2 实测：没人 accept 过，Blink 照样回答 `send`
+
+整段设计的地基是「一个从没被任何目的地 accept 过的类型，源端会不会回答」。真 Chromium 154，页面
+`setData('text/plain','dnd-payload')`，`drag 150 100 150 900`：
+
+```
+nested: the pointer left the page mid-drag: taking text/plain;charset=utf-8 of 3 types
+nested: the drag left the page as text/plain;charset=utf-8 (11 bytes, 3 types)
+demo: drag out: text/plain;charset=utf-8, 11 bytes, types: text/plain;charset=utf-8|text/plain|chromium/x-web-custom-data
+demo: drag out: taken, not carried
+```
+
+11 个字节，和请求在**同一毫秒**里回来（第一跑量到 3 ms）。页面那头的收尾是
+`dragleave[...]@target 0,0|dragend[text/plain]@source 1010,663`，中间**没有** `drop`——载荷去了
+宿主，不是页内某个角落。`target` 必须在 `send` 之前：没被告知要哪个类型的源，没有理由回答。
+
+### 6.3 两个触发点，一条代码
+
+- `nested_compositor_set_pointer_active (self, FALSE)`：GDK 说指针离开了 widget 时走的路。
+- 坐标越界：`drag_motion()` 里拿 compositor 配置的 width/height 判。脚本喂的是坐标不是 crossing，
+  这条存在的意义就是让自动化走到同一段代码。
+
+两者都只在**有宿主听 `::drag-out`** 时动手（`g_signal_has_handler_pending`）。没听的宿主维持原样：
+拖拽留着，后面松手照旧按 §2.4 取消。这就是为什么这功能上线后其余模式和门禁一条都没变。
+
+### 6.4 宿主那条 GTK 腿只能人工测
+
+demo 收到信号后做 `gdk_content_provider_new_for_bytes()` + `gdk_drag_begin()`，一次只挂一条（新的
+移交先把旧的清掉），在 `drop`/`failed`/`ended` 里收尾。但 `gdk_drag_begin` 要的是**外层** compositor
+上一次真实按下的 grab serial，脚本按下的是内层座位，GDK 拿不到那个 serial。所以自动跑一律
+`CEFNEST_DRAG_OUT=take`：只预取，不把出去的那条 drag 真的举起来——举起来会落在人用的桌面上。
+出界变成一次真 GTK 拖拽，得把手放到鼠标上量。`CEFNEST_DRAG_OUT=off` 干脆不连 handler，用来对照
+「没有宿主」时页面的拖拽是什么样。
+
+### 6.5 踩到的坑：绑 v3 的客户端必须接住 `target`
+
+`seat-selftest-drag-out` 第一跑时 shm-client 被 signal 6 打死：
+
+```
+listener function for opcode 0 of wl_data_source is NULL
+```
+
+opcode 0 是 v3 的 `target`，而那个假客户端的 listener 表只填了 `send`/`cancelled`。libwayland 对
+没有槽的事件直接 abort——和 `docs/empty-request-slot.md` 里 compositor 那半边是同一件事，只是这次
+站在客户端。现在六个事件全填。反过来说这也是给我们自己的一个提醒：发 `target` 已经是对外走的一
+步，任何绑 v3 的源端客户端都必须处理它。
+
+### 6.6 假客户端重放的形状
+
+`shm-client --drag-out` 在 `pointer_button` 的按下里发 `start_drag`（引的就是那次按下的 serial，
+页面也是这么做的），offer 三个实测名字、`set_actions (COPY)`，被问到就答 `drag-out-payload`，
+`cancelled` 时把自己收到过几次 motion、被读过几次、读的哪个类型打出来。它同时是自己拖拽的目的地，
+但**不** accept、不 receive——要验的正是「目的地不存在」的那条路。
+
+`seat-selftest-drag-out` 钉六件事：mime 是 `text/plain;charset=utf-8`；载荷 16 字节正好是
+`drag-out-payload`；类型列表逐字符等于 `text/plain;charset=utf-8|text/plain|chromium/x-web-custom-data`；
+移交之后 `nested_compositor_drag_get_types()` 回到空数组（页面的拖确实被收掉了）；fd 计数回到预取
+之前（中继管道没漏）；两个触发点各跑一遍，期望的是累计第 1、第 2 次移交。把 §6.3 的越界判断改成一
+条 `if (FALSE)` 跑一遍，两次 check 都会红并且报「the page kept its drag, still offering …」——这条
+门禁是要能咬人的。
+
+## 7. 还没有
+
 - **拖入方向**（第三段）：`GdkDropTarget` → `wl_data_device.enter` + 一个新 `DataSource`。
 - 拖动图标目前是客户端给的 surface，宿主没有替换成 GTK 的拖拽图像。
+- 出界之后 GTK 那条腿（`gdk_drag_begin`）只有人工测量，原因见 §6.4。

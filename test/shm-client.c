@@ -6,7 +6,10 @@
  * hit-testing and dismissal can be checked against the rules it chose. With
  * --dnd-requests it sends the three wl_data_device_manager version 3 requests
  * that abort a compositor whose implementation slots are empty — see
- * docs/empty-request-slot.md. */
+ * docs/empty-request-slot.md. With --drag-out it starts a drag from the left
+ * button press and offers the mime list a real page's text drag was measured
+ * with, so the handover of a drag that leaves the window has a source to read
+ * without a browser. */
 #define _GNU_SOURCE
 
 #include <errno.h>
@@ -122,6 +125,21 @@ static char render_node[64] = "/dev/dri/renderD128";
 static int use_dnd_requests;
 static int dnd_done;
 
+/* A drag that leaves the page. --drag-out starts one from the left button press
+ * and offers the three mime names measured off a real page's text drag, so the
+ * compositor's handover has a source to read without a browser in the loop. The
+ * payload is deliberately not the one --copy puts on the selection: a run that
+ * mixed the two paths up says so in its own log. */
+#define DRAG_OUT_CUSTOM_MIME "chromium/x-web-custom-data"
+
+static int use_drag_out;
+static int drag_out_sent;      /* a drag started by the press is being held */
+static int drag_out_motions;   /* wl_data_device.motion events as the destination */
+static int drag_out_reads;     /* send requests answered on the drag source */
+static char drag_out_read_mime[128];
+static struct wl_data_source *drag_source;
+static const char drag_text[] = "drag-out-payload";
+
 /* Text input (zwp_text_input_v3). --text-input makes the client a field the
  * compositor can compose into: it reports surrounding text as soon as the text
  * input enters, and --text-input-password does the same for a password field,
@@ -219,6 +237,7 @@ static const struct wl_data_offer_listener data_offer_listener;
 static const struct wl_data_source_listener data_source_listener;
 static const struct zwp_text_input_v3_listener text_input_listener;
 static void do_copy (void);
+static void do_drag_out (uint32_t serial);
 static void dnd_requests_probe (void);
 static void ensure_data_device (void);
 static void ensure_text_input (void);
@@ -1358,6 +1377,27 @@ pointer_button (void *data, struct wl_pointer *wl_pointer, uint32_t serial,
            button, state == WL_POINTER_BUTTON_STATE_PRESSED ? "down" : "up",
            serial, button_mask);
 
+  /* A page starts its drag from inside the handler for the press that grabs it,
+   * and the serial it cites is this one, so the request goes out here rather
+   * than on the next frame. */
+  if (state == WL_POINTER_BUTTON_STATE_PRESSED && use_drag_out && !drag_out_sent)
+    {
+      ensure_data_device ();
+      if (data_device)
+        {
+          drag_out_sent = 1;
+          do_drag_out (serial);
+        }
+      else
+        fprintf (stderr, "client: no data device, cannot drag\n");
+    }
+  else if (state != WL_POINTER_BUTTON_STATE_PRESSED && use_drag_out)
+    {
+      /* Re-arm: a run that hands a drag over still has a pointer, and the next
+       * press should start a drag the way a page's does. */
+      drag_out_sent = 0;
+    }
+
   /* Every surface shows the held button, so a screenshot keeps the evidence of
    * which one the press went to. */
   popup_draw_all ();
@@ -1789,7 +1829,9 @@ data_offer_mime (void *data, struct wl_data_offer *offer, const char *mime_type)
       snprintf (selection_mimes[n_selection_mimes],
                 sizeof selection_mimes[0], "%s", mime_type);
       n_selection_mimes++;
-      fprintf (stderr, "client: selection offers %s\n", mime_type);
+      /* Both a selection and a drag's offer answer this, so the line cannot
+       * claim which one it belongs to. */
+      fprintf (stderr, "client: an offer lists %s\n", mime_type);
     }
 }
 
@@ -1876,6 +1918,40 @@ data_device_selection (void *data, struct wl_data_device *device,
     paste_pending = 1;
 }
 
+/* This client is its own destination: the surface the drag started on is the
+ * only one the nested compositor has to drag over. It is a passive one — no
+ * accept, no receive — which is the shape the in-page loop has to work with
+ * anyway, and it means a run that reaches a drop can say so here. */
+static void
+data_device_enter (void *data, struct wl_data_device *device, uint32_t serial,
+                   struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y,
+                   struct wl_data_offer *offer)
+{
+  fprintf (stderr, "client: %d: dragged onto a surface at %.1f,%.1f serial=%u\n",
+           getpid(), wl_fixed_to_double (x), wl_fixed_to_double (y), serial);
+}
+
+static void
+data_device_motion (void *data, struct wl_data_device *device, uint32_t time,
+                    wl_fixed_t x, wl_fixed_t y)
+{
+  drag_out_motions++;
+  fprintf (stderr, "client: %d: the drag moved to %.1f,%.1f\n", getpid(),
+           wl_fixed_to_double (x), wl_fixed_to_double (y));
+}
+
+static void
+data_device_leave (void *data, struct wl_data_device *device)
+{
+  fprintf (stderr, "client: %d: the drag left the surface\n", getpid());
+}
+
+static void
+data_device_drop (void *data, struct wl_data_device *device)
+{
+  fprintf (stderr, "client: %d: the drag was dropped here\n", getpid());
+}
+
 static void
 data_device_data_offer (void *data, struct wl_data_device *device,
                         struct wl_data_offer *offer)
@@ -1890,6 +1966,10 @@ data_device_data_offer (void *data, struct wl_data_device *device,
 static const struct wl_data_device_listener data_device_listener = {
   .data_offer = data_device_data_offer,
   .selection = data_device_selection,
+  .enter = data_device_enter,
+  .motion = data_device_motion,
+  .leave = data_device_leave,
+  .drop = data_device_drop,
 };
 
 static void
@@ -1899,12 +1979,25 @@ data_source_send (void *data, struct wl_data_source *source,
   const char *payload = copy_text;
   size_t left = strlen (copy_text);
   size_t offset = 0;
+  int is_drag = source == drag_source;
 
-  if (strcmp (mime_type, "text/plain;charset=utf-8") != 0)
+  if (is_drag)
+    {
+      /* Whatever the compositor names, which for a handover is a type this
+       * source was never asked to accept by any destination. A page that keeps
+       * its payload to itself in that case is indistinguishable from a
+       * compositor that never asked, so answer. */
+      payload = drag_text;
+      left = strlen (drag_text);
+      drag_out_reads++;
+      snprintf (drag_out_read_mime, sizeof drag_out_read_mime, "%s", mime_type);
+    }
+  else if (strcmp (mime_type, "text/plain;charset=utf-8") != 0)
     payload = NULL;
 
-  fprintf (stderr, "client: %d: asked for %s, answering with %s\n",
-           getpid(), mime_type, payload ? "the copy" : "nothing");
+  fprintf (stderr, "client: %d: %s asked for %s, answering with %s\n",
+           getpid(), is_drag ? "the drag" : "the selection", mime_type,
+           payload ? (is_drag ? drag_text : "the copy") : "nothing");
 
   while (payload && offset < left)
     {
@@ -1921,13 +2014,61 @@ data_source_send (void *data, struct wl_data_source *source,
 static void
 data_source_cancelled (void *data, struct wl_data_source *source)
 {
+  if (source == drag_source)
+    {
+      drag_source = NULL;
+      fprintf (stderr, "client: %d: the drag was cancelled after %d motion(s) "
+                       "and %d read(s) of %s\n", getpid(), drag_out_motions,
+               drag_out_reads,
+               drag_out_read_mime[0] ? drag_out_read_mime : "(nothing asked)");
+      wl_data_source_destroy (source);
+      return;
+    }
+
   fprintf (stderr, "client: our selection was superseded\n");
   wl_data_source_destroy (source);
 }
 
+/* Every event a version 3 source can be sent. libwayland aborts the connection
+ * on an event whose slot the client left NULL, so binding 3 means answering all
+ * six — including target, which is the one this compositor sends when it reads a
+ * drag's payload for the host. */
+static void
+data_source_target (void *data, struct wl_data_source *source, const char *mime_type)
+{
+  fprintf (stderr, "client: %d: %s: a reader wants %s\n", getpid(),
+           source == drag_source ? "drag" : "selection",
+           mime_type ? mime_type : "(nothing)");
+}
+
+static void
+data_source_drop_performed (void *data, struct wl_data_source *source)
+{
+  fprintf (stderr, "client: %d: %s: the pointer let go\n", getpid(),
+           source == drag_source ? "drag" : "selection");
+}
+
+static void
+data_source_dnd_finished (void *data, struct wl_data_source *source)
+{
+  fprintf (stderr, "client: %d: %s: the destination is done with it\n", getpid(),
+           source == drag_source ? "drag" : "selection");
+}
+
+static void
+data_source_action (void *data, struct wl_data_source *source, uint32_t action)
+{
+  fprintf (stderr, "client: %d: %s: action 0x%x chosen\n", getpid(),
+           source == drag_source ? "drag" : "selection", action);
+}
+
 static const struct wl_data_source_listener data_source_listener = {
+  .target = data_source_target,
   .send = data_source_send,
   .cancelled = data_source_cancelled,
+  .dnd_drop_performed = data_source_drop_performed,
+  .dnd_finished = data_source_dnd_finished,
+  .action = data_source_action,
 };
 
 static void
@@ -1940,6 +2081,31 @@ do_copy (void)
   wl_data_source_add_listener (source, &data_source_listener, source);
   wl_data_device_set_selection (data_device, source, 0);
   fprintf (stderr, "client: %d: took the selection: '%s'\n", getpid(), copy_text);
+}
+
+/* The mime list and the action are the ones measured off a real page's text
+ * drag: three names for one string, copy only. Nothing here is a drop target's
+ * doing — no accept, no receive — because the point of the run is what the
+ * compositor does when the destination is not one of its clients at all. */
+static void
+do_drag_out (uint32_t serial)
+{
+  struct wl_data_source *source;
+
+  source = wl_data_device_manager_create_data_source (data_manager);
+  wl_data_source_offer (source, "text/plain;charset=utf-8");
+  wl_data_source_offer (source, "text/plain");
+  wl_data_source_offer (source, DRAG_OUT_CUSTOM_MIME);
+  wl_data_source_add_listener (source, &data_source_listener, source);
+  wl_data_source_set_actions (source, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+  drag_source = source;
+  drag_out_motions = 0;
+  drag_out_reads = 0;
+  drag_out_read_mime[0] = '\0';
+
+  wl_data_device_start_drag (data_device, source, surface, NULL, serial);
+  fprintf (stderr, "client: %d: started a drag of 3 types, serial=%u, payload '%s'\n",
+           getpid (), serial, drag_text);
 }
 
 /* The compositor does not hand a client back its own selection, so one
@@ -2488,6 +2654,8 @@ main (int argc, char *argv[])
         use_copy = 1;
       else if (!strcmp (argv[i], "--dnd-requests"))
         use_dnd_requests = 1;
+      else if (!strcmp (argv[i], "--drag-out"))
+        use_drag_out = 1;
       else if (!strcmp (argv[i], "--paste"))
         use_paste = 1;
       else if (!strcmp (argv[i], "--text-input"))
@@ -2595,6 +2763,8 @@ main (int argc, char *argv[])
     fprintf (stderr, "client: no wl_data_device_manager, clipboard test impossible\n");
   if (use_dnd_requests && !data_manager)
     fprintf (stderr, "client: no wl_data_device_manager, the v3 requests do not exist\n");
+  if (use_drag_out && !data_manager)
+    fprintf (stderr, "client: no wl_data_device_manager, no drag can be started\n");
   if (use_text_input && !text_input_manager)
     fprintf (stderr, "client: no zwp_text_input_manager_v3, composition impossible\n");
 

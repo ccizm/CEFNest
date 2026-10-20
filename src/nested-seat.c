@@ -605,6 +605,16 @@ nested_compositor_set_pointer_active (NestedCompositor *self, gboolean active)
     return;
 
   self->pointer_wanted = active ? 1u : 0u;
+
+  /* A pointer that left the widget while the page's drag still held it is not
+   * coming back with that drag anywhere to go: the surface it would have been
+   * dropped on belongs to another window. Only worth acting on when a host can
+   * carry the payload on — otherwise the page keeps its drag exactly as it did
+   * before this existed, and the release that arrives later calls it off. */
+  if (!active && nested_compositor_drag_active (self) &&
+      nested_has_drag_out_host (self))
+    nested_compositor_drag_take_out (self);
+
   seat_retarget (self);
 }
 

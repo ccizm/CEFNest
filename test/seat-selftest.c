@@ -11,6 +11,12 @@
  * compositor placed them and a second PNG is composited from the whole stack,
  * which is what the embedding widget draws.
  *
+ * --drag-out hands a page's drag over to the host: the client starts a real
+ * wl_data_device drag from its button press, the script takes the pointer out of
+ * the window twice — once with a coordinate past the edge, once by telling the
+ * seat the pointer is gone — and the run then asserts on the mime, the payload
+ * and the type list that came back, and on the drag being called off.
+ *
  * --gtk-client finishes the run by launching this same binary again as a GTK
  * client of its own compositor. libwayland hands events over as they arrive and
  * a raw client reads what it likes; a toolkit builds state out of the same
@@ -51,6 +57,10 @@ typedef enum {
   STEP_DUMP_TI,
   STEP_DUMP_COMPOSITE,
   STEP_GTK_CLIENT,
+  STEP_DRAG_OUT,
+  STEP_DRAG_OUT_BACK,
+  STEP_DRAG_OUT_LEAVE,
+  STEP_DRAG_OUT_CHECK,
   N_STEP_KINDS
 } StepKind;
 
@@ -68,6 +78,13 @@ static const Step script[] = {
   { STEP_POINTER_ENTER, 300, 200,  60 },
   { STEP_KEYBOARD_ENTER,  0,   0,  60 },
   { STEP_BUTTON_PRESS, BTN_LEFT, 1, 60 },
+  /* A --drag-out run starts here: the press above is where the client's
+   * wl_data_device.start_drag comes from, and this is the pointer leaving the
+   * window. Out past the edge the compositor configured, then back, so that the
+   * rest of the script finds the seat where every other mode leaves it. */
+  { STEP_DRAG_OUT,       700, 500,  60 },
+  { STEP_DRAG_OUT_BACK,  300, 200,  60 },
+  { STEP_DRAG_OUT_CHECK,   1,   0, 200 }, /* the payload read has to land first */
   { STEP_AXIS, WL_POINTER_AXIS_VERTICAL_SCROLL, 100, 60 },
   /* The end of the gesture is a call of its own with no distance, the way GDK
    * reports a touchpad lift. It has to stay a separate step: a stop sent in the
@@ -96,6 +113,12 @@ static const Step script[] = {
    * the dismissal, so the client should report popup_done for the menu. */
   { STEP_POINTER_MOTION,   60,  60, 80 },
   { STEP_BUTTON_PRESS, BTN_LEFT,  1, 60 },
+  /* The same handover again, but asked for the way a real pointer asks: no
+   * coordinate outside the window, just the seat being told the pointer is gone.
+   * The two triggers have to end in the same signal, and only one of them is
+   * what a widget can forward. */
+  { STEP_DRAG_OUT_LEAVE,  0,   0,  60 },
+  { STEP_DRAG_OUT_CHECK,  2,   0, 200 },
   { STEP_BUTTON_RELEASE, BTN_LEFT, 0, 120 },
   { STEP_STACK,           0,   0,   0 },
   { STEP_DUMP_COMPOSITE,  2,   0,   0 },
@@ -108,7 +131,8 @@ static const char *step_names[N_STEP_KINDS] = {
   "settle", "pointer-enter", "pointer-motion", "keyboard-enter", "keyboard-leave",
   "button-press", "button-release", "axis", "axis-stop", "key-down", "key-up",
   "text-input-state", "preedit", "commit", "delete-surrounding", "stack",
-  "dump", "dump-text-input", "dump-composite", "gtk-client",
+  "dump", "dump-text-input", "dump-composite", "gtk-client", "drag-out",
+  "drag-out-back", "drag-out-leave", "drag-out-check",
 };
 
 #define PREEDIT_TEXT "nihao"
@@ -128,6 +152,13 @@ static gboolean client_failed;
 static gboolean dmabuf_mode;
 static gboolean run_finished;
 static guint gtk_client_watchdog_id;
+static gboolean drag_out_mode;
+static gboolean drag_out_failed;
+static int drag_out_seen;
+static int fds_at_drag_out;
+
+static int  open_fds (void);
+static void check_drag_out (int expected);
 
 /* The compositor runs in this process and reports its dmabuf doings through
  * g_log under the "nested" domain. Counting those lines turns a silent shm
@@ -472,15 +503,32 @@ start_gtk_client (GMainLoop *loop)
   g_subprocess_wait_async (gtk_child, NULL, gtk_client_waited, loop);
 }
 
+/* Some steps belong to one mode, and a run of the others has nothing to report
+ * about them: the script is one table, so they are skipped by name. */
+static gboolean
+step_is_ours (StepKind kind)
+{
+  switch (kind)
+    {
+    case STEP_GTK_CLIENT:
+      return gtk_client_mode;
+    case STEP_DRAG_OUT:
+    case STEP_DRAG_OUT_BACK:
+    case STEP_DRAG_OUT_LEAVE:
+    case STEP_DRAG_OUT_CHECK:
+      return drag_out_mode;
+    default:
+      return TRUE;
+    }
+}
+
 static gboolean
 run_step (gpointer data)
 {
   GMainLoop *loop = data;
   const Step *step = &script[step_index];
 
-  /* The gtk4 step belongs to one mode, and a run of the other modes has nothing
-   * to report about it. */
-  if (step->kind != STEP_GTK_CLIENT || gtk_client_mode)
+  if (step_is_ours (step->kind))
     g_print ("selftest: %s\n", step_names[step->kind]);
 
   switch (step->kind)
@@ -570,6 +618,37 @@ run_step (gpointer data)
         g_free (path);
       }
       break;
+    case STEP_DRAG_OUT:
+      if (!drag_out_mode)
+        break;
+
+      fds_at_drag_out = open_fds ();
+      /* Past the edge the compositor configured. The widget stops forwarding at
+       * its own border, so this is what a pointer that left the window looks
+       * like to a seat built out of coordinates. */
+      nested_compositor_notify_pointer_motion (compositor, step->a, step->b);
+      break;
+    case STEP_DRAG_OUT_BACK:
+      if (!drag_out_mode)
+        break;
+
+      nested_compositor_notify_pointer_motion (compositor, step->a, step->b);
+      break;
+    case STEP_DRAG_OUT_LEAVE:
+      if (!drag_out_mode)
+        break;
+
+      fds_at_drag_out = open_fds ();
+      /* The other trigger: what the widget reports when GDK tells it the cursor
+       * crossed out. No coordinate outside the window is ever named. */
+      nested_compositor_set_pointer_active (compositor, FALSE);
+      break;
+    case STEP_DRAG_OUT_CHECK:
+      if (!drag_out_mode)
+        break;
+
+      check_drag_out (step->a);
+      break;
     case STEP_GTK_CLIENT:
       if (!gtk_client_mode)
         break;
@@ -614,6 +693,124 @@ open_fds (void)
   return n;
 }
 
+/* ------------------------------------------------------------ --drag-out */
+
+/* A drag that leaves the window has no destination this compositor can hand to,
+ * so the compositor reads the payload itself and gives the whole thing to the
+ * host. What a real page's text drag was measured to offer is three names for
+ * one string, and --drag-out replays exactly that: the handover has to carry all
+ * three types and the payload under the one the compositor picked out of the
+ * list. */
+#define DRAG_OUT_MIME    "text/plain;charset=utf-8"
+#define DRAG_OUT_PAYLOAD "drag-out-payload"
+#define DRAG_OUT_TYPES   DRAG_OUT_MIME "|text/plain|chromium/x-web-custom-data"
+
+static char drag_out_mime[128];
+static char drag_out_types[512];
+static char drag_out_payload[64];
+static gsize drag_out_size;
+
+static void
+drag_out_handed_over (NestedCompositor *compositor, const char *mime,
+                      GBytes *bytes, char **types, gpointer data)
+{
+  const char *payload = bytes ? g_bytes_get_data (bytes, NULL) : NULL;
+  char *joined = types ? g_strjoinv ("|", types) : NULL;
+  unsigned n_types = types ? g_strv_length (types) : 0;
+  int take;
+
+  (void) compositor;
+  (void) data;
+
+  drag_out_seen++;
+  drag_out_size = bytes ? g_bytes_get_size (bytes) : 0;
+  take = (int) drag_out_size;
+  if (take > (int) sizeof drag_out_payload - 1)
+    take = (int) sizeof drag_out_payload - 1;
+
+  /* Copied, not kept: the signal hands over nothing that outlives its handler. */
+  g_snprintf (drag_out_mime, sizeof drag_out_mime, "%s", mime ? mime : "(none)");
+  g_snprintf (drag_out_types, sizeof drag_out_types, "%s", joined ? joined : "(none)");
+  g_snprintf (drag_out_payload, sizeof drag_out_payload, "%.*s", take,
+              payload ? payload : "");
+  g_free (joined);
+
+  g_print ("selftest: drag-out #%d %s (%" G_GSIZE_FORMAT " bytes, %u type%s) '%s'\n",
+           drag_out_seen, drag_out_mime, drag_out_size, n_types,
+           n_types == 1 ? "" : "s", drag_out_payload);
+}
+
+/* Both triggers of the handover end here, so this is where a run says whether
+ * what came out of the page is what the page put in. */
+static void
+check_drag_out (int expected)
+{
+  int fds_now = open_fds ();
+  gboolean failed = FALSE;
+
+  if (drag_out_seen != expected)
+    {
+      g_printerr ("selftest: drag-out gate FAILED: %d handover(s), wanted %d\n",
+                  drag_out_seen, expected);
+      failed = TRUE;
+    }
+
+  if (drag_out_seen >= expected)
+    {
+      if (strcmp (drag_out_mime, DRAG_OUT_MIME) != 0)
+        {
+          g_printerr ("selftest: drag-out gate FAILED: handed over '%s', wanted '%s'\n",
+                      drag_out_mime, DRAG_OUT_MIME);
+          failed = TRUE;
+        }
+
+      if (strcmp (drag_out_types, DRAG_OUT_TYPES) != 0)
+        {
+          g_printerr ("selftest: drag-out gate FAILED: types '%s', wanted '%s'\n",
+                      drag_out_types, DRAG_OUT_TYPES);
+          failed = TRUE;
+        }
+
+      if (drag_out_size != strlen (DRAG_OUT_PAYLOAD) ||
+          memcmp (drag_out_payload, DRAG_OUT_PAYLOAD, drag_out_size) != 0)
+        {
+          g_printerr ("selftest: drag-out gate FAILED: payload '%s' of %" G_GSIZE_FORMAT
+                      " bytes, wanted '%s'\n", drag_out_payload, drag_out_size,
+                      DRAG_OUT_PAYLOAD);
+          failed = TRUE;
+        }
+    }
+
+  /* The page's drag is the run's other half: a handover that left it alive
+   * would strand a drag with no destination, and one that left the read pipe
+   * open is a descriptor the compositor never gives back. */
+  {
+    char **live = nested_compositor_drag_get_types (compositor);
+
+    if (g_strv_length (live) > 0)
+      {
+        g_printerr ("selftest: drag-out gate FAILED: the page kept its drag, "
+                    "still offering %s\n", g_strjoinv ("|", live));
+        failed = TRUE;
+      }
+
+    g_strfreev (live);
+  }
+
+  if (fds_now > fds_at_drag_out)
+    {
+      g_printerr ("selftest: drag-out gate FAILED: the read left %d descriptor(s) "
+                  "behind\n", fds_now - fds_at_drag_out);
+      failed = TRUE;
+    }
+
+  if (failed)
+    drag_out_failed = TRUE;
+  else
+    g_print ("selftest: drag-out gate ok, %d handover(s) and the drag is gone\n",
+             drag_out_seen);
+}
+
 static void
 fullscreen_request_seen (NestedCompositor *compositor, gboolean enter, gpointer data)
 {
@@ -651,6 +848,7 @@ main (int argc, char *argv[])
     {
       gtk_client_mode = gtk_client_mode || !strcmp (argv[i], "--gtk-client");
       dmabuf_mode = dmabuf_mode || !strcmp (argv[i], "--dmabuf");
+      drag_out_mode = drag_out_mode || !strcmp (argv[i], "--drag-out");
     }
 
   dump_path = argc > 1 ? argv[1] : (char *) "/tmp/seat-selftest.png";
@@ -696,6 +894,11 @@ main (int argc, char *argv[])
            nested_compositor_get_socket_name (compositor), client);
   g_signal_connect (compositor, "window-fullscreen-request",
                     G_CALLBACK (fullscreen_request_seen), NULL);
+  /* Listening is what makes the handover happen: a host that never asked to be
+   * given a drag's payload leaves the page's drag alone, and that is how every
+   * other mode of this test runs. */
+  if (drag_out_mode)
+    g_signal_connect (compositor, "drag-out", G_CALLBACK (drag_out_handed_over), NULL);
   for (int i = 3; i < argc; i++)
     if (!strcmp (argv[i], "--fullscreen"))
       fullscreen_gate = 1;
@@ -792,7 +995,7 @@ main (int argc, char *argv[])
                     fs_enter_seen, fs_exit_seen);
     }
 
-  return (gtk_client_failed || client_failed || dmabuf_refusals ||
+  return (gtk_client_failed || client_failed || drag_out_failed || dmabuf_refusals ||
           (fullscreen_gate && !(fs_enter_seen && fs_exit_seen)) ||
           (dmabuf_mode && dmabuf_advertised == 1 && !dmabuf_imports)) ? 1 : 0;
 }

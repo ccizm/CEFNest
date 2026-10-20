@@ -90,7 +90,13 @@ struct _Drag {
   unsigned int refused : 1;         /* the destination accepted no mime type */
   unsigned int dropped : 1;         /* wl_data_device.drop went out */
   unsigned int concluded : 1;       /* cancelled or dnd_finished went out */
+  unsigned int handing_out : 1;     /* the host is being given its payload */
 };
+
+/* Where a drained payload goes when it is not a copy. NULL @bytes means the
+ * client answered nothing, which is the same as not having asked. */
+typedef void (*TransferFinish) (NestedCompositor *self, const char *mime,
+                                GBytes *bytes);
 
 struct _ClipboardTransfer {
   NestedCompositor *compositor;
@@ -98,6 +104,12 @@ struct _ClipboardTransfer {
   guint source_id;        /* the watch that drains it */
   GByteArray *data;
   char *mime;
+  /* Which of the compositor's two slots this transfer holds, so finishing one
+   * cannot leave the other pointing at freed memory. */
+  ClipboardTransfer **slot;
+  /* Where the payload goes. NULL is a copy: it mirrors onto the widget
+   * clipboard. A drag leaving the page has somewhere else to go. */
+  TransferFinish finish;
 };
 
 /* A copy is text, not a file: past that it is a client misbehaving, and the UI
@@ -160,10 +172,8 @@ pick_text_mime (GPtrArray *types)
 static void
 clipboard_transfer_destroy (ClipboardTransfer *transfer)
 {
-  NestedCompositor *self = transfer->compositor;
-
-  if (self && self->clipboard_transfer == transfer)
-    self->clipboard_transfer = NULL;
+  if (transfer->slot && *transfer->slot == transfer)
+    *transfer->slot = NULL;
 
   if (transfer->source_id != 0)
     g_source_remove (transfer->source_id);
@@ -185,6 +195,27 @@ clipboard_transfer_finish (ClipboardTransfer *transfer, gboolean mirror)
 {
   NestedCompositor *self = transfer->compositor;
   char *text = NULL;
+
+  if (transfer->finish)
+    {
+      TransferFinish finish = transfer->finish;
+      char *mime = g_strdup (transfer->mime);
+      GBytes *bytes = NULL;
+
+      /* Destroyed before the handler runs, and not cancelled by it: the handler
+       * calls the page's drag off, and a drag going away takes its unfinished
+       * read with it — this one has already been taken off the slot. */
+      if (mirror)
+        bytes = g_bytes_new (transfer->data->data, transfer->data->len);
+
+      transfer->source_id = 0;
+      clipboard_transfer_destroy (transfer);
+      finish (self, mime, bytes);
+      if (bytes)
+        g_bytes_unref (bytes);
+      g_free (mime);
+      return;
+    }
 
   if (mirror && mime_is_text (transfer->mime))
     {
@@ -250,7 +281,7 @@ clipboard_transfer_on_data (int fd, GIOCondition condition, gpointer user_data)
           g_byte_array_append (transfer->data, chunk, (gsize) n);
           if (transfer->data->len > CLIPBOARD_MAX_BYTES)
             {
-              g_debug ("nested: a copy bigger than %u bytes: dropped",
+              g_debug ("nested: a payload bigger than %u bytes: dropped",
                        CLIPBOARD_MAX_BYTES);
               clipboard_transfer_finish (transfer, FALSE);
               return G_SOURCE_REMOVE;
@@ -271,21 +302,24 @@ clipboard_transfer_on_data (int fd, GIOCondition condition, gpointer user_data)
   /* A finished copy looks exactly like a hangup: the client closed its write
    * end. Only speak up when nothing came through. */
   if (transfer->data->len == 0)
-    g_debug ("nested: a copy arrived empty");
+    g_debug ("nested: a payload arrived empty");
 
   clipboard_transfer_finish (transfer, TRUE);
   return G_SOURCE_REMOVE;
 }
 
 static void
-client_selection_transfer (NestedCompositor *self, DataSource *source, const char *mime)
+clipboard_transfer_start (NestedCompositor *self, DataSource *source, const char *mime,
+                          TransferFinish finish, ClipboardTransfer **slot)
 {
   ClipboardTransfer *transfer;
   int fds[2];
 
   if (pipe2 (fds, O_CLOEXEC | O_NONBLOCK) != 0)
     {
-      g_warning ("nested: cannot make a pipe for the selection: %s", g_strerror (errno));
+      g_warning ("nested: cannot make a pipe for %s: %s",
+                 finish ? "a drag taken out of the page" : "the selection",
+                 g_strerror (errno));
       return;
     }
 
@@ -299,12 +333,20 @@ client_selection_transfer (NestedCompositor *self, DataSource *source, const cha
   transfer->mime = g_strdup (mime);
   transfer->data = g_byte_array_new ();
   transfer->fd = fds[0];
-  self->clipboard_transfer = transfer;
+  transfer->finish = finish;
+  transfer->slot = slot;
+  *slot = transfer;
 
   transfer->source_id =
     g_unix_fd_add_full (G_PRIORITY_DEFAULT, fds[0],
                         G_IO_IN | G_IO_ERR | G_IO_HUP,
                         clipboard_transfer_on_data, transfer, NULL);
+}
+
+static void
+client_selection_transfer (NestedCompositor *self, DataSource *source, const char *mime)
+{
+  clipboard_transfer_start (self, source, mime, NULL, &self->clipboard_transfer);
 }
 
 /* ----------------------------------------------------- serving a client paste */
@@ -873,6 +915,11 @@ drag_destroy (Drag *drag)
   if (self->drag == drag)
     self->drag = NULL;
 
+  /* A payload still being read for the host belongs to this drag: with the drag
+   * gone there is nobody to hand it to, and the source it came from may already
+   * be on its way out. */
+  clipboard_transfer_cancel (self->drag_out_transfer);
+
   /* The icon and the surface it started from outlive the drag: their client
    * destroys them, and a surface that was an icon is not one any more. */
   if (drag->icon)
@@ -964,6 +1011,96 @@ nested_compositor_drag_active (NestedCompositor *self)
   return self->drag && self->drag->owns_pointer;
 }
 
+/* ------------------------------------------------------------ a drag leaving */
+
+/* A payload read out of a drag is not a copy: nothing here touches the widget
+ * clipboard, because the host is the one that has to decide what a drag leaving
+ * the window means. The page's drag is called off as soon as the read ends —
+ * whether or not anything came back — because its destination is not a surface
+ * of ours and keeping it alive would leave a drag nobody can finish. */
+static void
+drag_out_finish (NestedCompositor *self, const char *mime, GBytes *bytes)
+{
+  char **types = nested_compositor_drag_get_types (self);
+  gsize size = bytes ? g_bytes_get_size (bytes) : 0;
+
+  /* The types are copied first: the client owns the source, and a drag it has
+   * been told is cancelled is one it may destroy at any moment. */
+  if (self->drag)
+    drag_cancel (self->drag);
+
+  if (size == 0)
+    {
+      g_debug ("nested: the drag left the page and nothing came back for %s", mime);
+      g_strfreev (types);
+      return;
+    }
+
+  g_debug ("nested: the drag left the page as %s (%" G_GSIZE_FORMAT " bytes, %u types)",
+           mime, size, (unsigned) g_strv_length (types));
+
+  nested_emit_drag_out (self, mime, bytes, types);
+  g_strfreev (types);
+}
+
+char **
+nested_compositor_drag_get_types (NestedCompositor *self)
+{
+  char **types;
+  gsize i;
+
+  g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), NULL);
+
+  if (!self->drag || !self->drag->source)
+    return g_new0 (char *, 1);
+
+  types = g_new0 (char *, self->drag->source->mime_types->len + 1);
+  for (i = 0; i < self->drag->source->mime_types->len; i++)
+    types[i] = g_strdup (g_ptr_array_index (self->drag->source->mime_types, i));
+
+  return types;
+}
+
+gboolean
+nested_compositor_drag_take_out (NestedCompositor *self)
+{
+  DataSource *source;
+  const char *mime;
+
+  g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), FALSE);
+
+  if (!self->drag || !self->drag->owns_pointer)
+    return FALSE;
+
+  if (self->drag->handing_out)
+    return FALSE;
+
+  source = self->drag->source;
+  if (!source || source->mime_types->len == 0)
+    {
+      g_debug ("nested: the drag left the page carrying nothing that could be taken");
+      drag_cancel (self->drag);
+      return FALSE;
+    }
+
+  self->drag->handing_out = TRUE;
+
+  /* One type, not the list: this is the same single read a destination makes
+   * after wl_data_offer.accept, and four representations of one thing are still
+   * one payload. Asking before telling would be the other way round — a source
+   * that has not been told which type is wanted is a source that has no reason
+   * to answer. */
+  mime = pick_text_mime (source->mime_types);
+  wl_data_source_send_target (source->resource, mime);
+  clipboard_transfer_start (self, source, mime, drag_out_finish,
+                            &self->drag_out_transfer);
+
+  g_debug ("nested: the pointer left the page mid-drag: taking %s of %u types",
+           mime, source->mime_types->len);
+
+  return TRUE;
+}
+
 NestedSurface *
 nested_compositor_drag_icon (NestedCompositor *self)
 {
@@ -998,6 +1135,23 @@ nested_compositor_drag_motion (NestedCompositor *self)
 
   if (!self->drag || !self->drag->owns_pointer)
     return;
+
+  /* A position outside the size the widget configured is a pointer that is no
+   * longer over the page: the embedding widget cannot forward one, because its
+   * surface stops having the pointer at its own edge. Checking it here rather
+   * than only in the leave path is what lets a scripted seat — which feeds
+   * coordinates, not crossings — reach the same code a real pointer does. */
+  if (self->width > 0 && self->height > 0 &&
+      (self->pointer_x < 0 || self->pointer_y < 0 ||
+       self->pointer_x >= self->width || self->pointer_y >= self->height))
+    {
+      if (nested_has_drag_out_host (self) &&
+          nested_compositor_drag_take_out (self))
+        {
+          nested_flush (self);
+          return;
+        }
+    }
 
   nested_compositor_drag_move_icon (self);
   drag_update_destination (self->drag);
