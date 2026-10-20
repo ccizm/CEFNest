@@ -44,10 +44,13 @@ example, by calling CefWindow::SetFullscreen when using Views)"。Chrome runtime
   尺寸），dmabuf 长到全屏物理尺寸；`document.exitFullscreen()` → `FS-OFF`
   + unset 请求到达合成器。
 
-## 5. 已知遗留
+## 5. 排查记录（已闭环）
 
-- **退出后的窗口尺寸恢复**：页面退出全屏、`unset_fullscreen` 到达后，宿主
-  窗口被 GTK 还原的尺寸出现了停留在 1920×1080（≈全屏 CSS 尺寸×1.25）的
-  观测，未回到进入前的 1000×653。页面级状态正确，窗口可移动/缩放，但尺寸
-  还原路径需要专项排查（怀疑全屏期间 `set_size` 的推送与 GTK 的还原序列
-  竞争）；期间的 `js` 读回可能出现 `{}`（退出过渡与 V8 注入读回的竞态）。
+- **"退出后窗口没有变小"是正确行为**：前后对照实测（`pre inner=1536x864` →
+  FS-ON → `post inner=1536x864 fs=false`）显示进入全屏前窗口本就是最大化
+  （1080p@1.25 = 1536×864），退出全屏恢复到最大化状态——还原语义正确，
+  1920×1080 的 buffer 恰是最大化尺寸 ×1.25。此前当作 quirk 记录是误判。
+- **`exitFullscreen()` 之后的下一次 V8 注入读回返回 `{}`**（2/2 复现，
+  与过渡竞态）：只影响 session 脚本的 js 断言时序，页面无感。规避：读回
+  与 `exitFullscreen` 之间隔开一步 `wait`，或读回放在页面自己的
+  fullscreenchange 监听里。
