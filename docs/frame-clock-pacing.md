@@ -162,3 +162,59 @@ paint——**done → 上屏从 2 个周期变为 1 个周期**。对应到输�
 
 输入投递（≤1 周期，GTK 事件压缩）+ 客户端绘制（CEF 决定）+ 1 次 vsync 上屏。
 这就是嵌套合成架构的理论下限，组件侧已无大的可挤空间。
+
+## 8. 第三轮：时钟会沉默，客户端不能跟着停（2026-10-21）
+
+搭 headless CI 会话（`test/ci-session.sh`，nested mutter `--headless`）之后，同一个
+`test/find-gate.sh` 在真桌面 6/6 过，在 headless 里 6 次只过 2 次，失败的都是
+`scrollTop was 0 after the step`。第一反应是"步进滚动是二峰的、有时慢"，于是把一次
+固定延时的快照换成 15 次采样（每 600ms 一次，覆盖 9 秒）——**结果 4/5 次全程是 0**，
+1 次在步进后 400ms 就已经是 2749。不是慢，是有和没有。
+
+### 测量：页面到底有没有在出帧
+
+在页内挂一个 rAF 计数器，同时给合成器的 frame 路径打临时 PROBE 日志：
+
+| 指标 | 真桌面 | headless（改前） |
+|---|---|---|
+| 1 秒内的 rAF 次数 | 62 | **2**（此后不再增长） |
+| 客户端 `wl_surface.frame` 请求 | 每次都在 1~15ms 内等到 after-paint | 全程**只有 1 次**，且从未被回答 |
+| `after-paint` 发射次数 | 持续 | 全程 **1** 次（挂上时钟后 2.3s 的首个周期） |
+| 客户端 commit | 持续（#1…#6+） | **2 次**之后再无 |
+| `shot` 截图 | 页面 + 命中高亮 | 纯色空白 |
+| find-next 后 scrollTop | 2749 | 0（等 9 秒仍是 0） |
+| `wheel` 脚本步 | 有效 | 无效 |
+| 页内 `scrollIntoView()` | 有效 | **有效**（2749） |
+
+最后一行是定性的关键：主线程的即时滚动照样生效，说明 scroller、合成、提交链路都是
+好的，冻结的只有**需要 BeginFrame 节拍的那一半**——查找命中点的 reveal 和滚轮。所以
+这不是查找路径的问题，`docs/find-path.md` 的结论不动。
+
+### 根因
+
+`nested_start_frame_clock()` 只在"根本没有时钟"时才走 16ms 定时器兜底。headless
+mutter 没有输出设备，GDK 此后再不产生显示周期：我们请求的 `AFTER_PAINT` 相位永远
+不会有人兑现，客户端那一次 frame 请求就永远挂在队列里，Chromium 靠自己的 vsync
+回退挤出十几帧后彻底停住。§7 里"单独请求 AFTER_PAINT 会让周期照常按 vsync 运行"
+这句 GTK 行为的引用，前提正是**有 vsync 可等**。
+
+### 改动：给时钟配看门狗
+
+- `clock_alive`：挂上时钟时为真；一次 `after-paint` 回答即为真；到点没回答则为假。
+- `nested_start_frame_clock()`：有时钟**且**它还活着 → 请求相位并武装一个
+  `FRAME_CLOCK_WAIT_MS`（100ms，6 个名义帧间隔）的一次性看门狗；否则 → 16ms 定时器。
+- `frame_clock_after_paint()`：撤销看门狗与定时器，回到时钟节拍。
+- `frame_clock_tick()`：接管期间每一跳仍然照旧 `request_phase`，这样显示一旦恢复，
+  一个 after-paint 就能把节拍交还给时钟，不会永远停在兜底路径上。
+
+改完 headless 侧：rAF 回到 62/秒，步进后 scrollTop=2749，`shot` 出图与真桌面一致
+（含 `belowthefold` 的橙色高亮），`test/find-gate.sh` 在 headless 会话里连过 3 次。
+
+### 代价
+
+§2 那条副产品——"窗口被遮挡或最小化时 GDK frame clock 停摆 → 客户端回调随之暂停"
+——现在只维持 100ms，之后客户端会以兜底节拍继续画。两种"时钟沉默"（没有 vsync 的
+显示 / 不在任何输出上的窗口）在组件内部无法区分：一个让整页冻结，一个只是空转，
+取舍不需要犹豫。真正要暂停客户端的信号是 unmap，`chromium_view_on_unmap()` 照旧
+把时钟摘掉。
+

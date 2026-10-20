@@ -176,6 +176,8 @@ struct _NestedCompositor {
   guint frame_timer_id;
   GdkFrameClock *frame_clock;   /* the embedding widget's, may be NULL */
   gulong frame_clock_handler;
+  guint frame_watchdog_id;      /* armed while a waiting client has no answer */
+  gboolean clock_alive;         /* FALSE once the widget's clock missed a cycle */
   char *socket_name;
 
   struct wl_global *global_compositor;

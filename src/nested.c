@@ -1538,15 +1538,33 @@ fire_pending_frame_callbacks (NestedCompositor *self)
   return again;
 }
 
-/* Fallback pacing for when no widget clock is attached (tests, headless runs):
- * a plain timer that is neither aligned with the display nor paused when the
- * widget is hidden, which is exactly why the widget attaches its frame clock. */
+/* How long to wait for the attached clock to run a cycle before pacing by timer
+ * instead. Six nominal frame intervals: slower than any display that is worth
+ * aligning to, so a healthy clock is never demoted mid-run, and one missed
+ * interval of it is all a display without vsync costs the page. */
+#define FRAME_CLOCK_WAIT_MS 100
+
+/* Fallback pacing for a clock that cannot be waited for: either no widget clock
+ * is attached at all (tests, headless runs), or the attached one has stopped
+ * running cycles. A compositor with no output device sends GDK no frame events,
+ * so a requested after-paint never arrives, the frame request it was covering
+ * never gets answered, and Chromium stops producing frames after the handful it
+ * got from its own vsync fallback — measured on a nested mutter with no monitor,
+ * where a page froze at two animation frames a second and never painted at all.
+ * A plain timer is neither aligned with the display nor paused when the widget
+ * is hidden, which is why the clock is preferred whenever it answers. */
 static gboolean
 frame_clock_tick (gpointer data)
 {
   NestedCompositor *self = data;
 
   self->frame_timer_id = 0;
+
+  /* Keep asking while the timer paces: a display that comes back answers with an
+   * after-paint, and that is what hands the pacing over to the clock again. */
+  if (self->frame_clock)
+    gdk_frame_clock_request_phase (self->frame_clock,
+                                   GDK_FRAME_CLOCK_PHASE_AFTER_PAINT);
 
   if (fire_pending_frame_callbacks (self))
     self->frame_timer_id = g_timeout_add (16, frame_clock_tick, self);
@@ -1562,14 +1580,42 @@ frame_clock_tick (gpointer data)
  * paints, and every frame would land two cycles after its done instead of
  * one. While anyone still waits, keep asking for after-paint phases; with
  * nobody waiting the clock idles until a commit or a frame request speaks up
- * again. */
+ * again. Answering at all is also what promotes the clock back over the timer. */
 static void
 frame_clock_after_paint (GdkFrameClock *clock, gpointer data)
 {
   NestedCompositor *self = data;
 
-  if (fire_pending_frame_callbacks (self))
-    gdk_frame_clock_request_phase (clock, GDK_FRAME_CLOCK_PHASE_AFTER_PAINT);
+  self->clock_alive = TRUE;
+
+  if (self->frame_watchdog_id)
+    {
+      g_source_remove (self->frame_watchdog_id);
+      self->frame_watchdog_id = 0;
+    }
+
+  if (self->frame_timer_id)
+    {
+      g_source_remove (self->frame_timer_id);
+      self->frame_timer_id = 0;
+    }
+
+  nested_start_frame_clock (self);
+}
+
+/* The clock went quiet. Say so and let the timer take the waiting clients,
+ * because waiting on a display that never paints costs the page its frames. */
+static gboolean
+frame_clock_watchdog (gpointer data)
+{
+  NestedCompositor *self = data;
+
+  self->frame_watchdog_id = 0;
+  self->clock_alive = FALSE;
+
+  nested_start_frame_clock (self);
+
+  return G_SOURCE_REMOVE;
 }
 
 static void
@@ -1590,9 +1636,14 @@ nested_start_frame_clock (NestedCompositor *self)
   if (!pending)
     return;
 
-  if (self->frame_clock)
-    gdk_frame_clock_request_phase (self->frame_clock,
-                                   GDK_FRAME_CLOCK_PHASE_AFTER_PAINT);
+  if (self->frame_clock && self->clock_alive)
+    {
+      gdk_frame_clock_request_phase (self->frame_clock,
+                                     GDK_FRAME_CLOCK_PHASE_AFTER_PAINT);
+      if (!self->frame_watchdog_id)
+        self->frame_watchdog_id = g_timeout_add (FRAME_CLOCK_WAIT_MS,
+                                                 frame_clock_watchdog, self);
+    }
   else if (!self->frame_timer_id)
     self->frame_timer_id = g_timeout_add (16, frame_clock_tick, self);
 }
@@ -1824,6 +1875,12 @@ nested_compositor_dispose (GObject *object)
     {
       g_source_remove (self->frame_timer_id);
       self->frame_timer_id = 0;
+    }
+
+  if (self->frame_watchdog_id)
+    {
+      g_source_remove (self->frame_watchdog_id);
+      self->frame_watchdog_id = 0;
     }
 
   if (self->selection_replay_id)
@@ -2256,6 +2313,15 @@ nested_compositor_set_frame_clock (NestedCompositor *self, GdkFrameClock *clock)
       g_source_remove (self->frame_timer_id);
       self->frame_timer_id = 0;
     }
+
+  if (self->frame_watchdog_id)
+    {
+      g_source_remove (self->frame_watchdog_id);
+      self->frame_watchdog_id = 0;
+    }
+
+  /* A clock that has only just been attached has not missed anything yet. */
+  self->clock_alive = TRUE;
 
   if (!clock)
     {
