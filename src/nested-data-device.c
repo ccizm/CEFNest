@@ -172,8 +172,14 @@ clipboard_transfer_finish (ClipboardTransfer *transfer, gboolean mirror)
        * on the notification for a change we made ourselves. */
       g_clear_pointer (&self->clipboard_bytes, g_bytes_unref);
       g_clear_pointer (&self->clipboard_mime, g_free);
-      self->clipboard_bytes = g_bytes_new (text, strlen (text));
-      self->clipboard_mime = g_strdup (text_mimes[0]);
+
+      /* Only non-empty text is mirrored: a 0-byte mirror reads as a selection
+       * to the paste path and would keep it from re-reading the clipboard. */
+      if (*text)
+        {
+          self->clipboard_bytes = g_bytes_new (text, strlen (text));
+          self->clipboard_mime = g_strdup (text_mimes[0]);
+        }
     }
 
   g_debug ("nested: a client copied %s (%u bytes), %s", transfer->mime,
@@ -516,11 +522,20 @@ compositor_clipboard_read_done (GObject *clipboard, GAsyncResult *result, gpoint
   char *text;
 
   text = gdk_clipboard_read_text_finish (GDK_CLIPBOARD (clipboard), result, &error);
-  if (!text)
+  if (!text || !*text)
     {
-      g_debug ("nested: the clipboard gave no text: %s",
-               error ? error->message : "unknown");
+      if (error)
+        g_debug ("nested: the clipboard gave no text: %s", error->message);
       g_clear_error (&error);
+      g_free (text);
+
+      /* Nothing to mirror — and an empty mirror is worse than none, because a
+       * client that is offered one never reaches the read-again-on-demand path
+       * that would have got the real text a moment later. */
+      g_clear_pointer (&self->clipboard_bytes, g_bytes_unref);
+      g_clear_pointer (&self->clipboard_mime, g_free);
+      if (!self->selection_source)
+        compositor_advertise_selection (self, NULL);
       return;
     }
 

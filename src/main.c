@@ -646,6 +646,37 @@ clipboard_changed (GObject *clipboard, GParamSpec *pspec, gpointer data)
 }
 
 static void
+clipboard_seed (const char *why)
+{
+  const char *seed = g_getenv ("CHROMIUM_CLIPSET");
+  GdkClipboard *clipboard;
+
+  if (!seed || !*seed || !demo.window)
+    return;
+
+  clipboard = gdk_display_get_clipboard (gtk_widget_get_display (GTK_WIDGET (demo.window)));
+  gdk_clipboard_set_text (clipboard, seed);
+  g_printerr ("demo: seeded the clipboard with '%s' (%s, window active=%d)\n", seed, why,
+              gtk_window_is_active (demo.window));
+}
+
+/* Wayland gives the selection to a client only while that client holds keyboard
+ * focus, so a seed sent before the window is activated can be taken straight
+ * back — and an empty clipboard looks exactly like a bridge that cannot paste.
+ * Seed on sight and once more when the window gets it, whichever comes first. */
+static void
+window_active_changed (GtkWindow *window, GParamSpec *pspec, gpointer data)
+{
+  static gboolean reseeded = FALSE;
+
+  if (reseeded || !gtk_window_is_active (window))
+    return;
+
+  reseeded = TRUE;
+  clipboard_seed ("on activation");
+}
+
+static void
 setup_clipboard_test (void)
 {
   GdkClipboard *clipboard;
@@ -659,8 +690,8 @@ setup_clipboard_test (void)
 
   if (seed && *seed)
     {
-      gdk_clipboard_set_text (clipboard, seed);
-      g_printerr ("demo: seeded the clipboard with '%s'\n", seed);
+      g_signal_connect (demo.window, "notify::active", G_CALLBACK (window_active_changed), NULL);
+      clipboard_seed ("at startup");
     }
 }
 
