@@ -138,6 +138,26 @@ $ python3 test/audit-impl-slots.py
 
 修复前它报的是 **3 个空槽**——正好是这三个。任何一次版本升级之后都要重跑它。
 
+静态审计只看初始化式，运行时会来的另一半现在是 `test/shm-client.c` 的 `--dnd-requests`：
+第一个连接用 `application/x-chromiumgtk-dnd-probe` 这个 mime 拿下选择权并发
+`wl_data_source.set_actions`，**第二个连接**（同一个进程的另一条 Wayland 连接，对 compositor
+来说就是别的客户端）收到这个 offer，再发 `wl_data_offer.set_actions` + `wl_data_offer.finish`。
+compositor 不会把客户端自己的选择权还给它自己（`data_device_advertise()` 里那句
+"nobody is handed back their own copy"），所以要两个连接才凑得出"有主 + 有人收"。
+
+```
+$ ./builddir/test/seat-selftest /tmp/x.png "$PWD/builddir/test/shm-client" --dnd-requests
+client: sent wl_data_source.set_actions and took the selection
+client: the second connection was offered application/x-chromiumgtk-dnd-probe
+client: sent wl_data_offer.set_actions and .finish on id 4278190080
+client: still connected on both halves (main error=0 second error=0)
+selftest: finished at step 27, 139 fds open (119 at start)
+```
+
+挑这个 mime 是有原因的：`pick_text_mime()` 在没有文本 mime 时会退回第一个 mime，于是 compositor
+还是来 `send` 了一趟，但 `clipboard_transfer_finish()` 里 `mime_is_text()` 为假就不往外面写——
+所以这条测试**不碰宿主剪贴板**（日志里那句 `which is not bridged` 就是这件事）。
+
 ## 7. 验证
 
 | 跑法 | 结果 |
@@ -148,13 +168,17 @@ $ python3 test/audit-impl-slots.py
 | `/tmp/manyclick.script` × 5 | 4–8 次 copy，0 次 abort，其中 2 次带 `set_actions` |
 | `seat-selftest` 六模式 | 全部 step 24；fd 115 → 133（`--refused` 128） |
 | `test/audit-impl-slots.py` | 0 空槽 |
+| `seat-selftest --dnd-requests`（修复后） | exit=0，三条 nested 日志都出现：`supports actions 0x3`、`wants action 0x1 of 0x1`、`finished a drag that was never started` |
+| 同上，把三个槽再掏空（对照） | exit=134，`listener function for opcode 2 of wl_data_source is NULL`——仓库里第一次自己复现出这个死法 |
 
 ## 8. 还没做的
 
 - **拖放本身还是没有**：`start_drag` 继续拒绝，`data_offer_finish` / `set_actions` 只是把槽占住。
   要真做拖放得先有"往 widget 外面放"的目标，那是另一件事。
-- **dndprobe 还在 `/tmp`**：值得并进 `test/shm-client.c` 当一个 `--dnd-requests` 模式，这样第 6 节
-  的审计和这条运行时检查都在仓库里。
+- ~~dndprobe 还在 `/tmp`~~：已经落成 `test/shm-client.c` 的 `--dnd-requests`（第 6 节），`/tmp` 那份
+  可以扔了。seat-selftest 不用改——它本来就把 `argv[3:]` 转交给客户端。
+- **`--dnd-requests` 不在默认闸门里**：六模式那条命令不带它。要让它每次自测都跑，就得把它加进
+  #26 的 `meson test`，而不是让每个跑的人记一条命令行。
 - **seat-selftest 没有拖拽回归**：现在只有 demo 脚本这条路径会碰到 `set_actions`。
 - **#28 升版本前必须先跑审计**：`xdg_toplevel_impl` 连 `.close` 都没填，这类空槽在别的接口上一旦
   版本抬起来就是同一个死法。

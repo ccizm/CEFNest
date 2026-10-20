@@ -3,7 +3,10 @@
  * obvious just by looking at the GTK window. With --dmabuf the same picture is
  * uploaded through a GBM buffer and zwp_linux_dmabuf_v1 instead of wl_shm.
  * With --popup it also opens a menu and a submenu over itself, so placement,
- * hit-testing and dismissal can be checked against the rules it chose. */
+ * hit-testing and dismissal can be checked against the rules it chose. With
+ * --dnd-requests it sends the three wl_data_device_manager version 3 requests
+ * that abort a compositor whose implementation slots are empty — see
+ * docs/empty-request-slot.md. */
 #define _GNU_SOURCE
 
 #include <errno.h>
@@ -110,6 +113,14 @@ static int advertised_formats;
 static int advertised_modifiers;
 static char render_node[64] = "/dev/dri/renderD128";
 
+/* The three requests that only exist from wl_data_device_manager version 3,
+ * and that killed the whole compositor while their slots were empty:
+ * wl_data_source.set_actions, wl_data_offer.set_actions, wl_data_offer.finish.
+ * --dnd-requests sends all three. See dnd_requests_probe() for why that needs
+ * a second connection. */
+static int use_dnd_requests;
+static int dnd_done;
+
 /* Text input (zwp_text_input_v3). --text-input makes the client a field the
  * compositor can compose into: it reports surrounding text as soon as the text
  * input enters, and --text-input-password does the same for a password field,
@@ -201,6 +212,7 @@ static const struct wl_data_offer_listener data_offer_listener;
 static const struct wl_data_source_listener data_source_listener;
 static const struct zwp_text_input_v3_listener text_input_listener;
 static void do_copy (void);
+static void dnd_requests_probe (void);
 static void ensure_data_device (void);
 static void ensure_text_input (void);
 static void ensure_cursor_shape (void);
@@ -664,6 +676,15 @@ frame_done (void *data, struct wl_callback *callback, uint32_t time)
         }
       else
         fprintf (stderr, "client: no data device, cannot copy\n");
+    }
+
+  /* Same timing rule as the copy: the seat may only have advertised its
+   * capabilities after the first frame. */
+  if (use_dnd_requests && !dnd_done && frames > 3)
+    {
+      dnd_done = 1;
+      ensure_data_device ();
+      dnd_requests_probe ();
     }
 
   /* Open the popups once the toplevel has been configured and is drawing: the
@@ -1872,6 +1893,161 @@ do_copy (void)
   fprintf (stderr, "client: %d: took the selection: '%s'\n", getpid(), copy_text);
 }
 
+/* The compositor does not hand a client back its own selection, so one
+ * connection cannot both put up an offer and be the target of it. A second
+ * connection is a second wl_client as far as the compositor is concerned, and
+ * that is enough: the first takes the selection, the second receives the offer
+ * and answers it. Everything here stays inside the nested compositor because
+ * the mime below is not one the clipboard bridge copies outward — the host
+ * clipboard is left alone. */
+#define DND_PROBE_MIME "application/x-chromiumgtk-dnd-probe"
+
+static struct wl_display *dnd_display;
+static struct wl_data_device_manager *dnd_manager;
+static struct wl_seat *dnd_seat;
+static struct wl_data_device *dnd_device;
+static struct wl_data_offer *dnd_offer;
+
+static void
+dnd_offer_mime (void *data, struct wl_data_offer *offer, const char *mime_type)
+{
+  fprintf (stderr, "client: the second connection was offered %s\n", mime_type);
+}
+
+static void
+dnd_offer_actions (void *data, struct wl_data_offer *offer, uint32_t actions)
+{
+  fprintf (stderr, "client: that offer supports actions 0x%x\n", actions);
+}
+
+static const struct wl_data_offer_listener dnd_offer_listener = {
+  .offer = dnd_offer_mime,
+  .source_actions = dnd_offer_actions,
+  .action = dnd_offer_actions,
+};
+
+static void
+dnd_device_offer (void *data, struct wl_data_device *device, struct wl_data_offer *offer)
+{
+  dnd_offer = offer;
+  wl_data_offer_add_listener (offer, &dnd_offer_listener, NULL);
+}
+
+static void
+dnd_device_selection (void *data, struct wl_data_device *device,
+                      struct wl_data_offer *offer)
+{
+  fprintf (stderr, "client: the second connection's selection is offer id %u\n",
+           offer ? wl_proxy_get_id ((struct wl_proxy *) offer) : 0);
+}
+
+static void
+dnd_device_leave (void *data, struct wl_data_device *device)
+{
+}
+
+static const struct wl_data_device_listener dnd_device_listener = {
+  .data_offer = dnd_device_offer,
+  .selection = dnd_device_selection,
+  .leave = dnd_device_leave,
+};
+
+static void
+dnd_registry_global (void *data, struct wl_registry *registry, uint32_t name,
+                     const char *interface, uint32_t version)
+{
+  if (!strcmp (interface, "wl_data_device_manager"))
+    dnd_manager = wl_registry_bind (registry, name, &wl_data_device_manager_interface,
+                                    version < 3 ? version : 3);
+  else if (!strcmp (interface, "wl_seat"))
+    dnd_seat = wl_registry_bind (registry, name, &wl_seat_interface, 1);
+}
+
+static void
+dnd_registry_global_remove (void *data, struct wl_registry *registry, uint32_t name)
+{
+}
+
+static const struct wl_registry_listener dnd_registry_listener = {
+  .global = dnd_registry_global,
+  .global_remove = dnd_registry_global_remove,
+};
+
+static void
+dnd_requests_probe (void)
+{
+  struct wl_data_source *source;
+  struct wl_registry *registry;
+  int spins;
+
+  if (!data_device)
+    {
+      fprintf (stderr, "client: no data device, the v3 requests cannot be sent\n");
+      return;
+    }
+
+  dnd_display = wl_display_connect (NULL);
+  if (!dnd_display)
+    {
+      fprintf (stderr, "client: cannot open the second connection for the probe\n");
+      return;
+    }
+
+  registry = wl_display_get_registry (dnd_display);
+  wl_registry_add_listener (registry, &dnd_registry_listener, NULL);
+  wl_display_roundtrip (dnd_display);
+
+  if (!dnd_manager || !dnd_seat)
+    {
+      fprintf (stderr, "client: second connection got manager=%d seat=%d, probe abandoned\n",
+               !!dnd_manager, !!dnd_seat);
+      wl_display_disconnect (dnd_display);
+      dnd_display = NULL;
+      return;
+    }
+
+  /* Created before the selection, or there is nothing to advertise to it. */
+  dnd_device = wl_data_device_manager_get_data_device (dnd_manager, dnd_seat);
+  wl_data_device_add_listener (dnd_device, &dnd_device_listener, NULL);
+  wl_display_roundtrip (dnd_display);
+
+  /* Request 2 of wl_data_source. Chromium sends this before it even tries to
+   * start a drag, which is why an empty slot here took the whole desktop down. */
+  source = wl_data_device_manager_create_data_source (data_manager);
+  wl_data_source_offer (source, DND_PROBE_MIME);
+  wl_data_source_add_listener (source, &data_source_listener, source);
+  wl_data_source_set_actions (source, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
+                              WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
+  wl_data_device_set_selection (data_device, source, 1);
+  fprintf (stderr, "client: sent wl_data_source.set_actions and took the selection\n");
+  wl_display_roundtrip (display);
+
+  for (spins = 0; !dnd_offer && spins < 10; spins++)
+    wl_display_roundtrip (dnd_display);
+
+  if (!dnd_offer)
+    fprintf (stderr, "client: no offer reached the second connection, so the two "
+                     "wl_data_offer requests were not sent\n");
+  else
+    {
+      /* Requests 4 and 3 of wl_data_offer. finish() belongs to a drag that
+       * never happens here — sending it at all is the point, the slot has to
+       * hold whatever the compositor thinks of the gesture. */
+      wl_data_offer_set_actions (dnd_offer, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY,
+                                 WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+      wl_data_offer_finish (dnd_offer);
+      fprintf (stderr, "client: sent wl_data_offer.set_actions and .finish on id %u\n",
+               wl_proxy_get_id ((struct wl_proxy *) dnd_offer));
+    }
+
+  /* A compositor that did not like any of this answers with an error, and the
+   * error only shows up once both connections have been flushed. */
+  wl_display_roundtrip (dnd_display);
+  wl_display_roundtrip (display);
+  fprintf (stderr, "client: still connected on both halves (main error=%d second error=%d)\n",
+           wl_display_get_error (display), wl_display_get_error (dnd_display));
+}
+
 static void
 seat_name_listener (void *data, struct wl_seat *wl_seat, const char *name)
 {
@@ -2259,6 +2435,8 @@ main (int argc, char *argv[])
         use_dmabuf = 1;
       else if (!strcmp (argv[i], "--copy"))
         use_copy = 1;
+      else if (!strcmp (argv[i], "--dnd-requests"))
+        use_dnd_requests = 1;
       else if (!strcmp (argv[i], "--paste"))
         use_paste = 1;
       else if (!strcmp (argv[i], "--text-input"))
@@ -2364,6 +2542,8 @@ main (int argc, char *argv[])
            (void *) viewporter, (void *) fractional_manager, (void *) data_manager);
   if (!data_manager && (use_copy || use_paste))
     fprintf (stderr, "client: no wl_data_device_manager, clipboard test impossible\n");
+  if (use_dnd_requests && !data_manager)
+    fprintf (stderr, "client: no wl_data_device_manager, the v3 requests do not exist\n");
   if (use_text_input && !text_input_manager)
     fprintf (stderr, "client: no zwp_text_input_manager_v3, composition impossible\n");
 
