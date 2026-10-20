@@ -214,19 +214,37 @@ dmabuf_build_format_table (NestedCompositor *self)
     self->dmabuf_device = (uint64_t) st.st_rdev;
 }
 
-void
-nested_setup_dmabuf (NestedCompositor *self)
+/* Our four single-plane 8888 formats — everything else stays out (M2 硬约束:
+ * 单平面 8888，见 .memory/pitfalls-and-constraints.md). GDK 的支持清单里
+ * 只有这四个之一才会进入 feedback。 */
+static gboolean
+format_is_single_plane_8888 (uint32_t fourcc)
 {
-  static const uint32_t fourccs[] = {
+  static const uint32_t ours[] = {
     DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888,
     DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888,
   };
-  /* Implicit (INVALID) is what a plain gbm_bo_create() yields; LINEAR is the
-   * one modifier every driver really supports. Tiled modifiers would only
-   * matter for scan-out, which a nested compositor does not do. */
-  static const uint64_t modifiers[] = { DRM_FORMAT_MOD_INVALID, DRM_FORMAT_MOD_LINEAR };
-  size_t f, m;
+  size_t i;
 
+  for (i = 0; i < G_N_ELEMENTS (ours); i++)
+    if (fourcc == ours[i])
+      return TRUE;
+
+  return FALSE;
+}
+
+void
+nested_setup_dmabuf (NestedCompositor *self)
+{
+  /* The gbm device stays open for one reason: the feedback's main_device is
+   * the dev_t of the render node, and clients (CEF) use it to pick the device
+   * they allocate on. The authoritative format+modifier list, however, is
+   * what this very process can import: GDK probes
+   * its renderer's EGL and publishes every (format, modifier) pair it can
+   * turn into a GdkTexture. Clients allocating from that list are guaranteed
+   * an import, and a driver that offers tiles gets to render into tiles —
+   * advertising only LINEAR here was forcing Chromium into linear buffers
+   * (see the modifier=0x0 imports in every pre-change log). */
   self->gbm = gbm_open_render_node ();
   if (!self->gbm)
     {
@@ -234,22 +252,42 @@ nested_setup_dmabuf (NestedCompositor *self)
       return;
     }
 
-  for (f = 0; f < G_N_ELEMENTS (fourccs); f++)
+  GdkDmabufFormats *formats = gdk_display_get_dmabuf_formats (gdk_display_get_default ());
+  gsize n, i;
+
+  if (!formats || (n = gdk_dmabuf_formats_get_n_formats (formats)) == 0)
     {
-      if (!gbm_device_is_format_supported (self->gbm, fourccs[f],
-                                           GBM_BO_USE_RENDERING | GBM_BO_USE_WRITE))
+      g_debug ("nested: GDK advertises no dmabuf formats, "
+               "so no zwp_linux_dmabuf_v1 global");
+      return;
+    }
+
+  for (i = 0; i < n; i++)
+    {
+      guint32 fourcc;
+      guint64 modifier;
+      DmabufFormat entry;
+
+      gdk_dmabuf_formats_get_format (formats, i, &fourcc, &modifier);
+
+      if (!format_is_single_plane_8888 (fourcc))
         continue;
 
-      for (m = 0; m < G_N_ELEMENTS (modifiers); m++)
-        {
-          DmabufFormat entry = { fourccs[f], modifiers[m] };
+      entry = (DmabufFormat) { fourcc, modifier };
+      g_array_append_val (self->dmabuf_formats, entry);
+    }
 
-          g_array_append_val (self->dmabuf_formats, entry);
-        }
+  for (i = 0; i < self->dmabuf_formats->len; i++)
+    {
+      DmabufFormat *e = &g_array_index (self->dmabuf_formats, DmabufFormat, i);
+      g_debug ("nested: dmabuf %c%c%c%c modifier 0x%" G_GINT64_MODIFIER "x",
+               (char) (e->fourcc), (char) (e->fourcc >> 8),
+               (char) (e->fourcc >> 16), (char) (e->fourcc >> 24),
+               (guint64) e->modifier);
     }
 
   if (self->dmabuf_formats->len == 0)
-    g_debug ("nested: the render node supports no 8888 format for writing");
+    g_debug ("nested: GDK advertises no single-plane 8888 dmabuf format");
   else
     dmabuf_build_format_table (self);
 }
