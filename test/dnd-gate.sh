@@ -32,9 +32,9 @@
 # times, except where a count is the point.
 #
 # The compositor's own trace is asserted as well, and it needs G_MESSAGES_DEBUG
-# plus a stderr that is not a plain file: GLib's default writer drops DEBUG
-# messages when the stream is a regular file, so every run here pipes its stderr
-# through tee.
+# plus a merged stream: once the process is off a tty, GLib's default writer sends
+# DEBUG messages to stdout instead of stderr (measured: 302 DEBUG lines on stdout,
+# 0 on stderr), so every run here pipes `2>&1` through tee.
 #
 #   ./test/dnd-gate.sh
 #   ./test/dnd-gate.sh loop      # only one of the six

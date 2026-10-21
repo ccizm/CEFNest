@@ -271,9 +271,9 @@ where `shm-client --drag-out` is both the origin and the destination of a drag o
 the three measured types, and `seat-selftest-drag-in`, where
 `shm-client --drag-in` is an active destination that accepts a type, reads the
 payload the way a page was measured to and exits non-zero if the bytes are not
-the ones it was handed. The gate pipes stderr through `tee` because GLib's writer
-drops DEBUG messages when stderr is a plain file, and the compositor's own trace
-is half of what is asserted.
+the ones it was handed. The gate pipes both streams through `tee` because GLib's
+writer sends DEBUG messages to stdout rather than stderr once a process is off a
+tty, and the compositor's own trace is half of what is asserted.
 
 `test/menu-gate.sh` is the context-menu half, eight runs — six against
 `test/fake-helper.py`, two against real Chromium on `test/menu-page.html` — and
@@ -287,7 +287,10 @@ half proves the round trip rather than the drawing: `menu-pick 117` is CEF's own
 全选, and the page reads back `selectionEnd - selectionStart == 18`, so the
 command ran in Blink and not in the host. Asserting that a menu appeared uses the
 session's `context menu mapped=1 size=` line, not a `shot` — on Wayland the
-popover is a surface of its own, outside the widget the grab covers.
+popover is a surface of its own, outside the widget the grab covers. That line is
+the one assertion a display without a monitor cannot satisfy (its popups are
+created, laid out and never mapped), so inside `test/ci-session.sh` the gate
+reports those two as skips and still exits green on the other 45.
 
 `test/permission-gate.sh` is the permission half, ten runs — seven against
 `test/fake-helper.py`, three against real Chromium on `test/permission-page.html`
@@ -339,12 +342,15 @@ The compositor is a session leader of its own, so one signal to its process grou
 takes the bus, the portal and gvfsd with it, and the run asserts that nothing is
 left behind. What it proves is that a real window maps, that a real Chromium
 session with the sandbox on loads a page and answers JavaScript, and that the
-existing gates need no headless branch to pass — `find-gate.sh` 34 assertions and
-`permission-gate.sh` 58 of them both run green inside it. What it cannot prove is
-frame pacing: a display with no output device never runs a second GTK display
-cycle, which is exactly the failure mode `docs/frame-clock-pacing.md` §8 documents,
-where a client left waiting on that cycle stopped animating and stopped painting.
-`docs/headless-ci.md` is the write-up.
+existing gates run inside it: `find-gate.sh` (34 assertions), `permission-gate.sh`
+(58), `download-gate.sh` (46), `dnd-gate.sh` (59), `sandbox-soak.sh` (12) and
+`meson test` (13/13) all pass unchanged, and `menu-gate.sh` passes 45 of its 47 —
+the two it skips are the ones that assert a popup surface reached a screen, which a
+display with no output device cannot do (`docs/headless-ci.md` §5). What it cannot
+prove is frame pacing: a display with no output device never runs a second GTK
+display cycle, which is exactly the failure mode `docs/frame-clock-pacing.md` §8
+documents, where a client left waiting on that cycle stopped animating and stopped
+painting. `docs/headless-ci.md` is the write-up.
 
 ## Using it as a library
 

@@ -4,8 +4,9 @@
 问题：P4 需要一个能无人值守跑门禁的地方。本仓库的门禁全都"开真窗口"——在真桌面上
 跑等于把窗口糊在使用者脸上，所以它们一直是"文档化的手动门禁"。
 结果：`test/ci-session.sh` 起一个 nested mutter（GNOME Shell 48.7 的 `--headless`
-模式），把任意命令塞进那个 Wayland 会话里跑。不装包、不用 sudo、现有门禁一行不改，
-跑完不留进程。
+模式），把任意命令塞进那个 Wayland 会话里跑。不装包、不用 sudo、跑完不留进程；六条
+门禁原样搬进去全绿，唯一要改的是 `menu-gate.sh` 里那两条"弹层上了屏"的断言——那块
+显示器没有屏可上，于是它们报成 skip（§5）。
 
 ## 1. 底座：这台机器上现成有什么
 
@@ -31,6 +32,12 @@ D-Bus，激活了 nautilus 与 Tracker3 文件索引器，还自动重排了应�
 - `setsid --fork` 让 compositor 成为自己会话的组长。这台机器的 util-linux 2.41.5
   没有 `setsid --write-pid`，所以由一个临时 wrapper 脚本自己 `printf %s $$` 落
   pid——那个 pid 同时是 PGID 和 SID，也是整棵嵌套进程树唯一的把手。
+- **显示器名字是宿主上的全局命名空间**。跑法不对的时候会留下一个孤儿嵌套会话：
+  这次就撞上一个 51 分钟前被打断（trap 没机会跑）的会话，它还占着
+  `cefnest-ci`，下一个 `gnome-shell --wayland-display=cefnest-ci` 直接
+  "Nested session is already running. Exiting."。所以默认名字带 pid
+  （`cefnest-ci-$$`），两次跑动互不抢占；要共用一块显示器再用
+  `CI_WAYLAND_DISPLAY` 显式覆盖。
 - 等 socket 出现（`$XDG_RUNTIME_DIR/$NAME`，最多 80 秒）；等不到就把 compositor 的
   日志 tail 出来再退出。
 - 收尾：`kill -TERM -$GS` 打给整个进程组（bus、portal、gvfsd 一起走），轮询
@@ -55,21 +62,38 @@ namespace 里 `tgkill(1, 1, SIGABRT)`，而我们自己的缓冲区都有边界�
 `docs/sandbox-policy.md` §8。
 
 **payload**：`"$@"` 原样在会话里跑。注入的是 `WAYLAND_DISPLAY`、
-`GDK_BACKEND=wayland`、隔离的 HOME/XDG/runtime 目录，以及从 compositor 自己的
-`/proc/<pid>/environ` 里取出的 bus 地址（这样门户走会话内那条 bus，而不是宿主的），
-`CHROMIUM_HELPER` 指向真 helper，超时 `PAYLOAD_TIMEOUT`（默认 900s）。payload 的退出
-码就是这一跑的退出码；失败时把 demo/payload 的四个流都 tail 出来。
+`GDK_BACKEND=wayland`、`CEFNEST_HEADLESS=1`、隔离的 HOME/XDG/runtime 目录，以及从
+compositor 自己的 `/proc/<pid>/environ` 里取出的 bus 地址（这样门户走会话内那条 bus，
+而不是宿主的），`CHROMIUM_HELPER` 指向真 helper，超时 `PAYLOAD_TIMEOUT`（默认 900s）。
+payload 的退出码就是这一跑的退出码；失败时把 demo/payload 的四个流都 tail 出来。
+
+`CEFNEST_HEADLESS=1` 是给门禁的"这块显示器没有输出设备"的声明，见 §5：断言"某块
+surface 真的上了屏"的门禁读它，把那几条报成 skip 并把数量写进总结行，而不是报一个
+会让人去查产品的 FAIL。
+
+一块显示器可以喂很多门禁——起一次 nested mutter 比每个门禁起一次省十几秒：
+
+```bash
+./test/ci-session.sh bash -c './test/find-gate.sh && ./test/menu-gate.sh'
+```
 
 ## 5. 它证明什么，不证明什么
 
 证明：真窗口能在一块真 Wayland 显示器上映射；真 Chromium 会话（`sandbox=on`）能起、
-能加载、能回答 JS；`test/*.sh` 那套门禁不需要为 headless 改一行。
+能加载、能回答 JS；`test/*.sh` 那套门禁不需要为 headless 加分支就能跑——除了断言
+"某块 surface 上了屏"的那两条（下一条）。
 
 不证明：
 
 - **帧节拍**。headless mutter 没有输出设备，宿主 GDK 不再产生显示周期，客户端的帧
   由 `docs/frame-clock-pacing.md` §8 的兜底定时器驱动。时序类断言（回调延迟、
   p50/p99）在这里量的不是真实节奏。
+- **上屏**。没有输出设备就没有"上屏"这件事：toplevel 本身是活的（实测
+  `dump: widget 1000x653 css, toplevel 1028x729`，布局与尺寸都拿得到），但
+  **popup surface 永远不会被映射**——菜单弹出后 300ms 的回报恒为
+  `context menu mapped=0 size=0x0`，真桌面上同一条是 `mapped=1 size=…x…`。
+  这是显示器的性质，不是组件的性质，所以 `test/menu-gate.sh` 读
+  `CEFNEST_HEADLESS` 把这两条报成 skip（45 条断言照旧全过），别把它当成回归。
 - **焦点**。`document.hasFocus()` 在 headless 里恒为 false，真桌面为 true——过与
   不过都一样，所以门禁不依赖它。
 - **真实输入设备**。门禁仍然只用脚本步骤驱动 seat，不注入指针；`test/uinput-inject`
@@ -77,17 +101,29 @@ namespace 里 `tgkill(1, 1, SIGABRT)`，而我们自己的缓冲区都有边界�
 
 ## 6. 实测
 
-- 自检模式：`ok demo exited 0 against the nested compositor` + 三条 transcript 断言
-  + `ok nothing from the nested session is still running`。
-- `./test/ci-session.sh ./test/find-gate.sh`：6 个 run / 34 条断言全过，加上 harness
-  自己的 3 行正好 37 行 ok。在 §8 那个看门狗之前，这一跑是 4/6，失败的都是
-  `real-scroll` 的 `scrollTop was 0 after the step`。
-- `./test/ci-session.sh ./test/permission-gate.sh`：10 个 run / 58 条断言全过（加
-  harness 的 3 行共 61 行 ok）。
-- `./test/ci-session.sh meson test -C builddir`：13/13 OK。selftest 那 11 个模式本来
-  就在进程内起嵌套 compositor，不依赖外层显示器，这一跑证明的是它们在会话里也不受
-  干扰。
-- `./test/find-gate.sh real`（真桌面）：10 行 ok，看门狗没有把能用的一侧改坏。
+一台机器、一次一条命令，每条门禁都是独立起停一个 nested mutter。"断言"只数门禁自己
+的 ok 行，不含 harness 那三行（socket 起来了 / payload 退出 0 / 没有残留）：
+
+| 跑法 | 结果 | 断言 | 用时 |
+|---|---|---|---|
+| 无参数（proof） | 通过 | 3 层 transcript + 无残留 | ~15s |
+| `meson test -C builddir` | 通过 | 13/13 OK | |
+| `./test/find-gate.sh real` | 通过 | 10 | 26s |
+| `./test/permission-gate.sh` | 通过 | 58 | 63s |
+| `./test/download-gate.sh` | 通过 | 46 | 56s |
+| `./test/dnd-gate.sh` | 通过 | 59 | 69s |
+| `./test/sandbox-soak.sh` | 通过 | 12 | 50s |
+| `./test/menu-gate.sh` | 通过 + 2 skip | 45（另 2 条要显示器，见 §5） | |
+| `bash -c './test/find-gate.sh real && ./test/menu-gate.sh fake'` | 两条门禁都通过 | 45（+1 skip），一块显示器喂两个门禁 | 53s |
+
+自检模式那三条断言（`nested compositor on WAYLAND_DISPLAY=`、`HTTP 200`、
+`script [0-9]+ ok value="DND-PAGE`）证明的是这块显示器真的能用；`meson test` 里
+selftest 那 11 个模式本来就在进程内起嵌套 compositor，不依赖外层显示器，这一跑证明
+的是它们在会话里也不受干扰。
+
+在 §8 那个看门狗之前，`find-gate.sh` 这一跑是 4/6，失败的全是 `real-scroll` 的
+`scrollTop was 0 after the step`——不是门禁脆弱，是页面真的冻住了。
+`./test/find-gate.sh real`（真桌面）10 行照旧全过，看门狗没有把能用的一侧改坏。
 
 ## 7. 换一台机器需要什么
 

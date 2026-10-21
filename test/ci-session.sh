@@ -28,7 +28,12 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DEMO="$ROOT/builddir/src/cefnest-demo"
 HELPER=${CHROMIUM_HELPER:-"$ROOT/helper/build/Release/cefnest-helper"}
 PAGE="file://$ROOT/test/dnd-page.html"
-NAME=${CI_WAYLAND_DISPLAY:-cefnest-ci}
+# Nested display names are global on the outer compositor: a second
+# `gnome-shell --wayland-display=cefnest-ci` exits with "Nested session is
+# already running", and a run that was interrupted before its trap could fire
+# leaves its session alive for whoever runs next. So the default name is
+# per-run and CI_WAYLAND_DISPLAY only overrides it for a shared display.
+NAME=${CI_WAYLAND_DISPLAY:-cefnest-ci-$$}
 PAYLOAD_TIMEOUT=${PAYLOAD_TIMEOUT:-900}
 
 RUN=$(mktemp -d)
@@ -113,10 +118,17 @@ fi
 # directory it can put its own nested compositor's socket in. The bus address is
 # taken from the compositor's own environment so the payload reaches the portal
 # started inside this session rather than the host's.
+#
+# CEFNEST_HEADLESS tells a gate that no monitor is attached, which it has to know
+# before it can honestly report an assertion about what reaches the screen: this
+# mutter configures and lays out a toplevel — the demo's window gets its size and
+# Chromium paints into it — but never maps a popup surface, so a GtkPopover stays
+# mapped=0 size=0x0 forever. Gates skip exactly those checks and say so.
 bus=$(tr '\0' '\n' < "/proc/$GS/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' || true)
 cl_env=(
   "WAYLAND_DISPLAY=$NAME"
   "GDK_BACKEND=wayland"
+  "CEFNEST_HEADLESS=1"
   "XDG_RUNTIME_DIR=$RT"
   "HOME=$CHOME"
   "XDG_CONFIG_HOME=$CHOME/.config"

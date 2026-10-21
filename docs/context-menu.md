@@ -121,7 +121,9 @@ dismiss（`session: context menu dismissed by a navigation`），`real-nav` 门�
   scale 1.25）。
 - Wayland 上 popover 是**它自己的 surface**，所以 `shot` 抓 view 抓不到它。这就是 session 要打那条
   `context menu mapped=1 size=...` debug 的原因：进程内唯一能证明「菜单到了屏幕」的地方，也是门禁
-  断言它的地方。
+  断言它的地方。**但这条断言问的是显示器，不是菜单**：`./test/ci-session.sh` 那块没有输出设备的
+  nested mutter 里，弹层照样建好、照样请求布局，surface 却永远不会被映射（实测恒为
+  `mapped=0 size=0x0`），于是 `menu-gate.sh` 读 `CEFNEST_HEADLESS` 把它报成 skip，其余 45 条不变。
 - **拆除只能等一个 idle**。popover 的 `::closed` 发完之后 GTK 还要继续用它（`_gtk_popover_close()`
   在 emit 之后仍要 snapshot 这个 child），而行的 `activate` 也在同一个弹层里——在两处之一里
   `gtk_widget_unparent` 都是把正在 emit 的对象拆掉。`menu_release_soon()` 因此挂

@@ -162,10 +162,10 @@ Chromium 在普通复制时也可能发这几条——为了一个不存在的�
 ./test/dnd-gate.sh in           # 只看宿主拖入那一段
 ```
 
-跑之前先 `ninja -C builddir`。要看 compositor 的 trace，得把 stderr 接成管道：GLib 默认的
-log writer 在 stderr 是**普通文件**时会丢掉 DEBUG 级消息，
-`G_MESSAGES_DEBUG=all ./builddir/src/cefnest-demo 2>log` 里一条 `nested:` 都不会出现，
-`2>&1 | tee log` 才有。门禁里 `run_demo` 用 `tee` 就是为了这个。
+跑之前先 `ninja -C builddir`。要看 compositor 的 trace，得把两路输出合并成管道：进程一旦不在
+tty 上，GLib 默认的 log writer 就把 DEBUG 级消息发到 **stdout** 而不是 stderr（实测同一次跑动
+stdout 侧 302 条 DEBUG、stderr 侧 0 条），所以 `G_MESSAGES_DEBUG=all ./builddir/src/cefnest-demo 2>log`
+里一条 `nested:` 都不会出现，`2>&1 | tee log` 才有。门禁里 `run_demo` 用 `tee` 就是为了这个。
 
 协议错误那半边由 `meson test -C builddir` 的 `seat-selftest-dnd-requests` 覆盖；§6 的移交则由
 `seat-selftest-drag-out` 用一个假客户端重放一遍，不需要浏览器，也不需要窗口。§7 的拖入同理，是

@@ -27,9 +27,11 @@
 #   ./test/permission-gate.sh fake       # only the half that needs no browser
 #   ./test/permission-gate.sh real       # only the CEF half
 #
-# Every run pipes stderr through tee: GLib drops debug-level messages when stderr
-# is a regular file, and the session's "host took it" and "dismissed" lines are the
-# only proof of which half of the contract answered.
+# Every run pipes both streams through tee: the session's "host took it" and
+# "dismissed" lines are the only proof of which half of the contract answered,
+# they are debug-level, and GLib's default writer sends debug-level messages to
+# stdout rather than stderr once the process is off a tty — a run that captured
+# only stderr would assert against an empty half of the transcript.
 
 set -u -o pipefail
 

@@ -15,16 +15,23 @@
 # It opens a real demo window per run, so it is a documented manual gate rather than
 # a meson test — the same convention as test/download-gate.sh. Nothing here moves a
 # pointer on the host desktop: a right click is injected into the nested
-# compositor, and the menu it opens is the host's own widget.
+# compositor, and the menu it opens is the host's own widget. It also runs inside
+# ./test/ci-session.sh, where everything but the two popup-mapping assertions
+# passes unchanged.
 #
 #   ./test/menu-gate.sh            # fake + real
 #   ./test/menu-gate.sh fake       # only the half that needs no browser
 #   ./test/menu-gate.sh real       # only the CEF half
+#   ./test/ci-session.sh ./test/menu-gate.sh fake   # nobody sees the windows
 #
-# Every run pipes stderr through tee: GLib drops debug-level messages when stderr is
-# a regular file, and the session's "drawn" and "mapped" lines are how a run knows
-# the menu reached the screen — a popover on Wayland is its own surface, so no grab
-# of the view can show it.
+# Every run pipes both streams through tee, because the session's debug lines come
+# out on stdout once the process is off a tty: a popover on Wayland is its own
+# surface, so no grab of the view can show it — "mapped=" and "drawn" are how a run
+# knows the menu reached the screen. Those lines are why the runs need
+# G_MESSAGES_DEBUG=all, and under test/ci-session.sh one of them cannot be
+# satisfied: a display with no monitor never maps a popup surface, so
+# expect_mapped() names that as a skip there and keeps it a hard assertion
+# everywhere a screen exists.
 
 set -u -o pipefail
 
@@ -40,6 +47,7 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 fails=0
+skips=0
 
 ok() { printf '  ok   %s\n' "$1"; }
 bad() { printf '  FAIL %s\n' "$1"; fails=$((fails + 1)); }
@@ -63,6 +71,21 @@ expect_count() { # expect_count <pattern> <logfile> <count> <tag>
   n=$(grep -cE "$1" "$2")
   if [ "$n" = "$3" ]; then ok "$4: $n line(s) match /$1/"
   else bad "$4: $n line(s) match /$1/, wanted $3"; fi
+}
+
+# Whether a popup surface gets mapped is a question about the display, not about
+# the menu: the build, the layout request and the size all happen on a monitor-less
+# nested compositor, but the surface it produced is never put on a screen. Measured
+# there: `mapped=0 size=0x0`, forever. Failing that would blame the run for the
+# display, so it is reported as a skip — and every gate that reports a skip says
+# how many, so a green line can never hide one.
+expect_mapped() { # expect_mapped <logfile> <tag>
+  if [ "${CEFNEST_HEADLESS:-0}" = 1 ]; then
+    skips=$((skips + 1))
+    printf '  skip %s: a popup surface is never mapped without a monitor\n' "$2"
+  else
+    expect 'context menu mapped=1 size=[1-9][0-9]*x[1-9][0-9]*' "$1" "$2"
+  fi
 }
 
 # The page reads its own state back through a js step, which reports the value as
@@ -116,7 +139,7 @@ EOF
   expect_count 'demo: menu row' "$WORK/fake-link.log" 5 fake-link
   expect 'context menu at 140,40 with 5 rows' "$WORK/fake-link.log" fake-link
   expect 'context menu with 5 items drawn at 140,40' "$WORK/fake-link.log" fake-link
-  expect 'context menu mapped=1 size=[1-9][0-9]*x[1-9][0-9]*' "$WORK/fake-link.log" fake-link
+  expect_mapped "$WORK/fake-link.log" fake-link
   expect 'fake: context-menu-select id=132 flags=0' "$WORK/fake-link.log" fake-link
   # The second pick has nothing to answer, and the session keeps that off the
   # channel: one command crossed, and the guard says the rest.
@@ -257,7 +280,7 @@ EOF
   expect 'loaded .*menu-page\.html \(HTTP 200\)' "$WORK/real-models.log" real-models
   expect 'context menu with 5 items at 140,40' "$WORK/real-models.log" real-models
   expect 'menu row 3 id=131 type=command enabled=1' "$WORK/real-models.log" real-models
-  expect 'context menu mapped=1 size=' "$WORK/real-models.log" real-models
+  expect_mapped "$WORK/real-models.log" real-models
   expect 'context menu with 9 items at' "$WORK/real-models.log" real-models
   expect 'context menu with 9 items drawn' "$WORK/real-models.log" real-models
   expect 'context menu with 1 items at 400,4[0-9]' "$WORK/real-models.log" real-models
@@ -297,7 +320,9 @@ EOF
 fi
 
 echo
-if [ $fails -eq 0 ]; then
+if [ $fails -eq 0 ] && [ $skips -gt 0 ]; then
+  printf 'menu gate: all checks passed, %d skipped\n' "$skips"
+elif [ $fails -eq 0 ]; then
   printf 'menu gate: all checks passed\n'
 else
   printf 'menu gate: %d check(s) failed\n' "$fails"
