@@ -369,8 +369,9 @@ The compositor is a session leader of its own, so one signal to its process grou
 takes the bus, the portal and gvfsd with it, and the run asserts that nothing is
 left behind. What it proves is that a real window maps, that a real Chromium
 session with the sandbox on loads a page and answers JavaScript, that a scripted
-run whose helper dies before it reports ready fails in seconds instead of standing
-there until the payload timeout (`docs/session-lifecycle.md` §4), and that the
+run whose helper dies — before it is ready, without ever connecting, or of its own
+accord — fails in seconds and names the reason `::closed` reported
+(`docs/session-lifecycle.md` §4, §5), and that the
 existing gates run inside it: `find-gate.sh` (34 assertions), `permission-gate.sh`
 (58), `download-gate.sh` (46), `dnd-gate.sh` (59), `pixel-gate.sh` (12),
 `sandbox-soak.sh` (12) and `meson test` (14/14) all pass unchanged, and
@@ -386,7 +387,7 @@ answer. `docs/headless-ci.md` is the write-up.
 `test/ci-all.sh` is the one command that runs the whole battery through it — proof,
 `meson test` and all seven gates, each in its own nested compositor, one verdict table
 with the skipped checks counted in a column of their own, non-zero exit if anything
-failed. Measured on this laptop: 375 s for the nine runs — 271 gate assertions plus
+failed. Measured on this laptop: 373 s for the nine runs — 272 gate assertions plus
 `meson test` 14/14, with 2 checks skipped.
 
 ```bash
@@ -431,7 +432,10 @@ the model as a `GList` of rows — returning TRUE means the host draws it),
 `::permission-request` (the helper's id, `media` or `prompt`, the requesting
 origin, a `GList` of permission names and the raw mask — returning TRUE means the
 host answers it), `::permission-dismissed` (id, result: the request Chromium took
-back from under the host), `::closed` (the helper is gone and will not come back).
+back from under the host), `::closed` (the helper is gone and will not come back,
+with which of the four reasons: the host stopped it, the helper closed the browser,
+its channel hung up, or the process was reaped — a death reports either of the last
+two, which is why an unattended run says *that* rather than guessing).
 `chromium_session_set_muted ()` silences the page — its sound leaves the helper
 through an unsandboxed audio process and lands on the host's speakers, and the
 stream stays open while muted, so the desktop mixer cannot see the switch
@@ -580,8 +584,10 @@ They are the record of *why* the code is shaped like this:
 - **Native Wayland only, by design.** Under an X11 session GDK cannot give the
   widget a Wayland surface to hand to clients, so the component will not work
   there.
-- The API is not stable: nothing here is installed, and `src/meson.build` builds
-  a static library.
+- The API is not stable. It *is* installed now — `src/meson.build` builds
+  `libcefnest.so.0.0.1` with a `cefnest.pc` next to it — but nothing waits for a
+  soname bump: a signal can gain a parameter (as `::closed` did) and a header can
+  change shape between releases, so a host links against a build it built itself.
 
 ## License
 

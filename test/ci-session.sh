@@ -11,7 +11,8 @@
 # to be installed: gnome-shell, dbus-run-session and /dev/dri are already here.
 #
 #   ./test/ci-session.sh                        # proof: a window maps, a page loads,
-#                                               # a helper that dies ends the run
+#                                               # and each way of losing the helper
+#                                               # ends the run naming itself
 #   ./test/ci-session.sh ./test/find-gate.sh real
 #   ./test/ci-session.sh meson test -C builddir --suite unit
 #
@@ -181,19 +182,41 @@ else
   # A helper that dies before it reports ready — a CEF profile another instance
   # already holds does exactly this — used to leave a window standing there with a
   # script it never got to run, so an unattended run could only end as a timeout.
-  # Now the run ends on its own, and its status says the page was never shown.
-  { echo "load $PAGE"; echo "js document.title"; echo "quit"; } > "$RUN/dead"
-  env "${cl_env[@]}" CHROMIUM_HELPER="$ROOT/test/fake-helper.py" \
-      FAKE_HELPER_DIE_BEFORE_READY=1 \
-      CHROMIUM_SESSION_SCRIPT="$RUN/dead" \
-    timeout 60 "$DEMO" >"$RUN/dead.out" 2>"$RUN/dead.log"
-  rc=$?
-  if [ $rc = 1 ]; then ok "a scripted run whose helper died before ready fails with 1"
-  else bad "that run exited $rc — 1 wanted (0 is a lie, 124 is still the timeout)"; fi
-  if grep -qE 'helper went away with [1-9][0-9]* of [1-9][0-9]* script step' \
-       "$RUN/dead.out" "$RUN/dead.log";
-  then ok "transcript says which step the dead helper abandoned"
-  else bad "transcript does not name the abandoned step"; fi
+  # Now the run ends on its own, its status says the page was never shown, and
+  # ::closed says which of its four ways of dying this was. Three of the four are
+  # reachable here; the fourth ("stopped by the host") is the close and dump steps
+  # every other gate ends on, and those still exit 0.
+  dead_run() {  # dead_run <tag> <reason-regex> <script-lines> [VAR=value...]
+    local tag=$1 reason=$2 script=$3; shift 3
+    printf '%b\n' "$script" > "$RUN/$tag"
+    env "${cl_env[@]}" CHROMIUM_HELPER="$ROOT/test/fake-helper.py" \
+        CHROMIUM_SESSION_SCRIPT="$RUN/$tag" "$@" \
+      timeout 60 "$DEMO" >"$RUN/$tag.out" 2>"$RUN/$tag.log"
+    local rc=$?
+    if [ $rc = 1 ] &&
+       grep -qE "helper went away \\(($reason)\\) with [1-9][0-9]* of [1-9][0-9]* script step" \
+         "$RUN/$tag.out" "$RUN/$tag.log";
+    then ok "$tag: exits 1 and the report names the reason ($reason)"
+    else bad "$tag: exited $rc, 1 wanted with a report naming '$reason' — 0 is a lie, 124 is the timeout"; fi
+  }
+
+  # Connected, then gone: the socket hangs up and the child is reaped within the
+  # same millisecond, and measured over several runs either of them can be the one
+  # that gets to report. That is the contract — a death says it was a death, and a
+  # host must not branch on which side it saw.
+  dead_run die 'control channel closed|process exited' \
+    "load $PAGE\njs document.title\nquit" FAKE_HELPER_DIE_BEFORE_READY=1
+
+  # A child that never connects at all: the only thing left to tell about is the
+  # reaped process, so this one has a single answer. This is the shape of a helper
+  # that dies inside CefInitialize.
+  dead_run exited 'process exited' \
+    "load $PAGE\njs document.title\nquit" CHROMIUM_HELPER=/bin/false
+
+  # The helper closing the browser itself, over a channel that is still up, while
+  # the run has steps left to dispatch — a death the host did not ask for.
+  dead_run quit 'helper closed the browser' \
+    "load $PAGE\njs document.title\nwait 4000\njs 1+1\nquit" FAKE_HELPER_QUIT_AFTER=1000
 fi
 
 stop_compositor
@@ -205,7 +228,7 @@ echo
 if [ $fails = 0 ]; then printf 'ci session: passed\n'
 else
   printf 'ci session: %d check(s) failed\n' "$fails"
-  for f in demo payload dead; do
+  for f in demo payload die exited quit; do
     for s in out log; do
       [ -s "$RUN/$f.$s" ] || continue
       echo "-- $f $s"; tail -60 "$RUN/$f.$s" | sed 's/^/  /'

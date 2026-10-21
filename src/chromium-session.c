@@ -130,7 +130,13 @@ mark_closed (ChromiumSession *self, const char *why)
   /* Both halves of a stop watch the helper go: whoever asked for it, and the
    * pending child_waited once it is reaped. ::closed is the host's cue to tear
    * down a toolbar, so it goes out once per start — and never for a session
-   * that was stillborn or is already being disposed. */
+   * that was stillborn or is already being disposed.
+   *
+   * Whoever gets here first sets the reason, and a second arrival is silent.
+   * That is not a lost fact: both of the paths that race (the channel hanging
+   * up and the child being reaped) mean the same thing to the host — the helper
+   * is gone. @why goes out on the signal, so a host can tell its own stop from
+   * a death it did not ask for. */
   if (self->closed_emitted || (!self->running && !self->child))
     return;
 
@@ -139,7 +145,7 @@ mark_closed (ChromiumSession *self, const char *why)
 
   g_message ("session: helper stopped (%s)", why);
   chromium_session_set_state (self, NULL, NULL, FALSE, FALSE, FALSE);
-  g_signal_emit (self, signals[SIG_CLOSED], 0);
+  g_signal_emit (self, signals[SIG_CLOSED], 0, why);
 }
 
 static const char *
@@ -1650,7 +1656,7 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                   G_TYPE_INT, G_TYPE_STRING);
   signals[SIG_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
-                  0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 }
 
 /* Where the helper is, in the order the ways of being wrong about it are worth

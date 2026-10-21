@@ -169,6 +169,21 @@ void               chromium_session_permission_respond (ChromiumSession *self,
                                                    int id,
                                                    ChromiumPermissionResult result);
 
+/* ::closed (reason) is the helper being gone for good — it never comes back on
+ * this session, and a new page needs chromium_session_start () again. It goes
+ * out once per start, and never for a session that was stillborn or is already
+ * being disposed, so a host that tears a toolbar down here has exactly one
+ * notification to react to.
+ *
+ * @reason says who ended it, and is one of these four, in the caller's own
+ * words: "stopped by the host" (chromium_session_stop () was called, which is
+ * what closing the window does), "helper closed the browser" (the helper said
+ * so over the channel — CEF's own CloseWindow / quit), "control channel closed"
+ * (the socket hung up), "process exited" (the child was reaped). The last two
+ * are the same death seen from two sides and whichever arrives first reports
+ * it, so a host should treat every reason but its own as "the page is gone,
+ * and I did not ask for that" rather than branch on the difference. */
+
 const char        *chromium_session_get_helper_path (ChromiumSession *self);
 const char        *chromium_session_get_uri         (ChromiumSession *self);
 const char        *chromium_session_get_title       (ChromiumSession *self);

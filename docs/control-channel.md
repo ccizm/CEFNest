@@ -147,7 +147,9 @@ prompt IGNORE，而 IGNORE 传到你手上就是一条永远不 settle 的 promi
 `ChromiumSession` 的信号：`::changed`、`::ready`、`::load-end`、`::load-error`、
 `::renderer-exited`、`::script-result`、`::download-begin`、`::download-progress`、
 `::download-end`、`::find-result`、`::context-menu`、`::permission-request`、
-`::permission-dismissed`（最后三条新）、`::closed`。`::changed`
+`::permission-dismissed`（最后三条新）、`::closed`（带一个原因字符串：`stopped by the
+host` / `helper closed the browser` / `control channel closed` / `process exited`，
+实测与取舍在 `docs/session-lifecycle.md` §5）。`::changed`
 现在也会随 `muted` 事件落地。
 
 `::context-menu` 和 `::permission-request` 是这套信号里**唯二有返回值的**：`gboolean`，handler 返回 TRUE 表示"这个问题我接了，答案我来负责"，返回 FALSE 表示"交给会话"（菜单→画 CEF 给的默认菜单，权限→直接 deny）。答案取的是 handler 的返回值

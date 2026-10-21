@@ -45,7 +45,7 @@ static Demo demo;
 #endif
 
 static void session_ready (ChromiumSession *session, gpointer data);
-static void script_note_helper_gone (void);
+static void script_note_helper_gone (const char *reason);
 
 static void
 update_title (void)
@@ -999,7 +999,7 @@ build_permission_panel (GtkBox *box)
 }
 
 static void
-session_closed (ChromiumSession *session, gpointer data)
+session_closed (ChromiumSession *session, const char *reason, gpointer data)
 {
   if (demo.back)
     gtk_widget_set_sensitive (demo.back, FALSE);
@@ -1008,8 +1008,9 @@ session_closed (ChromiumSession *session, gpointer data)
   update_title ();
 
   /* A scripted run has no hand on the close button, so a helper that goes away
-   * on its own has to be reported rather than waited for. */
-  script_note_helper_gone ();
+   * on its own has to be reported rather than waited for. The reason rides along
+   * so the report says what ended the session, not just that it ended. */
+  script_note_helper_gone (reason);
 }
 
 static void
@@ -1523,6 +1524,7 @@ script_finish (void)
 static gboolean
 script_helper_gone (gpointer data)
 {
+  g_autofree char *reason = data;
   guint left;
 
   if (!session_script.steps)
@@ -1534,9 +1536,9 @@ script_helper_gone (gpointer data)
     return G_SOURCE_REMOVE;
 
   left = session_script.steps->len - session_script.index;
-  g_printerr ("demo: the helper went away with %u of %u script step(s) still to "
-              "run, so the run ends here\n",
-              left, session_script.steps->len);
+  g_printerr ("demo: the helper went away (%s) with %u of %u script step(s) still "
+              "to run, so the run ends here\n",
+              reason, left, session_script.steps->len);
   script_finish ();
   demo.exit_status = 1;
   g_application_quit (G_APPLICATION (demo.app));
@@ -1548,12 +1550,15 @@ script_helper_gone (gpointer data)
  * a run stop this session too — `close` closes the window, `dump` quits — and
  * by the time the idle is looked at they have finished their script. A quit
  * already in progress has no loop left to run it either, which is the right
- * answer: a run on its way out is not a run the helper abandoned. */
+ * answer: a run on its way out is not a run the helper abandoned.
+ *
+ * The reason travels as the idle's data because a signal argument is only
+ * promised for the duration of the emission. */
 static void
-script_note_helper_gone (void)
+script_note_helper_gone (const char *reason)
 {
   if (session_script.steps)
-    g_idle_add (script_helper_gone, NULL);
+    g_idle_add (script_helper_gone, g_strdup (reason));
 }
 
 static void

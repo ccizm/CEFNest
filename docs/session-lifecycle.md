@@ -1,7 +1,7 @@
-# 退出路径：关窗口要停 helper，::closed 只发一次
+# 退出路径：关窗口要停 helper，::closed 只发一次、且带上原因
 
-日期：2026-10-20，§4 补于 2026-10-21
-问题：任务 #27、#84。demo 里 `chromium_session_stop` 只有 header bar 上那颗「停止」按钮
+日期：2026-10-20，§4、§5 补于 2026-10-21
+问题：任务 #27、#84、#85。demo 里 `chromium_session_stop` 只有 header bar 上那颗「停止」按钮
 能调到，窗口关掉它就当没发生；`demo.session` 又是个从来不 unref 的 static。于是每
 跑一次，`$XDG_RUNTIME_DIR` 里多一个 `cefnest-helper-<uuid>.sock`——名字每次都是新
 的 uuid，所以谁也不会回来收旧的。脚本化验证一晚上攒了 20 个。
@@ -167,11 +167,53 @@ helper ready 之后 `js` 三次读回页面里的 `requestAnimationFrame` 计数
 
 另外两条 `::closed` 的来路这一跑没测出东西：`FAKE_HELPER_QUIT_AFTER=1000` 那两个脚本
 实测都在 helper 自己关之前就跑到了头——转录里只有 `helper stopped (stopped by the host)`，
-报告那行没出现，`rc=0`。它们与 `process exited` 进的是同一个入口，行为应当相同；
-要说清楚的是 `::closed` 不带原因，"宿主自己停的"、"helper 自己关的"、"进程没了"
-这三种，报告出来都是同一句话。
+报告那行没出现，`rc=0`。它们与 `process exited` 进的是同一个入口，行为应当相同。
+当时 `::closed` 还不带原因，"宿主自己停的"、"helper 自己关的"、"进程没了"这三种报告
+出来是同一句话；下一节把它给出去了，并且把 `QUIT_AFTER` 用一条留了 `wait` 的脚本真正
+测了出来。
 
-## 5. 还没做的
+## 5. ::closed 带上原因（任务 #85）
+
+§4 那行只能说"helper 走了"，因为 `mark_closed()` 的 `why` 只进了日志——而 `g_message`
+默认不显示，宿主没设 `G_MESSAGES_DEBUG` 就是一个字也看不见。现在它是信号参数：
+
+```c
+g_signal_emit (self, signals[SIG_CLOSED], 0, why);
+```
+
+四个值就是调用方原本写下的那几句话，原样带出去：`stopped by the host`、
+`helper closed the browser`、`control channel closed`、`process exited`。用字符串而不是
+枚举，跟这套 API 里其他"是哪一种"一致（`::download-end` 的 `state`、
+`::permission-dismissed` 的 `result` 同样是字符串），将来多一种来路也不必改签名。
+demo 拿它把 §4 那行补全：
+
+```
+demo: the helper went away (process exited) with 3 of 3 script step(s) still to run, so the run ends here
+```
+
+信号参数只保证在发射期间活着，而那个判断要等一个 idle，所以走的是 `g_strdup` 的副本。
+
+四种来路都实测过（nested 会话里，脚本 `load` → `js` → `quit`，helper 用
+`test/fake-helper.py`，只有第二跑换成 `/bin/false`）：
+
+| 形状 | 报告的原因 | 还剩几步 | rc |
+| --- | --- | --- | --- |
+| 连上就退（`FAKE_HELPER_DIE_BEFORE_READY=1`） | `control channel closed` **或** `process exited` | 3/3 | 1 |
+| `/bin/false`：从头到尾没连上 | `process exited` | 3/3 | 1 |
+| 活着时自己发 `closed`（`FAKE_HELPER_QUIT_AFTER=1000`，脚本里留一条 `wait 4000`） | `helper closed the browser` | 2/5 | 1 |
+| 脚本以 `close` 或 `dump` 收尾 | `stopped by the host` | 没有 | 0 |
+
+第一行那个"或"是量出来的：同一个形状，一次报 `control channel closed`、另一次报
+`process exited`；而 `SIGKILL`、`SIGTERM` 那两跑的转录都是 `helper stopped (control
+channel closed)` 后面**紧跟**`helper killed by signal 9`/`15`——两条回调落在同一毫秒，
+谁先到看运气。socket 挂断和子进程被收走是同一件事的两面，`mark_closed()` 只发第一次，
+所以宿主该问的是"是不是我自己停的"，而不是"它具体怎么死的"；真要死因，`child_waited`
+那两行日志才是地方。门禁因此钉的是"死亡报告不说谎"（前两个二选一，且 `rc=1`），
+不是钉死其中一个。
+
+proof 模式现在用一条 `dead_run` 函数跑这三种死亡，各自断言退出码 1 与原因字符串。
+
+## 6. 还没做的
 
 * **compositor 自己的 `wayland-N` + `wayland-N.lock` 仍然留在** `$XDG_RUNTIME_DIR`。
   这个不补：只有 `nested_compositor_dispose` 跑到才会 `wl_display_destroy` → unlink，
@@ -182,6 +224,11 @@ helper ready 之后 `js` 三次读回页面里的 `requestAnimationFrame` 计数
   `child_waited` 有机会把「Operation cancelled」当真错误打出来；目前所有退出路径
   都没复现，先不动。
 * 崩在 `kill -9` 下仍会留一个 helper socket——没机会执行任何清理。
-* `::closed` 没有参数，宿主收不到 `mark_closed()` 那个 `why`。§4 的报告因此只能说
-  "helper 走了、还有几步没跑"，不能说它是自己死的还是被谁停的；真要把这一层给出去，
-  是加信号参数，不是让宿主去 grep 自己的日志。
+* **脚本化运行碰不到"helper 根本起不来"这条路**。`CHROMIUM_HELPER=/no/such/helper`
+  时 `chromium_session_start` 直接失败（`demo: no helper binary at …`），会话被清空，
+  于是脚本里每条页面命令只回一句 `'load …' needs a Chromium helper session` 就继续往下，
+  `quit` 一到**以 0 结束**（实测：`rc=0`，两条警告，零条 `script ok`）。这比 §4 那个挂住
+  更糟——它看着像过了。它不是 `::closed` 的事：会话从没活过，就没有结束可报；要修的是
+  脚本引擎那侧，没有会话时页面命令不该被当成执行过。
+* `::closed` 带的是话术而不是枚举，宿主只能整串比。真出现要按位判断的宿主，再包一层
+  `chromium_session_get_close_reason()` 或者换 enum，现在不猜需求。

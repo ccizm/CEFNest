@@ -65,17 +65,22 @@ namespace 里 `tgkill(1, 1, SIGABRT)`，而我们自己的缓冲区都有边界�
 前面三条，于是**报告而不失败**——这里没有崩溃处理器可以修或关，见
 `docs/sandbox-policy.md` §8。
 
-最后是第二跑：同一个脚本，helper 换成带 `FAKE_HELPER_DIE_BEFORE_READY=1` 的
-`test/fake-helper.py`（连上 socket 就 `exit(1)`，什么都不发——`CefInitialize` 失败
-就是这个形状），钉两条：退出码必须是 **1**，转录必须点出还剩几步没派出去。无人值守
+最后是"helper 没了"那三跑（`dead_run`）：同一个脚本，helper 分别换成①连上 socket 就
+`exit(1)`、什么都不发的 `test/fake-helper.py`（`CefInitialize` 失败就是这个形状）、
+②`/bin/false`（从头到尾没连上）、③活着时自己发 `{"event":"closed"}` 的 fake（脚本里
+留一条 `wait 4000`，让它死在半路）。每跑钉两条：退出码必须是 **1**，转录那一行必须带上
+`::closed` 的原因。①的原因实测会在 `control channel closed` 与 `process exited` 之间跳
+（两条回调同一毫秒到，谁先进去看运气），所以钉的是二选一；②③各有唯一答案。无人值守
 的一跑只有两种结局——退出码与超时——所以一个真失败如果只能以超时出现，它等于把自己
-伪装成"这一跑有点慢"：2 秒的事会被读成 900 秒。修它的那条见 `docs/session-lifecycle.md` §4。
+伪装成"这一跑有点慢"：2 秒的事会被读成 900 秒。修它的那条、四种原因与它们的实测在
+`docs/session-lifecycle.md` §4、§5。
 
 **payload**：`"$@"` 原样在会话里跑。注入的是 `WAYLAND_DISPLAY`、
 `GDK_BACKEND=wayland`、`CEFNEST_HEADLESS=1`、隔离的 HOME/XDG/runtime 目录，以及从
 compositor 自己的 `/proc/<pid>/environ` 里取出的 bus 地址（这样门户走会话内那条 bus，
 而不是宿主的），`CHROMIUM_HELPER` 指向真 helper，超时 `PAYLOAD_TIMEOUT`（默认 900s）。
-payload 的退出码就是这一跑的退出码；失败时把 demo/payload 的四个流都 tail 出来。
+payload 的退出码就是这一跑的退出码；失败时把每一跑的 stdout/stderr 都 tail 出来
+（demo、payload，加上那三跑没了 helper 的）。
 
 `CEFNEST_HEADLESS=1` 是给门禁的"这块显示器没有输出设备"的声明，见 §5：断言"某块
 surface 真的上了屏"的门禁读它，把那几条报成 skip 并把数量写进总结行，而不是报一个
@@ -150,21 +155,21 @@ KEEP_LOGS=1 ./test/ci-all.sh        # 保留每个 run 的完整 transcript
 
 ## 6. 实测
 
-`./test/ci-all.sh` 整套跑完 375 秒（T490，九条跑动的和，一次一条命令；2026-10-21
-往 proof 里加进"helper 死在 ready 之前"那一跑之后重测的整表）。"断言"只数门禁自己的
+`./test/ci-all.sh` 整套跑完 373 秒（T490，九条跑动的和，一次一条命令；2026-10-21
+把 proof 的"helper 没了"从一跑扩成三跑之后重测的整表）。"断言"只数门禁自己的
 ok 行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 没有残留）：
 
 | run | 结果 | 断言 | 用时 |
 |---|---|---|---|
-| `proof`（无参数自检） | 通过 | 5 | 11s |
-| `unit`（`meson test -C builddir`） | 通过 | 14 OK | 17s |
-| `pixel` | 通过 | 12 | 13s |
-| `find` | 通过 | 34 | 31s |
-| `permission` | 通过 | 58 | 62s |
-| `download` | 通过 | 46 | 52s |
+| `proof`（无参数自检） | 通过 | 6 | 14s |
+| `unit`（`meson test -C builddir`） | 通过 | 14 OK | 16s |
+| `pixel` | 通过 | 12 | 12s |
+| `find` | 通过 | 34 | 32s |
+| `permission` | 通过 | 58 | 60s |
+| `download` | 通过 | 46 | 51s |
 | `dnd` | 通过 | 59 | 68s |
 | `menu` | 通过\* | 45（+2 skip） | 71s |
-| `soak` | 通过 | 12 | 48s |
+| `soak` | 通过 | 12 | 49s |
 
 \* 那 2 条是"弹层上了屏"，这块显示器没有屏可上（§5）。`pixel` 在会话里与在真桌面上
 都是 12 条全过、0 skip——它是 `docs/frame-clock-pacing.md` §9 那条回归的判据，两侧都得红得起来。
@@ -182,10 +187,11 @@ ok 行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 
   按住了。
 
 proof 模式那三条断言（`nested compositor on WAYLAND_DISPLAY=`、`HTTP 200`、
-`script [0-9]+ ok value="DND-PAGE`）证明的是这块显示器真的能用；那第二跑的两条
-（`rc=1` 与点出剩余步数的那行转录）证明的是这台机器上"跑不起来"能以失败出现，而不是
-以超时出现；`unit` 里 selftest 那 11 个模式本来就在进程内起嵌套 compositor、不依赖
-外层显示器，那一跑证明的是它们在会话里也不受干扰。
+`script [0-9]+ ok value="DND-PAGE`）证明的是这块显示器真的能用；那三跑"helper 没了"
+（每跑钉两条：`rc=1`，以及转录那一行里 `::closed` 给的原因）证明的是这台机器上
+"跑不起来"能以失败出现、并且说清是哪一种失败，而不是只以超时出现；`unit` 里 selftest
+那 11 个模式本来就在进程内起嵌套 compositor、不依赖外层显示器，那一跑证明的是它们在
+会话里也不受干扰。
 
 ## 7. 换一台机器需要什么
 
