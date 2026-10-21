@@ -71,6 +71,9 @@ constexpr char kSocketEnv[] = "CHROMIUM_HELPER_SOCKET";
  * one CefProcessMessage carrying one JSON text back to the browser process. */
 constexpr char kReportFunction[] = "__chromiumHelperReport";
 constexpr char kJsResultMessage[] = "cefnest-helper-js-result";
+constexpr char kPageMessageEvent[] = "page-message";
+constexpr char kPageMessageProcess[] = "cefnest-page-message";
+constexpr char kPostMessageFunction[] = "cefnestPostMessage";
 
 /* Events are written on the UI thread with a 200 ms send timeout, so a script
  * that returns the whole DOM would stall Chromium and then be dropped anyway.
@@ -1163,6 +1166,40 @@ class ReportHandler : public CefV8Handler {
   IMPLEMENT_REFCOUNTING(ReportHandler);
 };
 
+// The page → host half of the message channel: a page calls
+// cefnestPostMessage(JSON.stringify(msg)) and the string rides a
+// CefProcessMessage to the browser process, which forwards it to the host as
+// a page-message event. The payload stays one opaque JSON string — the host
+// owns whatever schema lives inside it.
+class PostMessageHandler : public CefV8Handler {
+ public:
+  bool Execute(const CefString& name, CefRefPtr<CefV8Value> object,
+               const CefV8ValueList& arguments, CefRefPtr<CefV8Value>& retval,
+               CefString& exception) override {
+    if (arguments.size() != 1 || !arguments[0]->IsString()) {
+      exception = "expected the message as one JSON string";
+      return true;
+    }
+
+    CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+    CefRefPtr<CefFrame> frame = context ? context->GetFrame() : nullptr;
+    if (!frame) {
+      exception = "no frame to send the message from";
+      return true;
+    }
+
+    CefRefPtr<CefProcessMessage> message =
+        CefProcessMessage::Create(kPageMessageProcess);
+    message->GetArgumentList()->SetString(0, arguments[0]->GetStringValue());
+    frame->SendProcessMessage(PID_BROWSER, message);
+
+    retval = CefV8Value::CreateUndefined();
+    return true;
+  }
+
+  IMPLEMENT_REFCOUNTING(PostMessageHandler);
+};
+
 class HelperRenderProcessHandler : public CefRenderProcessHandler {
  public:
   void OnContextCreated(CefRefPtr<CefBrowser> browser,
@@ -1179,10 +1216,17 @@ class HelperRenderProcessHandler : public CefRenderProcessHandler {
         static_cast<cef_v8_propertyattribute_t>(
             V8_PROPERTY_ATTRIBUTE_READONLY | V8_PROPERTY_ATTRIBUTE_DONTENUM |
             V8_PROPERTY_ATTRIBUTE_DONTDELETE));
+    context->GetGlobal()->SetValue(
+        kPostMessageFunction,
+        CefV8Value::CreateFunction(kPostMessageFunction, post_handler_),
+        static_cast<cef_v8_propertyattribute_t>(
+            V8_PROPERTY_ATTRIBUTE_READONLY | V8_PROPERTY_ATTRIBUTE_DONTENUM |
+            V8_PROPERTY_ATTRIBUTE_DONTDELETE));
   }
 
  private:
   CefRefPtr<CefV8Handler> handler_{new ReportHandler};
+  CefRefPtr<CefV8Handler> post_handler_{new PostMessageHandler};
 
   IMPLEMENT_REFCOUNTING(HelperRenderProcessHandler);
 };
@@ -1262,6 +1306,15 @@ class HelperClient : public CefClient,
                                 CefRefPtr<CefFrame> frame,
                                 CefProcessId source_process,
                                 CefRefPtr<CefProcessMessage> message) override {
+    if (source_process == PID_RENDERER &&
+        message->GetName() == kPageMessageProcess)
+      {
+        CefRefPtr<CefDictionaryValue> dict = NewEvent(kPageMessageEvent);
+        dict->SetString("json", message->GetArgumentList()->GetString(0));
+        Emit(dict);
+        return true;
+      }
+
     if (source_process != PID_RENDERER || message->GetName() != kJsResultMessage)
       return false;
 

@@ -203,6 +203,13 @@ session_renderer_exited (ChromiumSession *session, int status, int error_code,
 }
 
 static void
+session_page_message (ChromiumSession *session, const char *json, gpointer data)
+{
+  (void) session; (void) data;
+  g_printerr ("demo: page-message %s\n", json);
+}
+
+static void
 session_script_result (ChromiumSession *session, int id, gboolean ok,
                        const char *value, const char *message, gpointer data)
 {
@@ -1104,6 +1111,8 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_renderer_exited), NULL);
   g_signal_connect (demo.session, "script-result",
                     G_CALLBACK (session_script_result), NULL);
+  g_signal_connect (demo.session, "page-message",
+                    G_CALLBACK (session_page_message), NULL);
   g_signal_connect (demo.session, "download-begin",
                     G_CALLBACK (session_download_begin), NULL);
   g_signal_connect (demo.session, "download-progress",

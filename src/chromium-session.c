@@ -32,6 +32,7 @@ enum {
   SIG_LOAD_ERROR,
   SIG_RENDERER_EXITED,
   SIG_SCRIPT_RESULT,
+  SIG_PAGE_MESSAGE,
   SIG_DOWNLOAD_BEGIN,
   SIG_DOWNLOAD_PROGRESS,
   SIG_DOWNLOAD_END,
@@ -293,6 +294,17 @@ handle_event (ChromiumSession *self, const char *line)
                      (int) json_object_get_int_member (object, "status"),
                      (int) json_object_get_int_member (object, "error_code"),
                      json_object_get_string_member (object, "message"));
+      return;
+    }
+
+  if (!strcmp (event, "page-message"))
+    {
+      /* The page pushed a message through cefnestPostMessage: the payload is
+       * one opaque JSON string — the host owns whatever schema lives inside
+       * it. Oversized payloads were already dropped renderer-side (the same
+       * 64 KiB cap the js result relay uses). */
+      g_signal_emit (self, signals[SIG_PAGE_MESSAGE], 0,
+                     json_object_get_string_member (object, "json"));
       return;
     }
 
@@ -1656,6 +1668,9 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                   G_TYPE_INT, G_TYPE_STRING);
   signals[SIG_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_PAGE_MESSAGE] =
+    g_signal_new ("page-message", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 }
 

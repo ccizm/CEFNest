@@ -304,3 +304,33 @@ host` / `helper closed the browser` / `control channel closed` / `process exited
 * **`--enable-media-stream` 是一个回归地雷**。头文件明说：带这个开关时
   `OnRequestMediaAccessPermission` **不会被调用**，它等于对摄像头和麦克风全部放行。现在 helper 没加它，
   将来谁加开关时应当先看 `real-park` 有没有变红。
+
+## 页面 ↔ 宿主消息通道
+
+控制通道原本只有"宿主 ↔ helper"两条腿；页面要和宿主说话得穿过两层。现在
+两个方向都有了约定：
+
+**页面 → 宿主（推送）**：renderer 在每个 context 注册
+`cefnestPostMessage(jsonString)`（READONLY|DONTENUM|DONTDELETE，页面遍历
+自己的 globals 不会踩到）。参数是**一个 JSON 字符串**——payload 内的 schema
+由宿主自定，通道只保证字符串完整送达。超过 64 KiB 的调用会在 renderer 侧
+丢弃（与 js 结果回传同一上限），宿主收到的是 `status: page-message-dropped`。
+
+**宿主 → 页面**：用现成的 `run_js`——约定俗成的接收方式是页面自己挂
+`window.addEventListener('cefnest-message', e => …)`，宿主侧
+`run_js("window.dispatchEvent(new MessageEvent('cefnest-message',{data:" +
+JSON.stringify(msg) + "}))")`。
+
+**协议**：
+
+```
+renderer → browser → host
+  {"event":"page-message","json":"{\"type\":\"ping\"}"}
+
+host → helper → 页面
+  {"cmd":"send-message","json":"…"}   （MVP 未做，run_js 覆盖）
+```
+
+**验证**：`/tmp/msg.html` 按钮调 `cefnestPostMessage`，
+`demo: page-message {"type":"ping","n":1,"text":"hello from the page"}`
+出现在宿主日志（2026-10-21，真 CEF）。
