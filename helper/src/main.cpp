@@ -1378,6 +1378,17 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
+  if (name == "a11y") {
+    const bool enabled = command->HasKey("enabled") && command->GetBool("enabled");
+    if (g_browser && g_browser->GetHost()) {
+      g_browser->GetHost()->SetAccessibilityState(
+          enabled ? STATE_ENABLED : STATE_DEFAULT);
+      fprintf(stderr, "helper: browser accessibility = %s (host)\n",
+              enabled ? "enabled" : "default");
+    }
+    return;
+  }
+
   if (name == "js" || name == "js-expr") {
     const std::string code = command->GetString("code").ToString();
     if (code.empty()) {

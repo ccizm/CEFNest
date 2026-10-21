@@ -78,7 +78,7 @@ demo: renderer exited status=1 error=9 9
 
 ## 3. 现在通道上有的东西
 
-命令 19 条，事件 23 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
+命令 20 条，事件 23 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
 
 | 方向 | 名字 | 载荷 |
 | --- | --- | --- |
@@ -88,6 +88,7 @@ demo: renderer exited status=1 error=9 9
 | host → helper | `js` | `code`、`id`（语句形状；页面侧 `eval`，受 CSP `unsafe-eval` 限制） |
 | host → helper | `js-expr` | `code`、`id`（表达式直接嵌入，不经过 `eval`；CSP 严格页面用这条） |
 | host → helper | `mute` | `on`（缺省 = 翻转） |
+| host → helper | `a11y` | `enabled`（`SetAccessibilityState(STATE_ENABLED)` / `STATE_DEFAULT`；宿主默认由 `org.a11y.Status.ScreenReaderEnabled` 驱动） |
 | host → helper | `download-accept` | `id`、`path`（绝对路径，父目录得宿主自己建） |
 | host → helper | `download-reject` | `id`（拒绝未开始的、取消在飞的，同一条） |
 | host → helper | `find` | `pattern`、`forward`、`match_case`、`next`（**没有 ack**，答案是 `find-result`） |

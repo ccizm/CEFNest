@@ -1779,8 +1779,8 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
 
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
- * "js <code>", "js-expr <expression>", "wait <ms>", "shot <path>",
- * "dump <path>", "hover <x> <y>",
+ * "js <code>", "js-expr <expression>", "a11y-on", "a11y-off", "wait <ms>",
+ * "shot <path>", "dump <path>", "hover <x> <y>",
  * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
  * "drag-hold <x0> <y0> <x1> <y1> [button]", "release [button]", "surfaces",
  * "wheel <dx> <dy>", "mute", "unmute", "download-accept <path>",
@@ -2037,7 +2037,8 @@ script_run_next (void)
                             !strncmp (line, "download-", 9) ||
                             !strncmp (line, "find", 4) ||
                             !strncmp (line, "menu-", 5) ||
-                            !strncmp (line, "perm-", 5)))
+                            !strncmp (line, "perm-", 5) ||
+                            !strncmp (line, "a11y-", 5)))
         {
           /* Not a step that was skipped: without a session no later line of this
            * script can show a page either, so the run has already failed. Print
@@ -2060,6 +2061,16 @@ script_run_next (void)
       else if (!strncmp (line, "load ", 5))
         {
           chromium_session_load_uri (demo.session, line + 5);
+          continue;
+        }
+      else if (!strcmp (line, "a11y-on"))
+        {
+          chromium_session_set_accessibility (demo.session, TRUE);
+          continue;
+        }
+      else if (!strcmp (line, "a11y-off"))
+        {
+          chromium_session_set_accessibility (demo.session, FALSE);
           continue;
         }
       else if (!strncmp (line, "js-expr ", 8))

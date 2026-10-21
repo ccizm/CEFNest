@@ -219,4 +219,5 @@ tablet_code = custom_target(
 )
 
 subdir('src')
+subdir('examples')
 subdir('test')

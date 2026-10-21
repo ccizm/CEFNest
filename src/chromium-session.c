@@ -53,6 +53,11 @@ static guint signals[N_SIGNALS];
 static void chromium_session_dispose  (GObject *object);
 static void chromium_session_finalize (GObject *object);
 
+static void send_json (ChromiumSession *self, JsonNode *root);
+static void command_add_string (JsonBuilder *builder, const char *key,
+                                const char *value);
+static void session_send_a11y (ChromiumSession *self);
+static void session_read_a11y (ChromiumSession *self);
 static void handle_context_menu         (ChromiumSession *self, JsonObject *object);
 static void handle_context_menu_dismissed (ChromiumSession *self);
 static void handle_permission_request   (ChromiumSession *self, JsonObject *object);
@@ -84,6 +89,14 @@ struct _ChromiumSession {
   gboolean stopping;
   gboolean closed_emitted;
 
+  /* Screen-reader detection: org.a11y.Status.ScreenReaderEnabled on the session
+   * bus is the property Orca/gsd maintains. It drives the helper's runtime
+   * accessibility state; CHROMIUM_A11Y=1 remains the explicit override. */
+  GDBusProxy *a11y_proxy;
+  gulong a11y_handler;
+  gboolean a11y_enabled;
+  gboolean a11y_forced;
+
   /* The context menu the helper last asked about: pending until the host answers
    * it, and the two widgets that draw it while this side is the one that does. */
   gboolean menu_pending;
@@ -106,6 +119,83 @@ struct _ChromiumSession {
 };
 
 G_DEFINE_TYPE (ChromiumSession, chromium_session, G_TYPE_OBJECT)
+
+static void
+session_send_a11y (ChromiumSession *self)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  if (!self->running)
+    return;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "a11y");
+  json_builder_set_member_name (builder, "enabled");
+  json_builder_add_boolean_value (builder, self->a11y_enabled);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+  g_debug ("session: accessibility %s sent to helper",
+           self->a11y_enabled ? "enabled" : "default");
+}
+
+static void
+session_read_a11y (ChromiumSession *self)
+{
+  g_autoptr (GVariant) value = NULL;
+  gboolean enabled = FALSE;
+
+  if (!self->a11y_proxy || self->a11y_forced)
+    return;
+  value = g_dbus_proxy_get_cached_property (self->a11y_proxy,
+                                            "ScreenReaderEnabled");
+  if (value && g_variant_is_of_type (value, G_VARIANT_TYPE_BOOLEAN))
+    enabled = g_variant_get_boolean (value);
+
+  if (enabled == self->a11y_enabled)
+    return;
+  self->a11y_enabled = enabled;
+  g_debug ("session: ScreenReaderEnabled=%d", enabled);
+  session_send_a11y (self);
+}
+
+static void
+session_a11y_changed (GDBusProxy *proxy, GVariant *changed,
+                      const char *const *invalidated, gpointer data)
+{
+  (void) changed;
+  (void) invalidated;
+  session_read_a11y (data);
+}
+
+/* No GTK/GIO dependency is added to the helper: the host watches the session
+ * bus property and flips CefBrowserHost::SetAccessibilityState through the
+ * existing channel. */
+static void
+chromium_session_watch_a11y (ChromiumSession *self)
+{
+  GError *error = NULL;
+
+  if (self->a11y_forced || self->a11y_proxy)
+    return;
+
+  self->a11y_proxy = g_dbus_proxy_new_for_bus_sync (
+    G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
+    "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Status", NULL, &error);
+  if (!self->a11y_proxy)
+    {
+      g_debug ("session: no org.a11y.Status: %s",
+               error ? error->message : "unknown");
+      g_clear_error (&error);
+      return;
+    }
+
+  self->a11y_handler =
+    g_signal_connect (self->a11y_proxy, "g-properties-changed",
+                      G_CALLBACK (session_a11y_changed), self);
+  session_read_a11y (self);
+}
 
 static void
 chromium_session_set_state (ChromiumSession *self,
@@ -229,6 +319,7 @@ handle_event (ChromiumSession *self, const char *line)
           g_clear_pointer (&self->startup_url, g_free);
         }
 
+      session_send_a11y (self);
       g_signal_emit (self, signals[SIG_READY], 0);
       return;
     }
@@ -1765,6 +1856,15 @@ chromium_session_set_view (ChromiumSession *self, ChromiumView *view)
 }
 
 void
+chromium_session_set_accessibility (ChromiumSession *self, gboolean enabled)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  self->a11y_enabled = enabled;
+  session_send_a11y (self);
+}
+
+void
 chromium_session_load_uri (ChromiumSession *self, const char *uri)
 {
   g_autoptr (JsonBuilder) builder = json_builder_new ();
@@ -2172,6 +2272,8 @@ chromium_session_init (ChromiumSession *self)
   self->permission_held = g_hash_table_new (g_direct_hash, g_direct_equal);
   /* Nothing has started, so there is nothing to report as closed yet. */
   self->closed_emitted = TRUE;
+  self->a11y_forced = g_strcmp0 (g_getenv ("CHROMIUM_A11Y"), "1") == 0;
+  chromium_session_watch_a11y (self);
 }
 
 static void
@@ -2201,6 +2303,14 @@ chromium_session_dispose (GObject *object)
    * off, and its ::closed must not answer a helper that is going away. */
   self->menu_pending = FALSE;
   menu_release (self);
+
+  if (self->a11y_proxy)
+    {
+      if (self->a11y_handler != 0)
+        g_signal_handler_disconnect (self->a11y_proxy, self->a11y_handler);
+      self->a11y_handler = 0;
+      g_clear_object (&self->a11y_proxy);
+    }
 
   g_clear_object (&self->cancellable);
   g_clear_object (&self->view);

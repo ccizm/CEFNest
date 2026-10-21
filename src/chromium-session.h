@@ -21,6 +21,15 @@ gboolean           chromium_session_start         (ChromiumSession *self,
                                                    GError **error);
 void               chromium_session_stop          (ChromiumSession *self);
 
+/* Runtime accessibility. The session watches org.a11y.Status's
+ * ScreenReaderEnabled property on the session bus and calls this itself; a host
+ * may also force it. TRUE maps to CefBrowserHost::SetAccessibilityState(
+ * STATE_ENABLED), i.e. Chromium's Complete AT-SPI mode for a windowed browser;
+ * FALSE returns to STATE_DEFAULT. CHROMIUM_A11Y=1 in the helper remains an
+ * explicit startup override and suppresses the automatic watcher. */
+void               chromium_session_set_accessibility (ChromiumSession *self,
+                                                       gboolean enabled);
+
 void               chromium_session_load_uri      (ChromiumSession *self,
                                                    const char *uri);
 void               chromium_session_go_back       (ChromiumSession *self);
