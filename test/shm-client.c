@@ -15,7 +15,28 @@
  * it was handed. With --second-window it maps a second toplevel and drops the
  * test pattern in both: whichever window the seat has the keyboard in paints
  * red, the other green, so the routing of an input between two surfaces of one
- * client is readable off the frames the compositor imported. */
+ * client is readable off the frames the compositor imported. With
+ * --wrong-object it names, from connections of its own, a
+ * zwp_primary_selection_source_v1 and a wl_surface where the protocol wants a
+ * wl_data_source, and fails the run if the compositor takes either: an object
+ * id is a struct the compositor will go on reading through the wrong fields.
+ * With --pool-shrink it cuts its own shm pool file down after the compositor
+ * has mapped it and commits a second buffer from the same pool: reading the old
+ * mapping is a SIGBUS that takes the whole host, so a compositor that has the
+ * pool mapped and the file gone has to be the one that hangs up. With
+ * --empty-copy it takes the clipboard and the primary selection and answers every
+ * read of them with a closed descriptor and no bytes: copying nothing is a legal
+ * selection, and a compositor that builds a string out of the payload has to
+ * survive being handed an empty one rather than dereferencing the NULL it got.
+ * With --popup-depth it hangs a popup on a popup on a popup, one roundtrip at a
+ * time, from a connection of its own, and fails the run unless the compositor
+ * refuses within the depth its own tree walks are built for: the nesting is
+ * chosen by the client but paid for by the host's C stack. With
+ * --drag-fake-serial it asks for a drag citing a serial that never came from a
+ * button press, which is the one drag request the protocol requires a grab for:
+ * a compositor that takes it holds the pointer away from every surface
+ * underneath for a drag nobody started, so the run fails unless the source comes
+ * back cancelled with no surface entered. */
 #define _GNU_SOURCE
 
 #include <errno.h>
@@ -39,6 +60,7 @@
 #include "cursor-shape-client-protocol.h"
 #include "fractional-scale-client-protocol.h"
 #include "linux-dmabuf-client-protocol.h"
+#include "primary-selection-client-protocol.h"
 #include "text-input-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
@@ -208,10 +230,75 @@ static int cursor_asks;
 static int use_popup;
 static int use_refused;
 static int use_pool_budget;
+static int use_wrong_object;
+static int wrong_object_done;
 static int use_popup_reposition;
 static int use_second_window;
 static int popups_opened;
 static int popup_repositioned;
+
+/* --pool-shrink commits a buffer from a pool whose file the client then cuts
+ * down under the compositor's live mapping: the map the compositor took at
+ * create_pool points at pages the file no longer has, and the next read of them
+ * is a SIGBUS in the whole host, not in this connection. */
+static int use_pool_shrink;
+static int pool_shrink_done;
+
+/* --empty-copy answers a read of its own selection with nothing at all, on both
+ * the clipboard and the primary selection. Copying the empty string is legal, so
+ * a compositor that turns the payload into text has to cope with a zero-byte
+ * answer: g_bytes_get_data() of an empty GBytes and g_strndup() of a NULL buffer
+ * both come back NULL, and a host that dereferences either dies with the page
+ * that was only trying to clear a selection. The counters are the other half of
+ * the gate: if the compositor never asks for the payload, nothing was read and
+ * the mode would pass by proving nothing. */
+static int use_empty_copy;
+static int empty_copy_done;
+static int empty_copy_checked;
+static int empty_copy_reads;
+static int primary_copy_reads;
+static struct zwp_primary_selection_device_manager_v1 *primary_manager;
+static struct zwp_primary_selection_device_v1 *primary_device;
+static struct zwp_primary_selection_source_v1 *primary_source;
+
+/* --popup-depth hangs a popup on a popup until the compositor says no. The host
+ * walks a window's popup tree recursively — once to place each menu against its
+ * parent, once to build the stack it draws — so the client that nests decides how
+ * deep the C stack has to go. Without a cap, one unprivileged connection can ask
+ * for ten thousand frames of recursion and take the whole windowing system down
+ * with a SIGSEGV. POPUP_DEPTH_LIMIT mirrors NESTED_POPUP_MAX_DEPTH in
+ * src/nested-internal.h. The refusal is the assertion: a build with the cap
+ * removed has to go red rather than quietly accept the chain. */
+#define POPUP_DEPTH_LIMIT   32
+#define POPUP_DEPTH_ATTEMPT 128
+
+static int use_popup_depth;
+static int popup_depth_done;
+
+/* --drag-fake-serial asks for a drag with a serial no press ever carried.
+ * wl_data_device.start_drag says the origin surface is one "the client must have
+ * an active implicit grab that matches" — the one place in the drag protocol that
+ * makes a requirement of a serial rather than leaving it decorative. A compositor
+ * that does not look starts a drag nobody began, and from that moment the seat
+ * keeps every button event away from the surfaces underneath, because a drag is
+ * holding the pointer; it keeps them away until some release arrives and is read
+ * as a drop. The symptom is a page that stops taking clicks, so this is not a
+ * tidiness question.
+ *
+ * The answer the protocol wants is wl_data_source.cancelled and no drag, because
+ * the client owns the source until the compositor says otherwise. That reply is
+ * the assertion. A serial invented here looks, to the compositor's records,
+ * exactly like the press of a button that has since been let go, so one number
+ * grades both halves of the rule. */
+#define DRAG_FAKE_MIME   "application/x-cefnest-no-grab"
+#define DRAG_FAKE_SERIAL 1u
+
+static int use_drag_fake_serial;
+static int drag_fake_done;
+static int drag_fake_cancelled;
+/* Every wl_data_device.enter this client has been sent, which is how the run
+ * tells a refused request from a drag that quietly started. */
+static int drag_enters;
 
 /* What zwp_linux_dmabuf_feedback_v1 told us: the device the compositor wants
  * buffers on, and its (format, modifier) pairs in preference order. */
@@ -272,6 +359,11 @@ static const struct zwp_text_input_v3_listener text_input_listener;
 static void do_copy (void);
 static void do_drag_out (uint32_t serial);
 static void dnd_requests_probe (void);
+static void wrong_object_probe (void);
+static void pool_shrink_probe (void);
+static void empty_copy_probe (void);
+static void popup_depth_probe (void);
+static void drag_fake_probe (void);
 static void ensure_data_device (void);
 static void ensure_text_input (void);
 static void ensure_cursor_shape (void);
@@ -784,6 +876,71 @@ frame_done (void *data, struct wl_callback *callback, uint32_t time)
       dnd_done = 1;
       ensure_data_device ();
       dnd_requests_probe ();
+    }
+
+  /* Out here rather than at startup: the globals have to have arrived, and the
+   * window has to have painted, or "the compositor survived" would be a claim
+   * about a run that never started. */
+  if (use_wrong_object && !wrong_object_done && frames > 3)
+    {
+      wrong_object_done = 1;
+      wrong_object_probe ();
+    }
+
+  /* Out here for the same reason, and it ends the run: this one has to cut the
+   * file under a buffer the compositor is already showing, so the connection
+   * that gets the answer is this client's own. */
+  if (use_pool_shrink && !pool_shrink_done && frames > 3)
+    {
+      pool_shrink_done = 1;
+      pool_shrink_probe ();
+    }
+
+  /* Both halves of --empty-copy wait for the same thing: the compositor reads a
+   * selection when it is told about one, so the offers have to be sent after the
+   * window is up, and the answer comes back on the source's fd some frames
+   * later. Checking a count before it could have moved would only grade the
+   * speed of the test. */
+  if (use_empty_copy && !empty_copy_done && frames > 3)
+    {
+      empty_copy_done = 1;
+      empty_copy_probe ();
+    }
+
+  if (use_empty_copy && empty_copy_done && !empty_copy_checked && frames > 40)
+    {
+      empty_copy_checked = 1;
+      if (!empty_copy_reads || !primary_copy_reads)
+        {
+          fprintf (stderr, "client: %d: empty-copy gate FAILED: the compositor read "
+                           "the clipboard %d time(s) and the primary selection %d, "
+                           "so no zero-byte payload was ever turned into text\n",
+                   __LINE__, empty_copy_reads, primary_copy_reads);
+          exit (1);
+        }
+      fprintf (stderr, "client: the compositor took %d empty clipboard read(s) and "
+                       "%d empty primary read(s) and is still serving this "
+                       "connection\n", empty_copy_reads, primary_copy_reads);
+    }
+
+  /* Same rule as the wrong-object attacks: the globals have to have arrived and
+   * the window has to be on screen, and the attacker lives on its own
+   * connection so the refusal this probe wants cannot end the painting. */
+  if (use_popup_depth && !popup_depth_done && frames > 3)
+    {
+      popup_depth_done = 1;
+      popup_depth_probe ();
+    }
+
+  /* Needs a seat and a data device, so it waits for the same settle the other
+   * data-device probes do — and, unlike them, for the window to have painted:
+   * the drag it sends names this toplevel as its origin, and an origin the
+   * compositor does not know about is refused before the serial is ever looked
+   * at, which would grade the wrong rule. */
+  if (use_drag_fake_serial && !drag_fake_done && mapped && frames > 3)
+    {
+      drag_fake_done = 1;
+      drag_fake_probe ();
     }
 
   /* Open the popups once the toplevel has been configured and is drawing: the
@@ -2225,6 +2382,8 @@ data_device_enter (void *data, struct wl_data_device *device, uint32_t serial,
                    struct wl_surface *surface, wl_fixed_t x, wl_fixed_t y,
                    struct wl_data_offer *offer)
 {
+  drag_enters++;
+
   fprintf (stderr, "client: %d: dragged onto a surface at %.1f,%.1f serial=%u\n",
            getpid(), wl_fixed_to_double (x), wl_fixed_to_double (y), serial);
 
@@ -2368,6 +2527,11 @@ data_source_send (void *data, struct wl_data_source *source,
     }
   else if (strcmp (mime_type, "text/plain;charset=utf-8") != 0)
     payload = NULL;
+  else if (use_empty_copy)
+    {
+      payload = NULL;
+      empty_copy_reads++;
+    }
 
   fprintf (stderr, "client: %d: %s asked for %s, answering with %s\n",
            getpid(), is_drag ? "the drag" : "the selection", mime_type,
@@ -2947,6 +3111,16 @@ registry_global (void *data, struct wl_registry *registry, uint32_t name,
                                        version < 3 ? version : 3);
       ensure_data_device ();
     }
+  else if (!strcmp (interface, "zwp_primary_selection_device_manager_v1"))
+    {
+      /* Only --empty-copy reaches for this: the primary selection is the second
+       * place a compositor turns a payload into text, and the first one that did
+       * it with a NULL string killed the host outright. */
+      primary_manager =
+        wl_registry_bind (registry, name,
+                          &zwp_primary_selection_device_manager_v1_interface,
+                          version < 1 ? version : 1);
+    }
   else if (!strcmp (interface, "zwp_text_input_manager_v3"))
     {
       text_input_manager = wl_registry_bind (registry, name,
@@ -3035,7 +3209,7 @@ probe_refused_imports (void)
 {
   struct gbm_device *device;
   struct gbm_bo *bo;
-  int fd, i;
+  int fd, i, asked = 0;
 
   if (!dmabuf)
     {
@@ -3076,11 +3250,29 @@ probe_refused_imports (void)
       zwp_linux_buffer_params_v1_add_listener (params, &probe_params_listener, NULL);
       /* Not a fourcc any driver exports, so the import can only fail. */
       zwp_linux_buffer_params_v1_create (params, 64, 64, 0x12345678, 0);
-      wl_display_roundtrip (display);
+      asked++;
+      if (wl_display_roundtrip (display) < 0)
+        {
+          fprintf (stderr, "client: the compositor hung up on import %d of %d, so "
+                           "the rest cannot be asked\n", i, PROBE_IMPORTS);
+          break;
+        }
     }
 
   fprintf (stderr, "client: %d of %d impossible imports were refused\n",
            refused_imports, PROBE_IMPORTS);
+
+  /* Every import that was asked has to come back refused, and all of them have
+   * to have been asked: an impossible format the compositor accepts is the bug
+   * this mode exists to catch, and a run that prints the two numbers without
+   * judging them is a green line that says nothing. */
+  if (refused_imports != asked || asked != PROBE_IMPORTS)
+    {
+      fprintf (stderr, "client: %d: the refused-import gate FAILED (%d refused of "
+                       "%d asked, %d expected)\n", __LINE__, refused_imports,
+                       asked, PROBE_IMPORTS);
+      exit (1);
+    }
 
   gbm_bo_destroy (bo);
   gbm_device_destroy (device);
@@ -3106,8 +3298,12 @@ probe_oversized_pool (void)
     fprintf (stderr, "client: the compositor refused the %d MB pool and dropped us\n",
              PROBE_POOL_SIZE / (1024 * 1024));
   else
-    fprintf (stderr, "client: the compositor accepted a %d MB pool\n",
-             PROBE_POOL_SIZE / (1024 * 1024));
+    {
+      fprintf (stderr, "client: %d: the oversized-pool gate FAILED: the compositor "
+                       "accepted a %d MB pool, over the limit it advertises\n",
+               __LINE__, PROBE_POOL_SIZE / (1024 * 1024));
+      exit (1);
+    }
 }
 
 /* The per-connection budget, which is the other half of the cap: sixteen pools
@@ -3173,6 +3369,704 @@ probe_pool_budget (void)
     }
 }
 
+/* -------------------------------------------------------- --pool-shrink */
+
+/* The fd handed to create_pool stays the client's file, and nothing in the
+ * protocol takes it away from it: a client that cuts the file down afterwards
+ * leaves the compositor holding a mapping over pages that no longer have
+ * anything behind them. The frame that reads them is a SIGBUS in whoever maps
+ * the surface, which is the host — not an error this connection can be told
+ * about first.
+ *
+ * Two buffers from one pool are what make the read happen. The first commits
+ * while the file is whole, so the compositor maps the pool and paints from it;
+ * the second commits after the file goes out from under that map. The client
+ * stops reading its own mapping before the cut, because a client that faults in
+ * the hole it just made would be the corpse the gate reports.
+ *
+ * The pool object is destroyed in the first round and kept alive in the second.
+ * That is the difference the compositor has to handle rather than a detail: a
+ * buffer keeps its pool referenced, so the ordinary client that destroys the
+ * pool as soon as it has its buffers leaves a mapping with no object to post an
+ * error against — dropping the map and keeping the connection is all it may do.
+ * With the object still there, the answer a client that broke its own pool earns
+ * is a protocol error, and that ends the connection. */
+#define PROBE_SHRINK_KEEP 4096
+
+/* Whether the connection died of the commit that followed the cut. */
+static int
+shrink_a_pool (int keep_pool)
+{
+  struct wl_shm_pool *pool;
+  struct wl_buffer *first, *second;
+  size_t bytes;
+  int fd, stride;
+  void *map;
+
+  stride = device_width * 4;
+  bytes = (size_t) stride * device_height * 2;
+
+  fd = memfd_create ("shm-client-shrink", MFD_CLOEXEC);
+  if (fd < 0 || ftruncate (fd, (off_t) bytes) < 0)
+    {
+      fprintf (stderr, "client: cannot make a pool to cut down: %s\n", strerror (errno));
+      if (fd >= 0)
+        close (fd);
+      exit (1);
+    }
+
+  map = mmap (NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (map == MAP_FAILED)
+    {
+      fprintf (stderr, "client: cannot map the pool to cut down: %s\n", strerror (errno));
+      close (fd);
+      exit (1);
+    }
+  memset (map, 0x42, bytes);
+
+  pool = wl_shm_create_pool (shm, fd, (int32_t) bytes);
+  first = wl_shm_pool_create_buffer (pool, 0, device_width, device_height, stride,
+                                     WL_SHM_FORMAT_XRGB8888);
+  second = wl_shm_pool_create_buffer (pool, stride * device_height, device_width,
+                                      device_height, stride, WL_SHM_FORMAT_XRGB8888);
+  if (!keep_pool)
+    wl_shm_pool_destroy (pool);
+  /* This descriptor is not closed at all, and not because the compositor needs
+   * it — it has its own copy. It is the hole the ftruncate below is cut with. */
+
+  wl_surface_attach (surface, first, 0, 0);
+  wl_surface_damage_buffer (surface, 0, 0, device_width, device_height);
+  wl_surface_commit (surface);
+
+  if (wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: the compositor died or hung up while the pool was "
+                       "still whole, so this run proves nothing\n");
+      exit (1);
+    }
+
+  munmap (map, bytes);
+  if (ftruncate (fd, PROBE_SHRINK_KEEP) < 0)
+    {
+      fprintf (stderr, "client: cannot cut the pool down: %s\n", strerror (errno));
+      exit (1);
+    }
+
+  wl_surface_attach (surface, second, 0, 0);
+  wl_surface_damage_buffer (surface, 0, 0, device_width, device_height);
+  wl_surface_commit (surface);
+
+  return wl_display_roundtrip (display) < 0;
+}
+
+static void
+pool_shrink_probe (void)
+{
+  int refused;
+
+  refused = shrink_a_pool (0);
+  fprintf (stderr, "client: a pool cut to %d bytes after its object was destroyed: %s\n",
+           PROBE_SHRINK_KEEP,
+           refused ? "the compositor hung up on a pool it can no longer name"
+                   : "the compositor kept the connection and read the file itself");
+  if (refused)
+    {
+      fprintf (stderr, "client: %d: pool-shrink gate FAILED: a destroyed pool is "
+                       "the normal shape, and a host that cannot post against it "
+                       "still must not die with it\n", __LINE__);
+      exit (1);
+    }
+
+  refused = shrink_a_pool (1);
+  fprintf (stderr, "client: a pool cut to %d bytes with its object still alive: %s\n",
+           PROBE_SHRINK_KEEP,
+           refused ? "the compositor refused it and hung up"
+                   : "the COMPOSITOR WENT ON READING IT");
+  if (!refused)
+    {
+      fprintf (stderr, "client: %d: pool-shrink gate FAILED\n", __LINE__);
+      exit (1);
+    }
+
+  /* The refusal is what ends the run: this connection cannot outlive it, and the
+   * host being awake enough to finish its script and save its screenshot is the
+   * other half of what the selftest step looks at. */
+  exit (0);
+}
+
+/* -------------------------------------------------------- --wrong-object */
+
+/* A request that names an object hands the compositor whatever struct sits
+ * under that id. Naming the wrong kind of object is not a complaint a
+ * compositor can shrug at: it decides which struct the compositor reads
+ * through which fields, and which destroy path frees it while the pointer is
+ * still remembered. A zwp_primary_selection_source_v1 is built by the same
+ * code as a wl_data_source but torn down by the other branch, which drops the
+ * primary offers and frees the struct — so a compositor that took it for a
+ * data source goes on reading memory it has already let go of.
+ *
+ * Each attack gets its own connection, because the answer the client has to
+ * see is a protocol error, and that ends the connection that provoked it. The
+ * main connection never sends anything wrong: it keeps painting, and the last
+ * probe checks it is still being served. */
+
+struct WrongConnection {
+  struct wl_display *display;
+  struct wl_registry *registry;
+  struct wl_compositor *compositor;
+  struct wl_seat *seat;
+  struct wl_data_device_manager *manager;
+  struct wl_data_device *device;
+  struct zwp_primary_selection_device_manager_v1 *primary_manager;
+};
+
+static void
+wrong_registry_global (void *data, struct wl_registry *registry, uint32_t name,
+                       const char *interface, uint32_t version)
+{
+  struct WrongConnection *conn = data;
+
+  if (!strcmp (interface, "wl_data_device_manager"))
+    conn->manager = wl_registry_bind (registry, name,
+                                      &wl_data_device_manager_interface,
+                                      version < 3 ? version : 3);
+  else if (!strcmp (interface, "wl_seat"))
+    conn->seat = wl_registry_bind (registry, name, &wl_seat_interface, 1);
+  else if (!strcmp (interface, "wl_compositor"))
+    conn->compositor = wl_registry_bind (registry, name,
+                                         &wl_compositor_interface, 1);
+  else if (!strcmp (interface, "zwp_primary_selection_device_manager_v1"))
+    conn->primary_manager =
+      wl_registry_bind (registry, name,
+                        &zwp_primary_selection_device_manager_v1_interface,
+                        version < 1 ? version : 1);
+}
+
+static void
+wrong_registry_global_remove (void *data, struct wl_registry *registry,
+                              uint32_t name)
+{
+}
+
+static const struct wl_registry_listener wrong_registry_listener = {
+  .global = wrong_registry_global,
+  .global_remove = wrong_registry_global_remove,
+};
+
+static int
+wrong_connection_open (struct WrongConnection *conn)
+{
+  memset (conn, 0, sizeof *conn);
+
+  conn->display = wl_display_connect (NULL);
+  if (!conn->display)
+    {
+      fprintf (stderr, "client: no second connection for the wrong-object probe\n");
+      return 0;
+    }
+
+  conn->registry = wl_display_get_registry (conn->display);
+  wl_registry_add_listener (conn->registry, &wrong_registry_listener, conn);
+  wl_display_roundtrip (conn->display);
+
+  if (!conn->manager || !conn->seat || !conn->compositor || !conn->primary_manager)
+    {
+      fprintf (stderr, "client: wrong-object probe globals manager=%d seat=%d "
+                       "compositor=%d primary=%d\n", !!conn->manager, !!conn->seat,
+                       !!conn->compositor, !!conn->primary_manager);
+      wl_display_disconnect (conn->display);
+      conn->display = NULL;
+      return 0;
+    }
+
+  /* Created before the attack, so the compositor has a device of this
+   * connection to answer on. */
+  conn->device = wl_data_device_manager_get_data_device (conn->manager, conn->seat);
+  return 1;
+}
+
+static void
+wrong_connection_close (struct WrongConnection *conn)
+{
+  /* The proxies of a connection the compositor hung up on are not worth
+   * destroying: the display owns what is left of them. */
+  if (conn->display)
+    wl_display_disconnect (conn->display);
+  conn->display = NULL;
+}
+
+/* The frame no client wrapper will send for you. Handing
+ * wl_data_device_set_selection() a zwp_primary_selection_source_v1 is refused
+ * inside libwayland — measured, on this very probe: "invalid object (8), type
+ * (zwp_primary_selection_source_v1), message set_selection(?ou)" — so the
+ * request never reaches the compositor and a gate built on the wrapper would be
+ * grading the client library. The wire is written here instead, one whole
+ * message after a flush, which is what a fuzzer or a determined client does:
+ * the compositor is then the only one left who can say no.
+ *
+ * set_selection is opcode 1 of wl_data_device and takes two arguments, the
+ * source id and the serial; a wayland frame is size, sender id, opcode and then
+ * the arguments, all in native order. */
+static void
+wrong_selection_of (struct WrongConnection *conn, uint32_t source_id,
+                    const char *what)
+{
+  struct { uint32_t size, id, opcode, source, serial; } message = {
+    sizeof message,
+    wl_proxy_get_id ((struct wl_proxy *) conn->device),
+    1,
+    source_id,
+    1
+  };
+  ssize_t written;
+  int refused;
+
+  wl_display_flush (conn->display);
+  written = write (wl_display_get_fd (conn->display), &message, sizeof message);
+  if (written != (ssize_t) sizeof message)
+    {
+      fprintf (stderr, "client: %d: cannot send the raw frame: %s\n",
+               __LINE__, strerror (errno));
+      exit (1);
+    }
+
+  refused = wl_display_roundtrip (conn->display) < 0;
+
+  fprintf (stderr, "client: named a %s where a wl_data_source was expected: %s\n",
+           what, refused ? "the compositor refused it and hung up"
+                         : "the COMPOSITOR ACCEPTED IT");
+
+  if (!refused)
+    {
+      fprintf (stderr, "client: %d: wrong-object gate FAILED on a %s\n",
+               __LINE__, what);
+      exit (1);
+    }
+
+  wrong_connection_close (conn);
+}
+
+static void
+wrong_object_probe (void)
+{
+  struct WrongConnection conn;
+  struct zwp_primary_selection_source_v1 *primary;
+  struct wl_surface *surface;
+  struct wl_data_source *source;
+
+  if (!wrong_connection_open (&conn))
+    exit (1);
+  primary = zwp_primary_selection_device_manager_v1_create_source (conn.primary_manager);
+  wrong_selection_of (&conn,
+                      wl_proxy_get_id ((struct wl_proxy *) primary),
+                      "zwp_primary_selection_source_v1");
+
+  if (!wrong_connection_open (&conn))
+    exit (1);
+  surface = wl_compositor_create_surface (conn.compositor);
+  wrong_selection_of (&conn,
+                      wl_proxy_get_id ((struct wl_proxy *) surface),
+                      "wl_surface");
+
+  /* Both attackers are gone; the client that has been painting the whole time
+   * is still a client. Its selection has to be taken, not hung up on. */
+  ensure_data_device ();
+  source = data_manager ?
+    wl_data_device_manager_create_data_source (data_manager) : NULL;
+  if (!source || !data_device)
+    {
+      fprintf (stderr, "client: no data device to prove the compositor survived\n");
+      exit (1);
+    }
+
+  wl_data_source_offer (source, "text/plain");
+  wl_data_source_add_listener (source, &data_source_listener, source);
+  wl_data_device_set_selection (data_device, source, 1);
+
+  if (wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: %d: wrong-object gate FAILED: the compositor hung "
+                       "up on the client that sent nothing wrong\n", __LINE__);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: the compositor refused both wrong objects and is still "
+                   "serving the client that painted them\n");
+
+  /* No exit here, unlike the modes that answer on their own connection: both
+   * attackers were second connections, so this client still has a window the
+   * compositor is drawing. Going back to the frame loop makes the rest of the
+   * script grade that — a run whose picture vanishes after the attacks is the
+   * bug this probe exists to catch. */
+}
+
+/* ---------------------------------------------------------- --empty-copy */
+
+/* The primary-selection half. The compositor reads this source the moment it is
+ * told about it, exactly as it reads the clipboard one, and the answer here is a
+ * descriptor closed without a byte written to it. */
+static void
+primary_source_send (void *data, struct zwp_primary_selection_source_v1 *source,
+                     const char *mime_type, int32_t fd)
+{
+  primary_copy_reads++;
+
+  fprintf (stderr, "client: %d: the primary selection asked for %s, answering "
+                   "with nothing\n", getpid (), mime_type);
+  close (fd);
+}
+
+static void
+primary_source_cancelled (void *data, struct zwp_primary_selection_source_v1 *source)
+{
+  zwp_primary_selection_source_v1_destroy (source);
+  primary_source = NULL;
+}
+
+static const struct zwp_primary_selection_source_v1_listener primary_source_listener = {
+  .send = primary_source_send,
+  .cancelled = primary_source_cancelled,
+};
+
+static void
+empty_copy_probe (void)
+{
+  struct wl_data_source *source;
+
+  ensure_data_device ();
+  if (!data_device || !data_manager)
+    {
+      fprintf (stderr, "client: %d: no data device, the empty copy cannot be sent\n",
+               __LINE__);
+      exit (1);
+    }
+  /* Both halves have to be askable or the run is not grading what it says it is:
+   * a probe that quietly skips the part it cannot send is a green that proves
+   * nothing, which is worse than a red. */
+  if (!primary_manager || !seat)
+    {
+      fprintf (stderr, "client: %d: no primary selection to copy into "
+                       "(manager=%d seat=%d)\n", __LINE__,
+               !!primary_manager, !!seat);
+      exit (1);
+    }
+
+  source = wl_data_device_manager_create_data_source (data_manager);
+  wl_data_source_offer (source, "text/plain;charset=utf-8");
+  wl_data_source_add_listener (source, &data_source_listener, source);
+  wl_data_device_set_selection (data_device, source, 0);
+
+  primary_device =
+    zwp_primary_selection_device_manager_v1_get_device (primary_manager, seat);
+  primary_source =
+    zwp_primary_selection_device_manager_v1_create_source (primary_manager);
+  zwp_primary_selection_source_v1_offer (primary_source, "text/plain;charset=utf-8");
+  zwp_primary_selection_source_v1_add_listener (primary_source,
+                                                &primary_source_listener,
+                                                primary_source);
+  zwp_primary_selection_device_v1_set_selection (primary_device, primary_source, 0);
+
+  fprintf (stderr, "client: %d: took an empty clipboard and primary selection\n",
+           getpid ());
+
+  if (wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: %d: empty-copy gate FAILED: the compositor hung "
+                       "up on a payload that was empty\n", __LINE__);
+      exit (1);
+    }
+}
+
+/* --------------------------------------------------------- --popup-depth */
+
+/* An xdg_popup becomes a link on its parent's child list, and the host then
+ * walks that tree with recursion — to place a menu against the window above it,
+ * and to build the stack it draws. The depth of the recursion is therefore chosen
+ * by the client and paid for out of the host's C stack, which is the shape of bug
+ * where one unprivileged connection can take the whole windowing system down.
+ *
+ * The chain is built one popup at a time, each followed by a roundtrip, because
+ * the request that hits the cap kills the connection and a batch of them would
+ * not say where the cap actually sat. Like the wrong-object attacks, the attacker
+ * lives on a connection of its own: the refusal is the wanted answer, and it
+ * must not end the client that is painting. */
+
+struct DepthConnection {
+  struct wl_display *display;
+  struct wl_registry *registry;
+  struct wl_compositor *compositor;
+  struct xdg_wm_base *wm_base;
+};
+
+static void
+depth_registry_global (void *data, struct wl_registry *registry, uint32_t name,
+                       const char *interface, uint32_t version)
+{
+  struct DepthConnection *conn = data;
+
+  if (!strcmp (interface, "wl_compositor"))
+    conn->compositor = wl_registry_bind (registry, name,
+                                         &wl_compositor_interface, 1);
+  else if (!strcmp (interface, "xdg_wm_base"))
+    {
+      conn->wm_base = wl_registry_bind (registry, name, &xdg_wm_base_interface,
+                                        version < 3 ? version : 3);
+      xdg_wm_base_add_listener (conn->wm_base, &wm_base_listener, NULL);
+    }
+}
+
+static void
+depth_registry_global_remove (void *data, struct wl_registry *registry,
+                              uint32_t name)
+{
+}
+
+static const struct wl_registry_listener depth_registry_listener = {
+  .global = depth_registry_global,
+  .global_remove = depth_registry_global_remove,
+};
+
+/* The root is configured like any toplevel, and an unacked configure is a
+ * complaint the compositor is entitled to make about a probe that has not done
+ * anything wrong yet. */
+static void
+depth_configure (void *data, struct xdg_surface *xdg, uint32_t serial)
+{
+  xdg_surface_ack_configure (xdg, serial);
+}
+
+static const struct xdg_surface_listener depth_surface_listener = {
+  .configure = depth_configure,
+};
+
+static void
+popup_depth_probe (void)
+{
+  struct DepthConnection conn;
+  struct wl_surface *root_surface;
+  struct xdg_surface *parent;
+  int refused_at = 0;
+  int attempt;
+
+  memset (&conn, 0, sizeof conn);
+  conn.display = wl_display_connect (NULL);
+  if (!conn.display)
+    {
+      fprintf (stderr, "client: %d: no second connection for the popup-depth "
+                       "probe\n", __LINE__);
+      exit (1);
+    }
+
+  conn.registry = wl_display_get_registry (conn.display);
+  wl_registry_add_listener (conn.registry, &depth_registry_listener, &conn);
+  wl_display_roundtrip (conn.display);
+
+  if (!conn.compositor || !conn.wm_base)
+    {
+      fprintf (stderr, "client: %d: popup-depth probe globals compositor=%d "
+                       "xdg_wm_base=%d\n", __LINE__, !!conn.compositor,
+                       !!conn.wm_base);
+      exit (1);
+    }
+
+  root_surface = wl_compositor_create_surface (conn.compositor);
+  parent = xdg_wm_base_get_xdg_surface (conn.wm_base, root_surface);
+  xdg_surface_add_listener (parent, &depth_surface_listener, NULL);
+  xdg_surface_get_toplevel (parent);
+  wl_surface_commit (root_surface);
+
+  if (wl_display_roundtrip (conn.display) < 0)
+    {
+      fprintf (stderr, "client: %d: popup-depth gate FAILED: the compositor hung "
+                       "up on the plain toplevel the chain hangs off\n", __LINE__);
+      exit (1);
+    }
+
+  for (attempt = 1; attempt <= POPUP_DEPTH_ATTEMPT; attempt++)
+    {
+      struct wl_surface *surface =
+        wl_compositor_create_surface (conn.compositor);
+      struct xdg_surface *xdg =
+        xdg_wm_base_get_xdg_surface (conn.wm_base, surface);
+      struct xdg_positioner *positioner =
+        xdg_wm_base_create_positioner (conn.wm_base);
+      int refused;
+
+      /* A positioner has to state a size and an anchor rectangle or the refusal
+       * that comes back is the one about the positioner, not the one about the
+       * depth — and the anchor moves so no two levels place identically. */
+      xdg_positioner_set_size (positioner, 40, 20);
+      xdg_positioner_set_anchor_rect (positioner, attempt, attempt, 8, 8);
+      xdg_positioner_set_gravity (positioner, XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT);
+      xdg_surface_get_popup (xdg, parent, positioner);
+      xdg_positioner_destroy (positioner);
+
+      refused = wl_display_roundtrip (conn.display) < 0;
+      if (refused)
+        {
+          refused_at = attempt;
+          break;
+        }
+
+      parent = xdg;
+    }
+
+  if (!refused_at)
+    {
+      fprintf (stderr, "client: %d: popup-depth gate FAILED: the compositor took "
+                       "%d nested popups, so nothing bounds the depth its tree "
+                       "walks recurse through\n", __LINE__, POPUP_DEPTH_ATTEMPT);
+      exit (1);
+    }
+
+  /* Asked for exactly, not merely "early enough": a chain refused at popup 3
+   * would be a refusal for some other reason, and the run would be grading a
+   * different bug than the one it claims to. The 33rd popup is the first whose
+   * parent already carries the full cap of links. */
+  if (refused_at != POPUP_DEPTH_LIMIT + 1)
+    {
+      fprintf (stderr, "client: %d: popup-depth gate FAILED: refused at popup %d, "
+                       "but the cap is %d links, so the first refusal should be "
+                       "popup %d\n", __LINE__, refused_at, POPUP_DEPTH_LIMIT,
+               POPUP_DEPTH_LIMIT + 1);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: %d: the chain was refused at popup %d; the cap is "
+                   "%d links\n", __LINE__, refused_at, POPUP_DEPTH_LIMIT);
+
+  wl_display_disconnect (conn.display);
+
+  /* The attacker and its chain are gone; the client that never sent anything
+   * wrong is still a client, and going back to the frame loop lets the rest of
+   * the script grade that its picture is still being drawn. */
+  if (wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: %d: popup-depth gate FAILED: the compositor hung "
+                       "up on the client that painted through the attack\n",
+               __LINE__);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: %d: the compositor refused the deep chain and is "
+                   "still serving the client that painted it\n", __LINE__);
+}
+
+/* --------------------------------------------------- --drag-fake-serial */
+
+/* Every slot a version 3 source can be answered with, because a compositor that
+ * took this drag would start sending them and libwayland ends the connection over
+ * an event whose slot the client left NULL — which would hide the answer the gate
+ * is actually grading. Only .cancelled is the one wanted. */
+static void
+drag_fake_target (void *data, struct wl_data_source *source, const char *mime_type)
+{
+  fprintf (stderr, "client: %d: a reader wants %s of the drag with no grab\n",
+           __LINE__, mime_type ? mime_type : "(nothing)");
+}
+
+static void
+drag_fake_send (void *data, struct wl_data_source *source,
+               const char *mime_type, int fd)
+{
+  fprintf (stderr, "client: %d: the drag with no grab was read for %s\n",
+           __LINE__, mime_type);
+  close (fd);
+}
+
+static void
+drag_fake_source_cancelled (void *data, struct wl_data_source *source)
+{
+  drag_fake_cancelled = 1;
+  wl_data_source_destroy (source);
+}
+
+static void
+drag_fake_drop_performed (void *data, struct wl_data_source *source)
+{
+  fprintf (stderr, "client: %d: the drag with no grab was let go\n", __LINE__);
+}
+
+static void
+drag_fake_dnd_finished (void *data, struct wl_data_source *source)
+{
+  fprintf (stderr, "client: %d: the drag with no grab was finished\n", __LINE__);
+}
+
+static void
+drag_fake_action (void *data, struct wl_data_source *source, uint32_t action)
+{
+  fprintf (stderr, "client: %d: the drag with no grab got action 0x%x\n",
+           __LINE__, action);
+}
+
+static const struct wl_data_source_listener drag_fake_listener = {
+  .target = drag_fake_target,
+  .send = drag_fake_send,
+  .cancelled = drag_fake_source_cancelled,
+  .dnd_drop_performed = drag_fake_drop_performed,
+  .dnd_finished = drag_fake_dnd_finished,
+  .action = drag_fake_action,
+};
+
+static void
+drag_fake_probe (void)
+{
+  struct wl_data_source *source;
+  int enters_before = drag_enters;
+
+  ensure_data_device ();
+  if (!data_device || !data_manager)
+    {
+      fprintf (stderr, "client: %d: no data device, the drag with no grab cannot "
+                       "be sent\n", __LINE__);
+      exit (1);
+    }
+
+  source = wl_data_device_manager_create_data_source (data_manager);
+  wl_data_source_offer (source, DRAG_FAKE_MIME);
+  wl_data_source_add_listener (source, &drag_fake_listener, source);
+
+  wl_data_device_start_drag (data_device, source, surface, NULL,
+                             DRAG_FAKE_SERIAL);
+  fprintf (stderr, "client: %d: asked for a drag over a painted surface citing "
+                   "serial %u, which no press ever carried\n", __LINE__,
+           DRAG_FAKE_SERIAL);
+
+  if (wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: %d: drag-fake gate FAILED: the compositor hung up "
+                       "on a drag with no press behind it — the answer the "
+                       "protocol wants is the source cancelled, not the client "
+                       "dropped\n", __LINE__);
+      exit (1);
+    }
+
+  if (!drag_fake_cancelled)
+    {
+      fprintf (stderr, "client: %d: drag-fake gate FAILED: nothing cancelled a "
+                       "start_drag that cited serial %u, which the compositor "
+                       "never gave out in a button press%s\n", __LINE__,
+               DRAG_FAKE_SERIAL,
+               drag_enters != enters_before ?
+                 ", and the drag it started then entered this surface" : "");
+      exit (1);
+    }
+
+  /* Two answers to one request is as wrong as none: the cancelled says there is
+   * no drag, and an enter is a drag moving over something. */
+  if (drag_enters != enters_before)
+    {
+      fprintf (stderr, "client: %d: drag-fake gate FAILED: the source was "
+                       "cancelled and a drag arrived anyway, so the seat is now "
+                       "holding a pointer for a drag it refused\n", __LINE__);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: %d: the drag with no grab was refused with cancelled "
+                   "and no surface was entered\n", __LINE__);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -3183,8 +4077,8 @@ main (int argc, char *argv[])
     {
       if (!strcmp (argv[i], "--dmabuf"))
         use_dmabuf = 1;
-        else if (!strcmp (argv[i], "--fullscreen"))
-          use_fullscreen = 1;
+      else if (!strcmp (argv[i], "--fullscreen"))
+        use_fullscreen = 1;
       else if (!strcmp (argv[i], "--copy"))
         use_copy = 1;
       else if (!strcmp (argv[i], "--dnd-requests"))
@@ -3219,6 +4113,16 @@ main (int argc, char *argv[])
         use_refused = 1;
       else if (!strcmp (argv[i], "--pool-budget"))
         use_pool_budget = 1;
+      else if (!strcmp (argv[i], "--wrong-object"))
+        use_wrong_object = 1;
+      else if (!strcmp (argv[i], "--pool-shrink"))
+        use_pool_shrink = 1;
+      else if (!strcmp (argv[i], "--empty-copy"))
+        use_empty_copy = 1;
+      else if (!strcmp (argv[i], "--popup-depth"))
+        use_popup_depth = 1;
+      else if (!strcmp (argv[i], "--drag-fake-serial"))
+        use_drag_fake_serial = 1;
       else if (!strcmp (argv[i], "--second-window"))
         use_second_window = 1;
       else
@@ -3288,11 +4192,15 @@ main (int argc, char *argv[])
         fprintf (stderr, "client: no dmabuf feedback received\n");
     }
 
+  /* exit(0) rather than a return, and both probes above judge their own answer:
+   * reaching here means the compositor refused what it had to refuse, and the
+   * oversized pool took this connection with it. Painting cannot follow, and a
+   * walk off the end of main would report an unjudged run as a pass. */
   if (use_refused)
     {
       probe_refused_imports ();
       probe_oversized_pool ();
-      return 0;
+      exit (0);
     }
 
   /* Its own mode because the answer to the pool that goes over the limit ends
@@ -3300,7 +4208,7 @@ main (int argc, char *argv[])
   if (use_pool_budget)
     {
       probe_pool_budget ();
-      return 0;
+      exit (0);
     }
 
   fprintf (stderr, "client: painting %s buffers, %d dmabuf formats and %d modifiers "
@@ -3393,6 +4301,11 @@ main (int argc, char *argv[])
         }
     }
 
-  fprintf (stderr, "client: connection closed (%u frames)\n", frames);
-  return 0;
+  /* The loop only ends when the socket did: a protocol error from the
+   * compositor, or the process behind it going away. Either is a complaint about
+   * the compositor, not a pass, and every mode that ends its own connection on
+   * purpose says so where it breaks it (see --refused and --pool-shrink). */
+  fprintf (stderr, "client: %d: the compositor hung up after %u frames\n",
+           __LINE__, frames);
+  return 1;
 }

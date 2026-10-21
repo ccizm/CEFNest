@@ -152,6 +152,13 @@ primary_selection_server_header = custom_target(
   command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
 )
 
+primary_selection_client_header = custom_target(
+  'primary-selection-client-header',
+  input: primary_selection_xml,
+  output: 'primary-selection-client-protocol.h',
+  command: [wayland_scanner, 'client-header', '@INPUT@', '@OUTPUT@'],
+)
+
 primary_selection_code = custom_target(
   'primary-selection-code',
   input: primary_selection_xml,

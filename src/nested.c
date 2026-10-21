@@ -524,12 +524,63 @@ surface_has_pending_frames (NestedSurface *self)
  * Buffer readback                                                    *
  * ------------------------------------------------------------------ */
 
+/* The fd handed to create_pool stays the client's: nothing in the protocol takes
+ * the file away from it, and a client that cuts it down afterwards leaves this
+ * process holding a mapping over pages that no longer have anything behind them.
+ * Reading one of those is not an error that can be reported after the fact — it
+ * is a SIGBUS in whoever maps the frame, which is the host. Nothing here can make
+ * that impossible, so the file is measured again every time the mapping is about
+ * to be read, and once it is found short the map goes for good: pread answers a
+ * short file with zeroes instead of a signal, and the connection that broke its
+ * own pool is the one that gets the protocol error. */
+static gboolean
+pool_map_is_whole (Pool *pool)
+{
+  struct stat info;
+  long long held;
+  int error = 0;
+
+  if (!pool->map)
+    return TRUE;
+
+  if (fstat (pool->fd, &info) != 0)
+    {
+      error = errno;
+      held = -1;
+    }
+  else
+    held = (long long) info.st_size;
+
+  if (held >= 0 && (unsigned long long) held >= pool->size)
+    return TRUE;
+
+  /* Before anything else, because the caller reads these bytes again right now
+   * and must not find the mapping still standing over the hole. */
+  munmap (pool->map, pool->size);
+  pool->map = NULL;
+
+  if (error)
+    g_warning ("nested: the file behind a %zu byte shm pool cannot be read: %s",
+               pool->size, g_strerror (error));
+  else
+    g_warning ("nested: a shm pool of %zu bytes was cut down to %lld while the "
+               "compositor still had it mapped", pool->size, held);
+
+  if (pool->resource)
+    wl_resource_post_error (pool->resource, WL_SHM_ERROR_INVALID_FD,
+                            "the pool fd was cut down below its %zu bytes",
+                            pool->size);
+
+  return FALSE;
+}
+
 static gboolean
 read_pool (Pool *pool, off_t offset, size_t length, guint8 *dst)
 {
   size_t done = 0;
 
-  if (pool->map && offset >= 0 && (size_t) offset + length <= pool->size)
+  if (pool->map && offset >= 0 && (size_t) offset + length <= pool->size &&
+      pool_map_is_whole (pool))
     {
       memcpy (dst, pool->map + offset, length);
       return TRUE;
@@ -566,6 +617,10 @@ copy_pool_rect (Buffer *buffer, NestedSurface *self, GdkRectangle rect)
 
   if (width <= 0 || height <= 0)
     return;
+
+  /* Measured once for the whole rectangle: a mapping that fails here is dropped,
+   * and every row below then takes the pread branch of its own accord. */
+  pool_map_is_whole (buffer->pool);
 
   for (row = 0; row < height; row++)
     {
@@ -1061,6 +1116,13 @@ surface_resource_destroyed (struct wl_resource *resource)
   was_painted = surface_is_painted (self);
   self->mapped = FALSE;
 
+  /* A cursor surface is normally invisible and never the pointer's focus, so
+   * nothing else here would let go of a wait on one that has just been
+   * destroyed: the commit that was supposed to clear it can never come, and this
+   * ref is the only thing keeping a gone surface alive. */
+  if (nested && self == nested->cursor_pending)
+    g_clear_object (&nested->cursor_pending);
+
   seat_clear_focus (nested, self);
   text_input_forget_surface (nested, self);
   surface_list_remove (self);
@@ -1233,6 +1295,9 @@ shm_create_pool (struct wl_client *client, struct wl_resource *resource,
 
   wl_resource_set_implementation (pool_resource, &shm_pool_impl, pool,
                                   pool_resource_destroyed);
+  /* Set last: everything above this line that can fail has no resource to answer
+   * on, and the ones below it hold a reference to the pool anyway. */
+  pool->resource = pool_resource;
 }
 
 static void
@@ -1360,7 +1425,13 @@ shm_pool_create_buffer (struct wl_client *client, struct wl_resource *resource,
 static void
 pool_resource_destroyed (struct wl_resource *resource)
 {
-  pool_unref (wl_resource_get_user_data (resource));
+  Pool *pool = wl_resource_get_user_data (resource);
+
+  /* The buffers outlive the pool object — a client destroys the pool as soon as
+   * it has its buffers — so this is the one name the pool can no longer answer
+   * a complaint on. */
+  pool->resource = NULL;
+  pool_unref (pool);
 }
 
 static void
@@ -2176,10 +2247,19 @@ nested_compositor_dispose (GObject *object)
       self->frame_watchdog_id = 0;
     }
 
+  /* Both replay idles run against the surface and device lists of this object,
+   * and neither holds a reference to it: dropped here, they are dropped before
+   * anything they touch goes away. */
   if (self->selection_replay_id)
     {
       g_source_remove (self->selection_replay_id);
       self->selection_replay_id = 0;
+    }
+
+  if (self->primary_replay_id)
+    {
+      g_source_remove (self->primary_replay_id);
+      self->primary_replay_id = 0;
     }
 
   if (self->frame_clock)

@@ -284,6 +284,35 @@ opcode 0 是 v3 的 `target`，而那个假客户端的 listener 表只填了 `s
 条 `if (FALSE)` 跑一遍，两次 check 都会红并且报「the page kept its drag, still offering …」——这条
 门禁是要能咬人的。
 
+### 6.7 serial 不是装饰：`start_drag` 必须引一次还按着的按下
+
+`wl_data_device.start_drag` 的原文是 origin surface「the client must have an active implicit grab
+that matches the serial」。拖拽协议里只有这一处把 serial 写成要求而不是摆设（`set_selection`、
+`accept` 的 serial 连 weston 自己都标了 FIXME），所以只有它值得查。查的理由不是洁癖：compositor 一
+旦接受一条拖拽，座位就把指针底下的 surface 的 button 事件全部扣下（§6.1 的 `owns_pointer`），要等
+到某次抬起才当作 drop 还回去——于是一条没人按下的拖拽会让整个页面点不动。
+
+记法很薄：`SeatClient` 多一个 `pointer_grab_serial`，`nested_compositor_notify_pointer_button` 在把
+按下发给「当前 inside」的那些客户端时顺手记下这条 serial；抬起时先把所有客户端的它清 0，**清在拖拽
+把这次抬起吞掉之前**，否则 drop 之后 grab 还留着。离开 surface 不清——implicit grab 是按钮抬起结束的，
+不是指针走开结束的，而我们的 `seat_retarget` 会在按下之后因为关菜单再 retarget 一次，清了就会把正常
+的页面拖拽误杀。`data_device_start_drag` 在查完 source/icon 之后、`if (self->drag) drag_cancel ()`
+之前问一句 `seat_client_grab_is_current (self, client, serial)`；不对就按 weston 的样子收尾：给那条
+source 发 `cancelled`，然后静默返回——不 post error，因为协议没为这件事定义错误码，而客户端在
+`cancelled` 之前一直拥有那个 source。
+
+门禁是 `shm-client --drag-fake-serial`（`seat-selftest-drag-fake-serial`）：主连接已经画好了自己的
+toplevel，然后拿一个从不存在的 serial（1）发 `start_drag`。它要求两件事，缺一即红：那条 source 收到
+`cancelled`；并且这次尝试期间 `wl_data_device.enter` 计数不许动（动了就是拖拽真起来了，两个答案同时
+给了）。两个方向都验过变异：把 `seat_client_grab_is_current` 那句改成 `if (0 && …)`，客户端红在
+「nothing cancelled a start_drag that cited serial 1 … and the drag it started then entered this
+surface」；反过来把记下 grab 的那行改成 `if (0 && pressed)`，红的就是 `seat-selftest-drag-out`——
+「drag-out gate FAILED: 0 handover(s), wanted 1」，即真按下的那条 serial 也不再被认。一条门禁钉住拒
+绝，另一条钉住放行。
+
+顺带一条：伪造的 serial 和「按过又抬起了」的 serial 在 compositor 的记录里长得一模一样（grab 槽已经
+是 0），所以一个数字就同时测了两种。CEF 页面走的仍是 `--drag-out` 那条真序列，没有被这套改动碰过。
+
 ## 7. 第三段：宿主把拖拽带进来（`drag_from_host` + `::drag-in-end`）
 
 ### 7.1 方向反过来了：这一趟 compositor 是源

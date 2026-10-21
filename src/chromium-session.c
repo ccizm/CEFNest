@@ -743,8 +743,11 @@ static void
 send_json (ChromiumSession *self, JsonNode *root)
 {
   g_autoptr (JsonGenerator) generator = NULL;
+  g_autofree char *json = NULL;
   g_autofree char *line = NULL;
   GError *error = NULL;
+  size_t done = 0;
+  size_t total;
   gssize written;
 
   if (!self->output)
@@ -757,15 +760,33 @@ send_json (ChromiumSession *self, JsonNode *root)
   json_generator_set_root (generator, root);
 
   /* NDJSON: the helper's reader only dispatches on a newline. */
-  line = g_strconcat (json_generator_to_data (generator, NULL), "\n", NULL);
+  json = json_generator_to_data (generator, NULL);
+  line = g_strconcat (json, "\n", NULL);
 
-  written = g_output_stream_write (self->output, line, strlen (line), NULL, &error);
-  if (written < 0)
+  /* One call is not one line. A stream is allowed to take part of a write, and
+   * the remainder of a half-written command would be read as the beginning of
+   * the next one — the framing does not come back on its own, so everything
+   * that is left goes round again until the line is out. */
+  total = strlen (line);
+  while (done < total)
     {
-      g_warning ("session: control write failed: %s", error->message);
-      g_clear_error (&error);
-      return;
+      written = g_output_stream_write (self->output, line + done, total - done,
+                                       NULL, &error);
+      if (written < 0)
+        {
+          g_warning ("session: control write failed: %s", error->message);
+          g_clear_error (&error);
+          return;
+        }
+      if (written == 0)
+        {
+          g_warning ("session: control write stopped after %zu of %zu bytes",
+                     done, total);
+          return;
+        }
+      done += (size_t) written;
     }
+
   if (!g_output_stream_flush (self->output, NULL, &error))
     {
       g_warning ("session: control flush failed: %s", error->message);

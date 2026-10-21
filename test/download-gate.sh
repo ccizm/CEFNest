@@ -215,7 +215,7 @@ import sys
 import time
 
 # gate.bin is 6000 bytes and answers in one write, so the small attachment is
-# long finished before the run looks at it. stream.bin is 1 MiB dribbled out at
+# long finished before the run looks at it. stream.bin is 2 MiB dribbled out at
 # 32 KiB per 100 ms: on a loopback address that is the only way a download can
 # still be in flight when something tries to cancel it. second.bin is the
 # second attachment the named-accept scenario runs next to a live stream.

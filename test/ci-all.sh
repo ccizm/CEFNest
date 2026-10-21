@@ -20,7 +20,11 @@
 # there failed" is not a gate.
 #
 # `skip` is counted and shown because a green line must never hide one: a gate
-# skips exactly what this display cannot prove (docs/headless-ci.md §5).
+# skips exactly what this display cannot prove (docs/headless-ci.md §5). A gate
+# that could not run AT ALL — no ImageMagick, no browser build — exits 77 and gets
+# its own SKIP verdict instead of a PASS: the one thing worse than a hidden skip is
+# a verdict of "passed" from a run that made no assertion, because an exit code is
+# what everything above this table (a shell `&&`, a CI step) actually reads.
 
 set -u -o pipefail
 
@@ -33,6 +37,7 @@ KEEP_LOGS=${KEEP_LOGS:-0}
 ALL_RUNS=(
   "proof||240"
   "unit|meson test -C builddir|240"
+  "framing|./test/framing-gate.sh|240"
   "pixel|./test/pixel-gate.sh|240"
   "find|./test/find-gate.sh|420"
   "permission|./test/permission-gate.sh|420"
@@ -63,6 +68,7 @@ wanted() { # is this label selected?
 echo "== logs: $LOGS"
 printf '%-10s %-6s %6s %6s %6s\n' run result time ok skip
 fails=0
+gate_skips=0
 for spec in "${ALL_RUNS[@]}"; do
   label=${spec%%|*}
   rest=${spec#*|}
@@ -92,7 +98,10 @@ for spec in "${ALL_RUNS[@]}"; do
     [ -n "$m" ] && assertions=$m
   fi
   skipped=$(grep -c '^  skip ' "$log")
-  if [ $rc = 0 ]; then verdict=PASS
+  # 77 is meson's own "test skipped" status, so the two harnesses agree on what a
+  # gate that ran nothing says.
+  if [ $rc = 77 ]; then verdict=SKIP; gate_skips=$((gate_skips + 1))
+  elif [ $rc = 0 ]; then verdict=PASS
   else verdict=FAIL; fails=$((fails + 1)); fi
   [ "$skipped" = 0 ] || verdict="$verdict*"
   printf '%-10s %-6s %5ss %6s %6s\n' "$label" "$verdict" "$(( $(date +%s) - t0 ))" \
@@ -111,5 +120,7 @@ fi
 echo
 echo "(* = passed with skipped checks: those are the ones a display without an"
 echo "    output device cannot answer, docs/headless-ci.md §5)"
-if [ $fails = 0 ]; then printf 'ci all: every run passed\n'
+[ $gate_skips = 0 ] || echo "SKIP  = the gate ran no assertion here at all; the reason is in its transcript above"
+if [ $fails = 0 ] && [ $gate_skips = 0 ]; then printf 'ci all: every run passed\n'
+elif [ $fails = 0 ]; then printf 'ci all: every run that ran passed, %d skipped it\n' "$gate_skips"
 else printf 'ci all: %d run(s) failed — transcripts above\n' "$fails"; exit 1; fi

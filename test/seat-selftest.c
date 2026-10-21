@@ -252,6 +252,13 @@ static char drag_in_mime[128];
 static int fds_at_drag_in;
 static gboolean second_mode;
 static gboolean second_failed;
+/* Whether the compositor ever held a client frame to draw: a run that ends with
+ * none has shown that nothing it was sent reached the screen, and that is not a
+ * pass however tidily the client left. Three modes end their own connection on
+ * purpose — --refused, --pool-budget, --pool-shrink — and those judge themselves
+ * on the wire instead of on a picture. */
+static gboolean client_frame_seen;
+static gboolean paint_exempt;
 /* The two toplevels the client maps, found by app-id rather than by position:
  * which of them is the compositor's primary changes when one closes, and the
  * run has to be able to say which window it is talking about either way. */
@@ -285,14 +292,56 @@ count_dmabuf_lines (const char *log_domain, GLogLevelFlags log_level,
            strstr (message, "GDK is not initialized"))
     dmabuf_refusals++;
 
+  /* A handler that matches takes the line over completely, so this has to print
+     it itself or the run would lose the lines it is watching. It is registered
+     without G_LOG_LEVEL_CRITICAL in its mask for the same reason: a critical in
+     this domain has to fall through to the writer below, which is what fails the
+     run on it. */
   g_log_default_handler (log_domain, log_level, message, data);
+}
+
+/* A g_warning is how this library answers a hostile client, so warnings are part
+ * of the design and a run may produce them. A g_critical is not: it means the
+ * compositor called into GLib with an argument GLib refuses to touch, and a
+ * client can often arrange that — an empty selection payload reached
+ * g_utf8_make_valid() as a NULL string, and the same NULL one step further down
+ * was a segfault. Nothing graded that before, and the tree was not free of it.
+ *
+ * Every record that no domain handler has claimed passes here, which is the only
+ * way to see a critical under a name this test does not know in advance: GLib for
+ * a g_return_if_fail, but also Gio, Gsk or Gdk. Counting is all it does; the
+ * default writer stays responsible for what the run prints. */
+static int glib_criticals;
+
+static GLogWriterOutput
+count_critical_records (GLogLevelFlags log_level, const GLogField *fields,
+                        gsize n_fields, gpointer user_data)
+{
+  const char *message = NULL;
+  gsize i;
+
+  if (log_level & G_LOG_LEVEL_CRITICAL)
+    {
+      for (i = 0; i < n_fields; i++)
+        if (!strcmp (fields[i].key, "MESSAGE"))
+          message = fields[i].value;
+
+      glib_criticals++;
+      g_printerr ("selftest: the compositor reached a GLib critical: %s\n",
+                  message ? message : "(no message)");
+    }
+
+  return g_log_writer_default (log_level, fields, n_fields, user_data);
 }
 
 /* The raw client checks the shape of what it is sent — an axis_stop may not ride
  * in the frame of the axis events it stops — and leaves non-zero when the
- * compositor got that wrong. An early exit 0 is not a complaint: --refused
- * returns that way, and so does a toplevel close. Asking a live child what its
- * status is would be a GLib critical, so this waits instead of polling. */
+ * compositor got that wrong. It also leaves non-zero when the compositor hung up
+ * on it, so an early exit 0 is a claim the client made itself: --refused and
+ * --pool-budget say so before the first frame, --pool-shrink after the refusal it
+ * was looking for, and a closed toplevel is the run ending as designed. Asking a
+ * live child what its status is would be a GLib critical, so this waits instead
+ * of polling. */
 static void
 client_exited (GObject *object, GAsyncResult *result, gpointer data)
 {
@@ -344,6 +393,8 @@ save_texture (const char *path)
       g_printerr ("selftest: no client frame to save\n");
       return;
     }
+
+  client_frame_seen = TRUE;
 
   if (!gdk_texture_save_to_png (texture, path))
     g_printerr ("selftest: cannot write %s\n", path);
@@ -416,6 +467,8 @@ save_composite (const char *path)
 
       if (!texture)
         continue;
+
+      client_frame_seen = TRUE;
 
       nested_surface_get_position (surface, &x, &y);
       nested_surface_get_paint_rect (surface, &src, &dst);
@@ -1364,13 +1417,15 @@ main (int argc, char *argv[])
   dump_path = argc > 1 ? argv[1] : (char *) "/tmp/seat-selftest.png";
 
   /* The compositor paints into GdkTextures and reads the render node through
-   * GDK, so this test is only meaningful where a display can be opened. Without
-   * one it reports itself skipped rather than failed — `meson test` runs on
-   * machines nobody is sitting at. */
+   * GDK, so this test is only meaningful where a display can be opened.
+   *
+   * 77 is what meson reads as SKIPPED; 0 it reads as a pass, which is how a run
+   * on a machine nobody is sitting at used to report thirteen green tests that
+   * had composited nothing. The verdict has to say which of the two happened. */
   if (!gtk_init_check ())
     {
       g_print ("selftest: no GDK display, skipping\n");
-      return 0;
+      return 77;
     }
 
   /* The composition frames go beside the plain one, with the same name plus a
@@ -1390,8 +1445,15 @@ main (int argc, char *argv[])
 
   fds_at_start = open_fds ();
 
+  /* Before any handler is registered, and for every mode rather than the one
+   * that found the bug: a critical means the library misused its own arguments,
+   * and the client that provoked it is only the reporter. */
+  g_log_set_writer_func (count_critical_records, NULL, NULL);
+
   if (dmabuf_mode)
-    g_log_set_handler ("nested", G_LOG_LEVEL_MASK, count_dmabuf_lines, NULL);
+    g_log_set_handler ("nested",
+                       G_LOG_LEVEL_MASK & ~G_LOG_LEVEL_CRITICAL,
+                       count_dmabuf_lines, NULL);
 
   compositor = nested_compositor_new (&error);
   if (!compositor)
@@ -1415,8 +1477,15 @@ main (int argc, char *argv[])
   if (drag_in_mode)
     g_signal_connect (compositor, "drag-in-end", G_CALLBACK (drag_in_verdict), NULL);
   for (int i = 3; i < argc; i++)
-    if (!strcmp (argv[i], "--fullscreen"))
-      fullscreen_gate = 1;
+    {
+      if (!strcmp (argv[i], "--fullscreen"))
+        fullscreen_gate = 1;
+      /* The three modes that end their own connection: each judges the answer it
+       * got and leaves, so no picture is ever on offer here. */
+      else if (!strcmp (argv[i], "--refused") || !strcmp (argv[i], "--pool-budget") ||
+               !strcmp (argv[i], "--pool-shrink"))
+        paint_exempt = TRUE;
+    }
 
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_NONE);
   g_subprocess_launcher_setenv (launcher, "WAYLAND_DISPLAY",
@@ -1520,8 +1589,16 @@ main (int argc, char *argv[])
     g_print ("selftest: second-window gate ok, input followed the routing and "
              "both windows painted it\n");
 
+  /* A client that painted and a compositor that imported the picture are two
+   * different claims. Until now only the first was graded: a run whose frames
+   * never became a texture still ended with the client leaving tidily and a green
+   * line, which is the false pass this check exists to stop. */
+  if (!client_frame_seen && !paint_exempt)
+    g_printerr ("selftest: the compositor never had a client frame to paint\n");
+
   return (gtk_client_failed || client_failed || drag_out_failed || drag_in_failed ||
-          second_failed ||
+          second_failed || glib_criticals ||
+          (!client_frame_seen && !paint_exempt) ||
           dmabuf_refusals ||
           (fullscreen_gate && !(fs_enter_seen && fs_exit_seen)) ||
           (dmabuf_mode && dmabuf_advertised == 1 && !dmabuf_imports)) ? 1 : 0;

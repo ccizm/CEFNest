@@ -280,7 +280,7 @@ static void
 assign_browser_surfaces (void)
 {
   NestedCompositor *compositor;
-  GList *tops, *l;
+  GList *tops, *l, *keys, *k;
 
   if (!demo.view)
     return;
@@ -291,6 +291,34 @@ assign_browser_surfaces (void)
     demo.assigned_surfaces = g_hash_table_new (g_direct_hash, g_direct_equal);
 
   tops = nested_compositor_get_toplevels (compositor);
+
+  /* A key has to be a surface the compositor still has. Closing a window drops
+   * the view, and the view was the last reference on the surface it showed, so
+   * the helper's next toplevel can come back with that address — and a key left
+   * pointing at it reads as "already assigned", which is a window that never
+   * gets a surface to show. */
+  keys = g_hash_table_get_keys (demo.assigned_surfaces);
+  for (k = keys; k; k = k->next)
+    {
+      NestedSurface *dead = k->data;
+      ChromiumView *view;
+
+      if (g_list_find (tops, dead))
+        continue;
+
+      if (dead == demo.tab_surface)
+        view = CHROMIUM_VIEW (demo.view);
+      else
+        view = g_hash_table_lookup (demo.browser_views,
+                                   g_hash_table_lookup (demo.assigned_surfaces, dead));
+      if (view)
+        chromium_view_set_target_surface (view, NULL);
+      if (dead == demo.tab_surface)
+        g_clear_object (&demo.tab_surface);
+      g_hash_table_remove (demo.assigned_surfaces, dead);
+    }
+  g_list_free (keys);
+
   for (l = tops; l; l = l->next)
     {
       NestedSurface *surface = l->data;

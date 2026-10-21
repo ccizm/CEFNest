@@ -14,7 +14,12 @@
 // Commands are parsed off the socket on a reader thread and re-dispatched to
 // the CEF UI thread; events are serialised to the socket under a mutex. If the
 // host closes the socket the helper quits, so a crashed widget never leaves an
-// orphaned Chromium behind.
+// orphaned Chromium behind — and it quits by closing every browser it holds,
+// because a second window is a second browser with its own id.
+//
+// One newline-delimited JSON object per line is the whole framing, so an event
+// that goes out half-written hangs the helper up: the next one would be read as
+// the tail of it.
 //
 // Without CHROMIUM_HELPER_SOCKET this is just the Gate 1 probe: a window that
 // loads the URL from argv and quits on Esc.
@@ -31,6 +36,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -140,11 +146,47 @@ CefRefPtr<CefWindow> g_tab_window;
 int CreateNewBrowser(const std::string& url, bool windowed);
 void SelectBrowserById(int id);
 
+// Close every browser the helper holds. OnBeforeClose only ends the message
+// loop once the slot map is empty, so a close aimed at one browser leaves the
+// rest running over a channel nobody is answering.
+void CloseEveryBrowser();
+
 void QuitOnce() {
   if (g_quit_requested)
     return;
   g_quit_requested = true;
   CefQuitMessageLoop();
+}
+
+void CloseEveryBrowser() {
+  /* The slots are copied out before anything is closed: CloseBrowser(true) can
+   * run OnBeforeClose before it returns, and that erases the very map entry a
+   * loop over the slots would still be standing on. */
+  struct Closing {
+    CefRefPtr<CefBrowser> browser;
+    CefRefPtr<CefBrowserView> view;
+    CefRefPtr<CefWindow> window;
+    bool windowed;
+  };
+  std::vector<Closing> closing;
+
+  for (auto& entry : g_browser_slots) {
+    if (!entry.second.browser || !entry.second.browser->GetHost())
+      continue;
+    closing.push_back({entry.second.browser, entry.second.view,
+                       entry.second.window, entry.second.windowed});
+  }
+
+  if (closing.empty()) {
+    QuitOnce();
+    return;
+  }
+
+  for (Closing& one : closing) {
+    if (!one.windowed && one.view && one.window)
+      one.window->RemoveChildView(one.view);
+    one.browser->GetHost()->CloseBrowser(true);
+  }
 }
 
 std::string EnvOrEmpty(const char* name) {
@@ -202,10 +244,7 @@ class HostGoneTask : public CefTask {
  public:
   void Execute() override {
     fprintf(stderr, "helper: control channel closed\n");
-    if (g_browser && g_browser->GetHost())
-      g_browser->GetHost()->CloseBrowser(true);
-    else
-      QuitOnce();
+    CloseEveryBrowser();
   }
 
   IMPLEMENT_REFCOUNTING(HostGoneTask);
@@ -271,22 +310,38 @@ class Control {
   }
 
   void Send(const std::string& line) {
-    std::lock_guard<std::mutex> lock(write_mutex_);
-    if (fd_ < 0)
-      return;
+    bool torn = false;
+    {
+      std::lock_guard<std::mutex> lock(write_mutex_);
+      if (fd_ < 0)
+        return;
 
-    size_t sent = 0;
-    while (sent < line.size()) {
-      const ssize_t written =
-          ::send(fd_, line.data() + sent, line.size() - sent, MSG_NOSIGNAL);
-      if (written > 0) {
-        sent += static_cast<size_t>(written);
-        continue;
+      size_t sent = 0;
+      while (sent < line.size()) {
+        const ssize_t written =
+            ::send(fd_, line.data() + sent, line.size() - sent, MSG_NOSIGNAL);
+        if (written > 0) {
+          sent += static_cast<size_t>(written);
+          continue;
+        }
+        if (written < 0 && errno == EINTR)
+          continue;
+        if (sent == 0)
+          fprintf(stderr, "helper: control write failed: %s\n", strerror(errno));
+        else
+          torn = true;
+        break;
       }
-      if (written < 0 && errno == EINTR)
-        continue;
-      fprintf(stderr, "helper: control write failed: %s\n", strerror(errno));
-      return;
+    }
+
+    /* A part of an event is already on the wire and cannot be unsent, so every
+     * event after it would be read as the tail of that one. The framing of this
+     * socket is gone: say so by hanging up, which is the shape both ends
+     * already treat as the other one going away. Done outside the lock,
+     * because Shutdown() takes it. */
+    if (torn) {
+      fprintf(stderr, "helper: an event went out half-written, hanging up\n");
+      Shutdown();
     }
   }
 
@@ -300,19 +355,27 @@ class Control {
     }
     if (fd >= 0) {
       ::shutdown(fd, SHUT_RDWR);
-      ::close(fd);
     }
     if (reader_.joinable())
       reader_.join();
+    /* Only now: a descriptor closed while the reader is still awake is a
+     * number the next open() in this process gets, and the reader would be
+     * reading whatever that turned out to be. */
+    if (fd >= 0)
+      ::close(fd);
   }
 
  private:
   void ReadLoop() {
+    /* Taken once, then never looked at again: fd_ belongs to Shutdown() from
+     * here on, and a descriptor this thread keeps using but never closes is a
+     * number another thread could be handed back as its own. */
+    const int fd = fd_;
     std::string buffer;
     char chunk[4096];
 
     for (;;) {
-      const ssize_t n = ::read(fd_, chunk, sizeof(chunk));
+      const ssize_t n = ::read(fd, chunk, sizeof(chunk));
       if (n > 0) {
         buffer.append(chunk, static_cast<size_t>(n));
         std::string::size_type newline;
@@ -1188,17 +1251,7 @@ void HandleCommand(const std::string& line) {
   if (name == "quit") {
     /* A multi-browser helper has to close every browser, not just the active
      * one: OnBeforeClose only ends the message loop when the map is empty. */
-    bool any = false;
-    for (auto& entry : g_browser_slots) {
-      if (entry.second.browser && entry.second.browser->GetHost()) {
-        if (!entry.second.windowed && entry.second.view && entry.second.window)
-          entry.second.window->RemoveChildView(entry.second.view);
-        entry.second.browser->GetHost()->CloseBrowser(true);
-        any = true;
-      }
-    }
-    if (!any)
-      QuitOnce();
+    CloseEveryBrowser();
     return;
   }
 

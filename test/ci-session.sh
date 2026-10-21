@@ -126,7 +126,15 @@ fi
 # mutter configures and lays out a toplevel — the demo's window gets its size and
 # Chromium paints into it — but never maps a popup surface, so a GtkPopover stays
 # mapped=0 size=0x0 forever. Gates skip exactly those checks and say so.
-bus=$(tr '\0' '\n' < "/proc/$GS/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' || true)
+bus=""
+if [ -n "$GS" ]; then
+  bus=$(tr '\0' '\n' < "/proc/$GS/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' || true)
+else
+  # /proc//environ is not a file: without the pid there is no session bus address
+  # to take, and the payload has to be told that rather than handed an empty
+  # variable and a green line.
+  echo "  note: no bus address, the process group id never arrived"
+fi
 cl_env=(
   "WAYLAND_DISPLAY=$NAME"
   "GDK_BACKEND=wayland"
@@ -222,9 +230,16 @@ else
 fi
 
 stop_compositor
-left=$(pgrep -g "$GS" 2>/dev/null | wc -l)
-if [ "$left" = 0 ]; then ok "nothing from the nested session is still running"
-else bad "$left process(es) from the nested session survived the teardown"; fi
+if [ -z "$GS" ]; then
+  # pgrep -g "" finds nothing, so the line below would have reported a clean
+  # teardown for a session this script never had a handle on. An unrunnable check
+  # is a failure, not an ok: see docs/empty-request-slot.md.
+  bad "no process group id — the teardown could not be checked"
+else
+  left=$(pgrep -g "$GS" 2>/dev/null | wc -l)
+  if [ "$left" = 0 ]; then ok "nothing from the nested session is still running"
+  else bad "$left process(es) from the nested session survived the teardown"; fi
+fi
 
 echo
 if [ $fails = 0 ]; then printf 'ci session: passed\n'

@@ -83,6 +83,12 @@ Every command is answered with the events a real helper would send for it, and
 "load" gets an address plus a load-end so the toolbar still lights up. A URL whose
 host ends in `.invalid` is answered the way a real failed navigation is: load-error,
 then a title, then a load-end with HTTP code 0 and no address at all.
+
+A line that does not parse ends the fake with status 1. One object per line is the
+whole protocol, so an unparsable line is a command that went out torn on the host's
+side; a fake that dropped it silently would leave a broken framing as the one thing
+no gate can see. Any command longer than 64 KiB is logged with its length, which is
+what makes the invariant assertable rather than assumed.
 """
 import json
 import os
@@ -433,10 +439,32 @@ while True:
     line = channel.readline()
     if not line:
         break
+    if not line.endswith("\n"):
+        # What stopped the read is the socket closing under a half-written
+        # command, not the end of the command. Saying so is as much as the fake
+        # can do: a host killed between two writes and a host that cannot frame
+        # a line look the same from here, and it is the host's own exit status
+        # that tells a gate which one happened.
+        log("the channel ended in the middle of a command: %r" % line[:120])
+        break
     try:
         command = json.loads(line)
     except ValueError:
-        continue
+        # One object per line is the whole protocol, so a line that does not
+        # parse is a command that went out torn. The real helper hangs up when it
+        # is on the sending side of that (helper/src/main.cpp Send()), and the
+        # fake has to be just as loud: swallowing it here would make a broken
+        # framing the one thing no gate can see.
+        log("FAILED a command arrived unparsable: %r" % line[:120])
+        sys.exit(1)
+
+    if len(line) > 65536:
+        # Nothing this large crosses a socket buffer in one step, so a command
+        # that arrives here whole and on one line is the framing asserted on the
+        # wire rather than inferred from a green run. The decoded length is the
+        # part a gate can compare against what it sent.
+        log("framing cmd=%s line=%d code=%d" % (command.get("cmd"), len(line),
+                                                len(command.get("code") or "")))
 
     if command.get("cmd") == "mute":
         # Answered with the state the fake ends up in rather than with what was

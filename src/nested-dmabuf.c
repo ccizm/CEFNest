@@ -509,15 +509,21 @@ params_add (struct wl_client *client, struct wl_resource *resource,
 }
 
 /* A buffer that never reached a resource has no destroy handler to close the
- * planes it took over from the params, so this is where they go back. */
+ * planes it took over from the params, so this is where they go back. Taken over
+ * is the condition: once the texture builder has the descriptors, closing them is
+ * its notify's job, and a second close here would hand back numbers that are not
+ * ours any more. */
 static void
 buffer_discard (Buffer *buffer)
 {
   int i;
 
-  for (i = 0; i < NESTED_DMABUF_MAX_PLANES; i++)
-    if (buffer->fd[i] >= 0)
-      close (buffer->fd[i]);
+  if (!buffer->fds_transferred)
+    {
+      for (i = 0; i < NESTED_DMABUF_MAX_PLANES; i++)
+        if (buffer->fd[i] >= 0)
+          close (buffer->fd[i]);
+    }
 
   g_free (buffer);
 }

@@ -778,6 +778,8 @@ xdg_surface_get_popup (struct wl_client *client, struct wl_resource *resource,
   XdgPositioner *rules;
   struct wl_resource *popup;
   NestedSurface *parent;
+  NestedSurface *ancestor;
+  int depth;
 
   if (!parent_resource ||
       !wl_resource_instance_of (parent_resource, &xdg_surface_interface,
@@ -820,6 +822,20 @@ xdg_surface_get_popup (struct wl_client *client, struct wl_resource *resource,
     {
       wl_resource_post_error (resource, XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT,
                               "a popup cannot be its own parent");
+      return;
+    }
+
+  /* How far up this parent already hangs. Counting here, at the one place a
+   * popup link is ever made, is what keeps every later walk of the tree — the
+   * placement of a window's popups, the paint stack — inside a depth the host's
+   * stack can carry. */
+  for (depth = 0, ancestor = parent; ancestor->popup_parent; depth++)
+    ancestor = ancestor->popup_parent;
+  if (depth >= NESTED_POPUP_MAX_DEPTH)
+    {
+      wl_resource_post_error (resource, XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT,
+                              "a popup may not hang more than %d deep",
+                              NESTED_POPUP_MAX_DEPTH);
       return;
     }
 

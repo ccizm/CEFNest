@@ -265,6 +265,22 @@ clipboard_transfer_cancel (ClipboardTransfer *transfer)
     clipboard_transfer_destroy (transfer);
 }
 
+/* A source is allowed to answer a read with nothing: an empty selection is what
+ * "copy the empty string" means, and a source that hangs up on the pipe says the
+ * same. GLib then hands back a NULL buffer and g_strndup() a NULL string, so the
+ * payload has to be turned into text through here — the two callers used to feed
+ * that NULL to g_utf8_make_valid(), which warned in one and dereferenced it in
+ * the other. */
+static char *
+text_from_payload (const guint8 *data, gsize len)
+{
+  char *text = len ? g_strndup ((const char *) data, len) : g_strdup ("");
+  char *valid = g_utf8_make_valid (text, -1);
+
+  g_free (text);
+  return valid;
+}
+
 static void
 clipboard_transfer_finish (ClipboardTransfer *transfer, gboolean mirror)
 {
@@ -298,13 +314,7 @@ clipboard_transfer_finish (ClipboardTransfer *transfer, gboolean mirror)
       while (transfer->data->len > 0 && transfer->data->data[transfer->data->len - 1] == 0)
         transfer->data->len--;
 
-      text = g_strndup ((const char *) transfer->data->data, transfer->data->len);
-      {
-        char *valid = g_utf8_make_valid (text, -1);
-
-        g_free (text);
-        text = valid;
-      }
+      text = text_from_payload (transfer->data->data, transfer->data->len);
     }
 
   if (text && self && self->clipboard && !self->clipboard_echo)
@@ -720,8 +730,12 @@ compositor_paste_clipboard (NestedCompositor *self)
       return;
     }
 
+  /* The ref is what the read is done with: the answer comes back on the main
+   * loop, and a window torn down in the meantime would otherwise leave the
+   * callback writing a selection into freed memory. */
   gdk_clipboard_read_text_async (self->clipboard, NULL,
-                                 (GAsyncReadyCallback) compositor_clipboard_read_done, self);
+                                 (GAsyncReadyCallback) compositor_clipboard_read_done,
+                                 g_object_ref (self));
 }
 
 static void
@@ -746,6 +760,7 @@ compositor_clipboard_read_done (GObject *clipboard, GAsyncResult *result, gpoint
       g_clear_pointer (&self->clipboard_mime, g_free);
       if (!self->selection_source)
         compositor_advertise_selection (self);
+      g_object_unref (self);
       return;
     }
 
@@ -762,6 +777,7 @@ compositor_clipboard_read_done (GObject *clipboard, GAsyncResult *result, gpoint
   /* A client that owns the selection is served from its source, not from here. */
   if (!self->selection_source)
     compositor_advertise_selection (self);
+  g_object_unref (self);
 }
 
 static void
@@ -798,13 +814,7 @@ primary_source_finish (NestedCompositor *self, const char *mime, GBytes *bytes)
   data = g_bytes_get_data (bytes, &size);
   while (size > 0 && data[size - 1] == 0)
     size--;
-  text = g_strndup ((const char *) data, size);
-  {
-    char *valid = g_utf8_make_valid (text, -1);
-
-    g_free (text);
-    text = valid;
-  }
+  text = text_from_payload (data, size);
 
   g_clear_pointer (&self->primary_bytes, g_bytes_unref);
   g_clear_pointer (&self->primary_mime, g_free);
@@ -883,9 +893,12 @@ primary_clipboard_read_done (GObject *clipboard, GAsyncResult *result,
   NestedCompositor *self = user_data;
   GError *error = NULL;
   char *text;
+  gboolean has_text;
 
   text = gdk_clipboard_read_text_finish (GDK_CLIPBOARD (clipboard), result, &error);
-  if (!text || !*text)
+  has_text = text && *text;
+
+  if (!has_text)
     {
       if (error)
         g_debug ("nested: the primary clipboard gave no text: %s", error->message);
@@ -907,6 +920,7 @@ primary_clipboard_read_done (GObject *clipboard, GAsyncResult *result,
 
   if (!self->primary_source)
     primary_advertise (self);
+  g_object_unref (self);
 }
 
 static void
@@ -938,8 +952,10 @@ primary_paste_clipboard (NestedCompositor *self)
     }
 
   g_debug ("nested: primary clipboard has %s, reading it", mime);
+  /* Held for the same reason as the clipboard half: the answer is a main-loop
+   * callback, and the widget can be gone by the time it runs. */
   gdk_clipboard_read_text_async (self->primary_clipboard, NULL,
-                                 primary_clipboard_read_done, self);
+                                 primary_clipboard_read_done, g_object_ref (self));
 }
 
 static void
@@ -2321,6 +2337,22 @@ data_device_start_drag (struct wl_client *client, struct wl_resource *resource,
       source = wl_resource_get_user_data (source_resource);
     }
 
+  /* The protocol makes this one a requirement rather than a hint: the client
+   * starting a drag "must have an active implicit grab that matches the serial".
+   * A serial from no press, or from a press whose button is already up, is a
+   * connection asking for a drag the user never began — and one the seat would
+   * then hold button events away from the surfaces underneath for. The source is
+   * cancelled on the way out because the client owns it until this reply: with no
+   * drag and no cancelled it would keep a source that can never be used. */
+  if (!seat_client_grab_is_current (self, client, serial))
+    {
+      g_warning ("nested: start_drag cited serial %u, which is not a press this "
+                 "client still holds", serial);
+      if (source_resource)
+        wl_data_source_send_cancelled (source_resource);
+      return;
+    }
+
   /* One pointer, one drag: a second start_drag means the client lost the first,
    * and the seat cannot hold button events back for two of them. */
   if (self->drag)
@@ -2362,8 +2394,26 @@ data_device_set_selection (struct wl_client *client, struct wl_resource *resourc
 {
   NestedCompositor *self =
     ((DataDevice *) wl_resource_get_user_data (resource))->compositor;
-  DataSource *source = source_resource ? wl_resource_get_user_data (source_resource) : NULL;
+  DataSource *source = NULL;
   const char *mime;
+
+  /* What the client names here is a wl_data_source, and everything below keeps
+   * the struct that sits under that id: remembered as the selection, sent a
+   * cancelled, read for its mime types. A primary-selection source is built by
+   * the same code but destroyed by the other branch, which drops
+   * primary_offers and frees the struct while this one still points at it —
+   * so the id has to be checked before anything is remembered of it, the way
+   * start_drag and the primary device both already do. */
+  if (source_resource)
+    {
+      if (!wl_resource_instance_of (source_resource, &wl_data_source_interface,
+                                    &data_source_impl))
+        {
+          post_wrong_object (resource, source_resource, "wl_data_source");
+          return;
+        }
+      source = wl_resource_get_user_data (source_resource);
+    }
 
   if (self->selection_source && self->selection_source != source)
     wl_data_source_send_cancelled (self->selection_source->resource);

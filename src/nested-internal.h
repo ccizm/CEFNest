@@ -37,6 +37,14 @@ G_BEGIN_DECLS
  * and the host copies every one of them out on each commit. */
 #define NESTED_SHM_MAX_CLIENT ((gsize) 4 * NESTED_SHM_MAX_POOL)
 
+/* How many popups deep one may hang off another. A menu inside a menu is real,
+ * and no interface a page can reach gets anywhere near thirty; the cap is here
+ * because the tree under a surface is walked recursively, both to place every
+ * popup of a window (xdg_popups_replace) and to build the paint stack. A client
+ * that could nest without limit could make that walk however deep it liked, and
+ * the host shares its stack with everything else in the process. */
+#define NESTED_POPUP_MAX_DEPTH 32
+
 typedef struct _Pool Pool;
 typedef struct _Buffer Buffer;
 typedef struct _BufferUser BufferUser;
@@ -58,6 +66,11 @@ struct _Pool {
    * the last reference here. */
   struct wl_client *client;
   NestedCompositor *compositor;
+  /* Only to answer a pool whose file went away under the map (see
+   * pool_map_is_whole). A buffer outlives the pool object it was made from — the
+   * client destroys the pool as soon as it has its buffers — so this is cleared
+   * with the resource and a pool with no resource left can only drop the map. */
+  struct wl_resource *resource;
 };
 
 /* A (fourcc, modifier) pair advertised through zwp_linux_dmabuf_v1. */
@@ -384,6 +397,11 @@ gboolean    seat_resource_is_pointer (struct wl_resource *resource);
  * wp_cursor_shape_device_v1.set_shape insists on before a cursor may change. */
 gboolean    seat_pointer_serial_is_current (struct wl_resource *pointer,
                                             uint32_t serial);
+/* TRUE when @serial is a press @client was given and still holds: the grab a
+ * wl_data_device.start_drag has to cite before a drag may start. */
+gboolean    seat_client_grab_is_current (NestedCompositor *self,
+                                         struct wl_client *client,
+                                         uint32_t serial);
 
 /* nested-cursor.c */
 void        cursor_shape_manager_bind (struct wl_client *client, void *data,

@@ -39,6 +39,11 @@ struct _SeatClient {
   /* The serial of the enter @pointer is inside, which is the only serial a
    * cursor request may cite. Zero when nothing is under the pointer. */
   uint32_t pointer_enter_serial;
+  /* The serial of the press whose implicit grab this client still holds, which
+   * is the only serial wl_data_device.start_drag may cite. It is the button
+   * going up that ends a grab, not the pointer wandering off the surface it
+   * was pressed on, so this stays set across an enter or a leave. */
+  uint32_t pointer_grab_serial;
   struct wl_list link;
 };
 
@@ -106,6 +111,7 @@ pointer_resource_destroyed (struct wl_resource *resource)
     sc->pointer = NULL;
   sc->pointer_inside = FALSE;
   sc->pointer_enter_serial = 0;
+  sc->pointer_grab_serial = 0;
 }
 
 static void
@@ -224,6 +230,29 @@ seat_pointer_serial_is_current (struct wl_resource *pointer, uint32_t serial)
 
   return sc->pointer == pointer && sc->pointer_inside &&
          sc->pointer_enter_serial == serial;
+}
+
+/* TRUE when @client is the one this compositor gave the press @serial to and
+ * still holds the button down for. wl_data_device.start_drag names a surface by
+ * a serial it must have grabbed with, so this is what makes a drag the user
+ * asked for rather than one a connection invented. */
+gboolean
+seat_client_grab_is_current (NestedCompositor *self, struct wl_client *client,
+                             uint32_t serial)
+{
+  SeatClient *sc;
+
+  if (serial == 0)
+    return FALSE;
+
+  wl_list_for_each (sc, &self->seat_clients, link)
+    {
+      if (sc->pointer_grab_serial == serial && sc->pointer &&
+          wl_resource_get_client (sc->pointer) == client)
+        return TRUE;
+    }
+
+  return FALSE;
 }
 
 /* Pointer events carry coordinates inside the surface they are addressed to,
@@ -689,6 +718,16 @@ nested_compositor_notify_pointer_button (NestedCompositor *self, uint32_t button
 
   g_return_if_fail (NESTED_IS_COMPOSITOR (self));
 
+  /* The button going up ends every implicit grab the seat handed out — including
+   * the one a drag swallowed the release of, which the page never sees. Doing
+   * this before the drag takes the event is what stops a client that lost its
+   * button from starting another drag over a press it let go of. */
+  if (!pressed)
+    {
+      wl_list_for_each (sc, &self->seat_clients, link)
+        sc->pointer_grab_serial = 0;
+    }
+
   /* The release that lets go of a drag is its drop, and it must not arrive at
    * the page as a button click: the destination is told through
    * wl_data_device.drop instead. The press that started the drag came through
@@ -717,6 +756,10 @@ nested_compositor_notify_pointer_button (NestedCompositor *self, uint32_t button
                                       : WL_POINTER_BUTTON_STATE_RELEASED);
       if (wl_resource_get_version (sc->pointer) >= WL_POINTER_FRAME_SINCE_VERSION)
         wl_pointer_send_frame (sc->pointer);
+      /* Only the clients that are given the press hold the grab that comes with
+       * it, and only for as long as this button is down. */
+      if (pressed)
+        sc->pointer_grab_serial = serial;
     }
 
   /* A press that did not land inside the grabbed popup is the dismissal the

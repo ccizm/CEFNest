@@ -4,6 +4,7 @@ shm_client = executable(
     dmabuf_client_header, dmabuf_code,
     viewporter_client_header, viewporter_code,
     fractional_scale_client_header, fractional_scale_code,
+    primary_selection_client_header, primary_selection_code,
     text_input_client_header, text_input_code,
     cursor_shape_client_header, cursor_shape_code, tablet_code ],
   include_directories: gen_inc,
@@ -61,6 +62,16 @@ if python.found()
                text_input_server_header, cursor_shape_server_header ],
     suite: 'protocol',
     timeout: 60)
+
+  # The other half of "a source that holds no reference": every g_idle_add /
+  # g_timeout_add / g_source_attach in the library has to be either handed a
+  # reference of its own or cancelled by the dispose of the object it points
+  # into, or the main loop runs the callback over freed memory. Static, so it
+  # costs nothing and needs no display.
+  test('loop-source-audit', python,
+    args: [ files('audit-loop-sources.py') ],
+    suite: 'protocol',
+    timeout: 60)
 endif
 
 # One run per thing the client asks the compositor for. The arguments after the
@@ -73,8 +84,10 @@ endif
 # sequence because it only ever sets flags, so that step brings in a second
 # copy of the test, built against GTK, as a client of its own compositor.
 foreach mode : [ 'plain', 'dmabuf', 'text-input', 'cursor-shape', 'popup',
-                 'refused', 'pool-budget', 'dnd-requests', 'drag-out', 'drag-in',
-                 'fullscreen', 'second-window', 'gtk-client' ]
+                 'refused', 'pool-budget', 'wrong-object', 'pool-shrink',
+                 'empty-copy', 'popup-depth', 'drag-fake-serial',
+                 'dnd-requests', 'drag-out', 'drag-in', 'fullscreen',
+                 'second-window', 'gtk-client' ]
   selftest_args = [ 'seat-selftest-' + mode + '.png', shm_client.full_path() ]
   if mode != 'plain'
     selftest_args += [ '--' + mode ]

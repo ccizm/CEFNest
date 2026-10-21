@@ -1,8 +1,8 @@
-builddir/
-# Any second build directory is a staging install of the same tree
-# (docs/packaging.md), and a 1.5 GB installed CEF runtime is not what git wants
-# to be asked about.
-builddir-*/
+# Any build directory, by whatever suffix this tree names it: builddir itself, a
+# second one used as a staging install (docs/packaging.md), or a builddir2 left
+# next to it. A 1.5 GB installed CEF runtime is not what git wants to be asked
+# about, and `builddir-*/` alone missed every name without the dash.
+builddir*/
 helper/build/
 compile_commands.json
 *.o
@@ -12,7 +12,6 @@ compile_commands.json
 *.log
 .ninja_deps
 .ninja_log
-third_party/
 third_party/
 /cef_binary_*.tar.bz2
 /gtk4-*

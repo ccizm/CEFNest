@@ -35,7 +35,8 @@
 # does pause an off-screen window, this gate fails on that machine and says so with
 # the page's own readback in the log above the failure.
 #
-# Needs ImageMagick (identify/convert); without it every pixel check is a skip.
+# Needs ImageMagick (identify/convert); without it the gate exits 77 and says it
+# asserted nothing, which is not the same verdict as passing.
 
 set -u -o pipefail
 
@@ -86,10 +87,15 @@ expect_quads() { # expect_quads <png> <tag>
 }
 
 if [ ! -x "$DEMO" ]; then echo "no demo at $DEMO — run ninja -C builddir"; exit 1; fi
-if ! command -v identify >/dev/null; then
-  echo "no identify(1) — install imagemagick to run this gate"
+if ! command -v identify >/dev/null || ! command -v convert >/dev/null; then
+  # 77, not 0: meson calls a test that could not run SKIPPED with exactly that
+  # status, and ci-all.sh shows it as SKIP. Every pixel check needs both tools, so
+  # a machine without them asserts nothing here — and a gate that asserts nothing
+  # has no business exiting like a pass.
+  echo "no identify(1)/convert(1) — install imagemagick to run this gate"
   printf '  skip every pixel check\n'
-  exit 0
+  printf 'pixel gate: skipped, it could not assert anything\n'
+  exit 77
 fi
 
 WORK=$(mktemp -d)

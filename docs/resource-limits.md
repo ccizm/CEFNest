@@ -130,7 +130,36 @@ client: the compositor refused the 300 MB pool and dropped us
 `--pool-budget` 走的是同一条路：客户端在第 11 个池被杀，之后 selftest 照样跑到最
 后一步，退出码 0。
 
-## 6. 还没做的
+## 6. popup 嵌套深度：`NESTED_POPUP_MAX_DEPTH`
+
+一个 `xdg_popup` 在合成器里就是父 surface 子链表上的一个节点，而两棵树遍历都是
+递归：给窗口定位每个 popup（`xdg_popups_replace`），和攒出要画的栈
+（`surface_stack_append`）。深度是客户端挑的，栈帧却是宿主的 C 栈付的——一条
+普通连接挂几万个嵌套 popup，就能把整个窗口系统撞成 SIGSEGV。
+
+`src/nested-internal.h` 里的 `NESTED_POPUP_MAX_DEPTH` 是 32，检查只有一处：
+`xdg_surface_get_popup()`（`src/nested-xdg.c`）沿 `popup_parent` 数祖先，够了就
+用 `XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT` 拒绝。挑这里是因为它是 popup 关系形成
+的唯一位置——链子建不起来，后面每次遍历就都不会超深。菜单套子菜单一般两三行，
+32 层离任何接口能构造的菜单都很远。
+
+`shm-client --popup-depth` 是它的门。攻击住在第二条连接上，一个 popup 一个 popup
+地挂、每挂一个 roundtrip 一次：被拒的那条请求会杀掉发出它的连接，一批发下去就问不
+出拒绝究竟落在第几层。断言是精确的——第 33 个 popup 必须被拒（前 32 个是允许的
+链），提前被拒说明拒绝的原因不是深度，128 个全被收下说明上限没了，两种都是红。
+最后还要那条一直在画图的连接仍然能 roundtrip，因为"宿主活下来"才是这条门要的东西。
+
+证据是变异出来的：把库里那个判断临时改成 `if (0 && depth >= …)` 之后，
+`seat-selftest-popup-depth` 红在
+
+```
+client: popup-depth gate FAILED: the compositor took 128 nested popups,
+        so nothing bounds the depth its tree walks recurse through
+```
+
+恢复之后回到绿，日志是 `the chain was refused at popup 33; the cap is 32 links`。
+
+## 7. 还没做的
 
 - shm 的 mmap + damage shadow 已落地（`docs/frame-metrics.md` §2）；纹理仍是完整
   `GdkMemoryTexture`，所以“零拷贝”还没有，damage 只省 pool 读取；
