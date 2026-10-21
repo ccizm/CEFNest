@@ -1,0 +1,19 @@
+# CNB (cnb.cool) entry point. This runs on a self-hosted runner tagged
+# `cefnest-gate`: the gate needs the repository's normal native dependencies
+# (GTK 4, Wayland, xkbcommon, json-glib, gbm/drm, ImageMagick, gnome-shell) and
+# a checked-out CEF distribution, because third_party/ is not in git.
+#
+# Prepare the runner once with:
+#   ./scripts/fetch-cef.sh
+#   meson setup builddir --wipe
+#   ninja -C builddir
+# After that a push to main runs the same release gate as a developer would.
+main:
+  push:
+    - name: release-gate
+      runner:
+        tags:
+          - cefnest-gate
+      stages:
+        - name: ci-all
+          script: ./test/ci-all.sh

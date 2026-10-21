@@ -29,6 +29,10 @@ void               chromium_session_stop          (ChromiumSession *self);
  * explicit startup override and suppresses the automatic watcher. */
 void               chromium_session_set_accessibility (ChromiumSession *self,
                                                        gboolean enabled);
+/* Optional frame meter: the number of top-level frames the compositor has
+ * presented since the session started. It is a counter, not a rate; sample it
+ * from a timer if a host wants a graph. */
+uint64_t           chromium_session_get_frame_count (ChromiumSession *self);
 
 void               chromium_session_load_uri      (ChromiumSession *self,
                                                    const char *uri);
@@ -113,6 +117,13 @@ void               chromium_session_accept_download (ChromiumSession *self,
                                                    const char *path);
 void               chromium_session_reject_download (ChromiumSession *self,
                                                    int id);
+/* Pause/resume an in-flight download through CefDownloadItemCallback. A
+ * download that has not started (no item callback yet) answers with status
+ * "download-not-in-flight"; the terminal ::download-end still comes from CEF. */
+void               chromium_session_pause_download  (ChromiumSession *self,
+                                                     int id);
+void               chromium_session_resume_download (ChromiumSession *self,
+                                                     int id);
 
 /* In-page search. chromium_session_find () starts a search or steps through the
  * one already running: the pattern goes over every time (next=TRUE means "the

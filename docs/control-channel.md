@@ -78,7 +78,7 @@ demo: renderer exited status=1 error=9 9
 
 ## 3. 现在通道上有的东西
 
-命令 20 条，事件 23 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
+命令 22 条，事件 23 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
 
 | 方向 | 名字 | 载荷 |
 | --- | --- | --- |
@@ -91,6 +91,8 @@ demo: renderer exited status=1 error=9 9
 | host → helper | `a11y` | `enabled`（`SetAccessibilityState(STATE_ENABLED)` / `STATE_DEFAULT`；宿主默认由 `org.a11y.Status.ScreenReaderEnabled` 驱动） |
 | host → helper | `download-accept` | `id`、`path`（绝对路径，父目录得宿主自己建） |
 | host → helper | `download-reject` | `id`（拒绝未开始的、取消在飞的，同一条） |
+| host → helper | `download-pause` | `id`（只对已拿到 item callback 的下载有效；未开始回 status） |
+| host → helper | `download-resume` | `id`（同上） |
 | host → helper | `find` | `pattern`、`forward`、`match_case`、`next`（**没有 ack**，答案是 `find-result`） |
 | host → helper | `find-stop` | `clear`（缺省 true：连高亮一起撤） |
 | host → helper | `context-menu-select` | `id`、`flags`（可选，API 上没开）（**`context-menu` 必须被答**：helper 同时只持有一个请求，不答就再也问不出第二个） |

@@ -50,6 +50,7 @@ typedef struct _TextInput TextInput;
 struct _Pool {
   int fd;
   size_t size;
+  guint8 *map;                 /* read-only mmap of fd, or NULL */
   guint refcount;
   /* Which connection's shm budget this sits in. The compositor is only ever
    * looked at while it is alive: it destroys its clients before it drops the
@@ -134,6 +135,16 @@ struct _NestedSurface {
   struct { int width, height; } pending_dst, dst;
 
   GdkTexture *texture;
+  /* Software (shm) path: a persistent frame buffer so a commit only copies the
+   * damaged rectangle out of the pool instead of pread()ing the whole plane. */
+  guint8 *shm_shadow;
+  gsize shm_shadow_len;
+  int shm_shadow_width;
+  int shm_shadow_height;
+  int shm_shadow_stride;
+  uint32_t shm_shadow_format;
+  GdkRectangle shm_damage;
+  gboolean shm_damage_valid;
   int width;                 /* surface-local size, after crop and scale */
   int height;
   int natural_width;         /* buffer size divided by scale */

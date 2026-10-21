@@ -164,3 +164,17 @@ download left to reject」的。
 
 它开真窗口、跑真浏览器，所以和 `test/*.session` 同一档：手跑门禁，不进 `meson test`。
 `meson test -C builddir` 14/14 与 `python3 test/audit-impl-slots.py builddir` 不受影响。
+
+
+## 暂停 / 恢复（2026-10-21）
+
+`CefDownloadItemCallback` 的 `Pause()` / `Resume()` 已上通道：
+
+- host → helper：`download-pause`、`download-resume`，载荷 `id`；
+- helper 只在已经拿到 `CefDownloadItemCallback`（下载确实在飞）时调用；还没开始的下载
+  回 `status: download-not-in-flight`；
+- 终态仍由 CEF 的 `OnDownloadUpdated` 发 `download-end`，pause 不伪造结束事件；
+- API：`chromium_session_pause_download()` / `chromium_session_resume_download()`；
+- demo 脚本：`download-pause` / `download-resume`，作用于第一条未完成的下载。
+
+进度事件本身没有额外的 `paused` 字段；宿主知道自己发过 pause，UI 可以根据调用状态显示。

@@ -36,6 +36,8 @@ typedef struct {
 
 static Demo demo;
 
+static uint64_t demo_frame_count (void);
+
 #ifndef CLIENT_PATH
 #define CLIENT_PATH "shm-client"
 #endif
@@ -1779,7 +1781,7 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
 
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
- * "js <code>", "js-expr <expression>", "a11y-on", "a11y-off", "wait <ms>",
+ * "js <code>", "js-expr <expression>", "a11y-on", "a11y-off", "frames", "wait <ms>",
  * "shot <path>", "dump <path>", "hover <x> <y>",
  * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
  * "drag-hold <x0> <y0> <x1> <y1> [button]", "release [button]", "surfaces",
@@ -2061,6 +2063,11 @@ script_run_next (void)
       else if (!strncmp (line, "load ", 5))
         {
           chromium_session_load_uri (demo.session, line + 5);
+          continue;
+        }
+      else if (!strcmp (line, "frames"))
+        {
+          g_printerr ("demo: frames %" G_GUINT64_FORMAT "\n", demo_frame_count ());
           continue;
         }
       else if (!strcmp (line, "a11y-on"))
@@ -2701,6 +2708,24 @@ setup_clipboard_test (void)
     }
 }
 
+static uint64_t
+demo_frame_count (void)
+{
+  NestedCompositor *compositor;
+
+  if (demo.session)
+    return chromium_session_get_frame_count (demo.session);
+  compositor = demo.view ? chromium_view_get_compositor (demo.view) : NULL;
+  return compositor ? nested_compositor_get_frame_count (compositor) : 0;
+}
+
+static gboolean
+frame_metrics_tick (gpointer data)
+{
+  g_printerr ("demo: frame-count %" G_GUINT64_FORMAT "\n", demo_frame_count ());
+  return G_SOURCE_CONTINUE;
+}
+
 static void
 report (void)
 {
@@ -2899,6 +2924,8 @@ activate (GApplication *application, gpointer data)
   update_title ();
   report ();
   setup_clipboard_test ();
+  if (g_getenv ("CHROMIUM_FRAME_METRICS"))
+    g_timeout_add_seconds (1, frame_metrics_tick, NULL);
   if (!use_session)
     spawn_client (NULL, NULL);
   start_session_script ();

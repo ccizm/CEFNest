@@ -115,7 +115,8 @@ CHROMIUM_DUMP=/tmp/d.png CHROMIUM_DUMP_DELAY=4000 \
 ## 6. 后续可选
 
 - shm 路径的每帧全量 `pread` 回读（~4MB/帧）仍会阻塞主循环 1~3ms，是残余抖动的
-  来源之一；CEF 走 dmabuf 不受影响。可改为 mmap 常驻或按 damage 拷贝。
+  来源之一；CEF 走 dmabuf 不受影响。2026-10-21 已改为 pool `mmap` 常驻 + damage
+  shadow 复制（见 `docs/frame-metrics.md` §2）；纹理仍每帧上传一张完整 `GdkTexture`。
 - 长尾（max ~80ms）来自桌面侧偶发的时钟停顿（遮挡/负载），属合成器环境噪声，
   组件侧已无可做。
 

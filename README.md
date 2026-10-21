@@ -141,13 +141,14 @@ of it is reproducible runs:
 | `CHROMIUM_HELPER` | set (to anything) to force session mode; a path here must contain `/`, and it is used as written even when it does not exist |
 | `CEFNEST_HELPER` | the same rule one step earlier: a path with `/` in it wins over `CHROMIUM_HELPER`. With neither set, the library resolves the helper itself — compiled-in install path, then the cmake tree it was built next to (`docs/packaging.md`) |
 | `CHROMIUM_URL` | page to open |
-| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `zoom-in`, `zoom-out`, `zoom-reset`, `js`, `js-expr`, `a11y-on`, `a11y-off`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `drop-in <x0> <y0> <x1> <y1> [text] [mimes]`, `drop-in-hold`, `drop-in-move <x> <y>`, `drop-in-drop`, `drop-in-cancel`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `perm-accept <id>`, `perm-deny <id>`, `perm-dismiss <id>`, `close`, `quit` — see `test/*.session`. Navigation, JS, zoom, mute, download, find, menu and permission steps need a helper session — any of them in a run that has none ends it with status 1 instead of being skipped, while `wait`, `shot`, `dump`, `surfaces`, `hover`, `click`, `drag`, `wheel`, `drop-in*` and `close` drive the nested compositor alone |
+| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `zoom-in`, `zoom-out`, `zoom-reset`, `js`, `js-expr`, `a11y-on`, `a11y-off`, `frames`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `drop-in <x0> <y0> <x1> <y1> [text] [mimes]`, `drop-in-hold`, `drop-in-move <x> <y>`, `drop-in-drop`, `drop-in-cancel`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `download-pause`, `download-resume`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `perm-accept <id>`, `perm-deny <id>`, `perm-dismiss <id>`, `close`, `quit` — see `test/*.session`. Navigation, JS, zoom, mute, download, find, menu and permission steps need a helper session — any of them in a run that has none ends it with status 1 instead of being skipped, while `wait`, `shot`, `dump`, `surfaces`, `hover`, `click`, `drag`, `wheel`, `drop-in*` and `close` drive the nested compositor alone |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_WINDOW` | `fullscreen` or `maximize`, for deterministic geometry |
 | `CHROMIUM_CLIPSET` / `CHROMIUM_CLIPWATCH` | seed the host clipboard, and bridge it into the page |
 | `CHROMIUM_PRIMARYSET` / `CHROMIUM_PRIMARYWATCH` | seed/read the host primary selection, the middle-click clipboard |
 | `CHROMIUM_SPELLCHECK` | unset/0 disables spellcheck (the default): the helper passes `--disable-spell-checking` and turns `spellcheck=false` on every editable node. `1` restores Chromium spelling suggestions and the caret collapse around its menu |
 | `CHROMIUM_A11Y` | `1` forces accessibility at helper startup. Without it the session watches `org.a11y.Status.ScreenReaderEnabled` on the session bus and sends the runtime `a11y` command when a screen reader appears/disappears |
+| `CHROMIUM_FRAME_METRICS` | unset/0 stays quiet; `1` prints `demo: frame-count N` once per second. The same counter is `chromium_session_get_frame_count()` / the `frames` script step |
 | `CHROMIUM_HELPER_NO_SANDBOX` | set to exactly `1` to run the helper without Chromium's sandbox; anything else — including a typo — leaves it on (`docs/sandbox-policy.md`) |
 | `CEFNEST_DOWNLOAD_DIR` | where the demo panel auto-accepts a download; defaults to the XDG download directory (`docs/download-path.md`) |
 | `CEFNEST_DOWNLOAD_ASK` | any value: every download waits for the 保存/丢弃 buttons or a script step instead of landing on disk |
@@ -558,6 +559,10 @@ They are the record of *why* the code is shaped like this:
 | `control-channel.md` | every command and event on the socket, what a failed load and a dead renderer look like, and the commands decided against |
 | `zoom-path.md` | CEF zoom levels, the half-level step, per-origin persistence, why `load-end` re-reports the level, and the demo's keyboard bindings |
 | `real-sites.md` | the five-site real-page inspection batch: one nested session per site, screenshots, JS readbacks, 3-second rAF counts, and the measured H.264/VP9 result |
+| `pdf-path.md` | the measured PDF-viewer result: thumbnails/page controls in the widget dump, and what was not tested (forms, annotations, printing) |
+| `cnb-ci.md` | the cnb.cool entry point, the self-hosted runner it expects, and the one-time native/CEF prerequisites |
+| `structural-decisions.md` | the two items intentionally left for a product decision: browser routing for tabs/windows, and arm64/loong64 CEF supply |
+| `frame-metrics.md` | the compositor frame counter / script/env export and the software-path pool mmap + damage shadow copy |
 | `minimal-host.md` | the three-object host, the required order, and a map of which API/signal to add for navigation, JS, downloads, menus, primary selection and a11y |
 | `audio-path.md` | where the page's sound actually goes: an unsandboxed audio service, straight to the host's speakers, and what muting it measures |
 | `protocol-ceilings.md` | what real clients bind against the nested compositor, and the measured verdict on every protocol and version ceiling left un-advertised |
@@ -610,11 +615,12 @@ They are the record of *why* the code is shaped like this:
   `--crashpad-handler-pid`, so there is no minidump and no stack behind it
   (`docs/sandbox-policy.md` §8). When one of the other sandboxed children goes, the
   host hears nothing until the page stops answering.
-- **A download can be accepted, refused or cancelled — not paused.**
-  `CefDownloadItemCallback` also has `Pause` and `Resume`; nothing on the channel
-  carries them yet. Of the three end states, `interrupted` is the one
-  `test/download-gate.sh` cannot reach: the local server keeps answering until
-  Chromium gives up on its own (`docs/download-path.md`).
+- **A download can be accepted, refused, cancelled or paused/resumed.**
+  `CefDownloadItemCallback::Pause/Resume` are wired as `download-pause` /
+  `download-resume`; the terminal event is still CEF's `download-end`. Of the
+  three end states, `interrupted` is the one `test/download-gate.sh` cannot
+  reach: the local server keeps answering until Chromium gives up on its own
+  (`docs/download-path.md`).
 - **Find walks matches one at a time.** CEF's `Find` has no "jump to match N",
   and a brand-new search selects nothing at all (the active ordinal is 0), so a
   host that wants the fifth match sends five steps. Measured once in three runs,

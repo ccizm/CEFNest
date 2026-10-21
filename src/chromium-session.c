@@ -1855,6 +1855,18 @@ chromium_session_set_view (ChromiumSession *self, ChromiumView *view)
   self->view = view;
 }
 
+uint64_t
+chromium_session_get_frame_count (ChromiumSession *self)
+{
+  NestedCompositor *compositor;
+
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), 0);
+  if (!self->view)
+    return 0;
+  compositor = chromium_view_get_compositor (self->view);
+  return compositor ? nested_compositor_get_frame_count (compositor) : 0;
+}
+
 void
 chromium_session_set_accessibility (ChromiumSession *self, gboolean enabled)
 {
@@ -2015,6 +2027,38 @@ chromium_session_accept_download (ChromiumSession *self, int id, const char *pat
   command_add_string (builder, "path", path);
   json_builder_end_object (builder);
 
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_pause_download (ChromiumSession *self, int id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "download-pause");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_resume_download (ChromiumSession *self, int id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "download-resume");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  json_builder_end_object (builder);
   root = json_builder_get_root (builder);
   send_json (self, root);
 }

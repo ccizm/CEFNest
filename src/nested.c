@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -144,6 +145,8 @@ pool_unref (Pool *pool)
   if (--pool->refcount > 0)
     return;
   nested_compositor_release_shm (pool->compositor, pool->client, pool->size);
+  if (pool->map)
+    munmap (pool->map, pool->size);
   close (pool->fd);
   g_free (pool);
 }
@@ -278,6 +281,7 @@ nested_surface_finalize (GObject *object)
   NestedSurface *self = NESTED_SURFACE (object);
 
   g_clear_object (&self->texture);
+  g_clear_pointer (&self->shm_shadow, g_free);
   g_clear_pointer (&self->app_id, g_free);
   g_clear_pointer (&self->title, g_free);
 
@@ -436,6 +440,12 @@ surface_clear_content (NestedSurface *self)
   was_painted = surface_is_painted (self);
 
   g_clear_object (&self->texture);
+  g_clear_pointer (&self->shm_shadow, g_free);
+  self->shm_shadow_len = 0;
+  self->shm_shadow_width = 0;
+  self->shm_shadow_height = 0;
+  self->shm_shadow_stride = 0;
+  self->shm_damage_valid = FALSE;
   self->width = 0;
   self->height = 0;
   self->natural_width = 0;
@@ -518,6 +528,12 @@ read_pool (Pool *pool, off_t offset, size_t length, guint8 *dst)
 {
   size_t done = 0;
 
+  if (pool->map && offset >= 0 && (size_t) offset + length <= pool->size)
+    {
+      memcpy (dst, pool->map + offset, length);
+      return TRUE;
+    }
+
   while (done < length)
     {
       ssize_t n = pread (pool->fd, dst + done, length - done, offset + done);
@@ -537,12 +553,54 @@ read_pool (Pool *pool, off_t offset, size_t length, guint8 *dst)
   return TRUE;
 }
 
+static void
+copy_pool_rect (Buffer *buffer, NestedSurface *self, GdkRectangle rect)
+{
+  int x = MAX (rect.x, 0);
+  int y = MAX (rect.y, 0);
+  int width = MIN (rect.width, buffer->width - x);
+  int height = MIN (rect.height, buffer->height - y);
+  uint32_t *shadow_word;
+  int row;
+
+  if (width <= 0 || height <= 0)
+    return;
+
+  for (row = 0; row < height; row++)
+    {
+      size_t src = (size_t) buffer->offset +
+                   (size_t) (y + row) * buffer->stride + (size_t) x * 4;
+      size_t dst = (size_t) (y + row) * self->shm_shadow_stride +
+                   (size_t) x * 4;
+
+      if (buffer->pool->map &&
+          src + (size_t) width * 4 <= buffer->pool->size)
+        memcpy (self->shm_shadow + dst, buffer->pool->map + src,
+                (size_t) width * 4);
+      else
+        {
+          /* The mmap is the normal path; pread is only for a pool that somehow
+           * did not map. */
+          if (!read_pool (buffer->pool, (off_t) src, (size_t) width * 4,
+                          self->shm_shadow + dst))
+            return;
+        }
+
+      if (buffer->format == WL_SHM_FORMAT_XRGB8888)
+        {
+          shadow_word = (uint32_t *) (self->shm_shadow + dst);
+          for (int i = 0; i < width; i++)
+            shadow_word[i] |= 0xff000000u;
+        }
+    }
+}
+
 static GdkTexture *
-buffer_create_shm_texture (Buffer *buffer)
+buffer_create_shm_texture (Buffer *buffer, NestedSurface *self)
 {
   size_t length = (size_t) buffer->stride * buffer->height;
   GdkMemoryFormat format;
-  guint8 *pixels;
+  gboolean full = FALSE;
   GBytes *bytes;
 
   if (buffer->format != WL_SHM_FORMAT_ARGB8888 &&
@@ -550,37 +608,54 @@ buffer_create_shm_texture (Buffer *buffer)
     return NULL;
 
   format = GDK_MEMORY_B8G8R8A8_PREMULTIPLIED;
-  pixels = g_malloc0 (length);
 
-  if (!read_pool (buffer->pool, buffer->offset, length, pixels))
+  if (!self->shm_shadow ||
+      self->shm_shadow_len != length ||
+      self->shm_shadow_width != buffer->width ||
+      self->shm_shadow_height != buffer->height ||
+      self->shm_shadow_stride != buffer->stride ||
+      self->shm_shadow_format != buffer->format)
     {
-      g_free (pixels);
-      return NULL;
+      g_clear_pointer (&self->shm_shadow, g_free);
+      self->shm_shadow = g_malloc0 (length);
+      self->shm_shadow_len = length;
+      self->shm_shadow_width = buffer->width;
+      self->shm_shadow_height = buffer->height;
+      self->shm_shadow_stride = buffer->stride;
+      self->shm_shadow_format = buffer->format;
+      full = TRUE;
     }
 
-  if (buffer->format == WL_SHM_FORMAT_XRGB8888)
+  if (full)
     {
-      uint32_t *word = (uint32_t *) pixels;
-      size_t count = length / sizeof (uint32_t);
-      size_t i;
+      if (!read_pool (buffer->pool, buffer->offset, length, self->shm_shadow))
+        return NULL;
 
-      for (i = 0; i < count; i++)
-        word[i] |= 0xff000000u;
+      if (buffer->format == WL_SHM_FORMAT_XRGB8888)
+        {
+          uint32_t *word = (uint32_t *) self->shm_shadow;
+          size_t count = length / sizeof (uint32_t);
+          size_t i;
+
+          for (i = 0; i < count; i++)
+            word[i] |= 0xff000000u;
+        }
     }
+  else if (self->shm_damage_valid)
+    copy_pool_rect (buffer, self, self->shm_damage);
 
-  bytes = g_bytes_new_take (pixels, length);
+  bytes = g_bytes_new (self->shm_shadow, length);
   return gdk_memory_texture_new (buffer->width, buffer->height, format, bytes,
                                  buffer->stride);
 }
 
-
 /* The texture for a client buffer: dmabuf buffers are imported once and cached
  * (their contents are immutable), shm buffers are read out on every commit. */
 static GdkTexture *
-buffer_get_texture (Buffer *buffer)
+buffer_get_texture (Buffer *buffer, NestedSurface *self)
 {
   if (!buffer->is_dmabuf)
-    return buffer_create_shm_texture (buffer);
+    return buffer_create_shm_texture (buffer, self);
 
   if (!buffer->texture)
     buffer->texture = buffer_create_dmabuf_texture (buffer);
@@ -712,10 +787,48 @@ surface_attach (struct wl_client *client, struct wl_resource *resource,
 }
 
 static void
+surface_add_damage (NestedSurface *self, int32_t x, int32_t y,
+                    int32_t width, int32_t height)
+{
+  GdkRectangle rect;
+
+  if (width <= 0 || height <= 0)
+    return;
+
+  rect.x = x;
+  rect.y = y;
+  rect.width = width;
+  rect.height = height;
+
+  if (!self->shm_damage_valid)
+    {
+      self->shm_damage = rect;
+      self->shm_damage_valid = TRUE;
+      return;
+    }
+
+  gdk_rectangle_union (&self->shm_damage, &rect, &self->shm_damage);
+}
+
+static void
 surface_damage (struct wl_client *client, struct wl_resource *resource,
                 int32_t x, int32_t y, int32_t width, int32_t height)
 {
-  /* Full-buffer repaint: damage is not tracked. */
+  NestedSurface *self = wl_resource_get_user_data (resource);
+  int32_t scale = self->scale > 0 ? self->scale : 1;
+
+  /* wl_surface.damage is in surface-local coordinates; the shm shadow is in
+   * buffer pixels. */
+  surface_add_damage (self, x * scale, y * scale, width * scale, height * scale);
+}
+
+static void
+surface_damage_buffer (struct wl_client *client, struct wl_resource *resource,
+                       int32_t x, int32_t y, int32_t width, int32_t height)
+{
+  NestedSurface *self = wl_resource_get_user_data (resource);
+
+  surface_add_damage (self, x, y, width, height);
 }
 
 static void
@@ -823,7 +936,7 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
               return;
             }
 
-          texture = buffer_get_texture (buffer);
+          texture = buffer_get_texture (buffer, self);
           if (!texture)
             {
               g_warning ("nested: could not use a %dx%d buffer, dropping the frame",
@@ -838,11 +951,16 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
           self->natural_height = natural_height;
 
           wl_buffer_send_release (buffer->resource);
+          self->shm_damage_valid = FALSE;
           repaint = TRUE;
         }
       else
         surface_clear_content (self);
     }
+
+  /* Damage is consumed by the commit that carried it, even when it produced a
+   * full read (first frame / resized buffer). */
+  self->shm_damage_valid = FALSE;
 
   surface_update_local_size (self);
 
@@ -926,7 +1044,7 @@ static const struct wl_surface_interface surface_impl = {
   .commit = surface_commit,
   .set_buffer_transform = surface_set_buffer_transform,
   .set_buffer_scale = surface_set_buffer_scale,
-  .damage_buffer = surface_damage,
+  .damage_buffer = surface_damage_buffer,
   .offset = surface_offset,
 };
 
@@ -1083,6 +1201,16 @@ shm_create_pool (struct wl_client *client, struct wl_resource *resource,
   pool = g_new0 (Pool, 1);
   pool->fd = fd;
   pool->size = (size_t) size;
+  pool->map = mmap (NULL, pool->size, PROT_READ, MAP_SHARED, fd, 0);
+  if (pool->map == MAP_FAILED)
+    {
+      pool->map = NULL;
+      wl_resource_post_error (resource, WL_SHM_ERROR_INVALID_FD,
+                              "cannot map the pool: %s", g_strerror (errno));
+      close (fd);
+      g_free (pool);
+      return;
+    }
   pool->refcount = 1;
   pool->client = client;
   pool->compositor = self;
@@ -1280,6 +1408,19 @@ shm_pool_resize (struct wl_client *client, struct wl_resource *resource, int32_t
       return;
     }
 
+  {
+    guint8 *map = mmap (NULL, (size_t) size, PROT_READ, MAP_SHARED, pool->fd, 0);
+
+    if (map == MAP_FAILED)
+      {
+        wl_resource_post_error (resource, WL_SHM_ERROR_INVALID_FD,
+                                "cannot grow the pool: %s", g_strerror (errno));
+        return;
+      }
+    if (pool->map)
+      munmap (pool->map, pool->size);
+    pool->map = map;
+  }
   nested_compositor_add_shm (pool->compositor, pool->client,
                              (gsize) size - pool->size);
   pool->size = (size_t) size;

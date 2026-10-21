@@ -1274,6 +1274,22 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
+  if (name == "download-pause" || name == "download-resume") {
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    auto it = g_downloads.find(id);
+    if (it == g_downloads.end() || !it->second.item) {
+      EmitStatus("download-not-in-flight");
+      return;
+    }
+    if (name == "download-pause")
+      it->second.item->Pause();
+    else
+      it->second.item->Resume();
+    fprintf(stderr, "helper: download %u %s\n", id,
+            name == "download-pause" ? "paused" : "resumed");
+    return;
+  }
+
   if (name == "download-reject") {
     const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
     auto it = g_downloads.find(id);

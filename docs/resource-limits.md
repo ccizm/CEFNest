@@ -12,8 +12,9 @@
 `resize` 都查，超了发 `WL_SHM_ERROR_INVALID_FD` 并关掉刚收到的 fd——与 Weston 的
 `max_size` 检查同一做法。
 
-为什么必须有：shm 缓冲在**每次 commit** 时从池里整块 `pread` 出来
-（`buffer_create_shm_texture`），所以池子大小直接决定宿主每帧分配和读取多少。
+为什么必须有：shm 缓冲在**首次 commit/尺寸变化**时从池里整块 `pread`/`mmap` 出来；稳定后按
+`damage` 只复制一块矩形（`buffer_create_shm_texture` + `copy_pool_rect`），池子大小仍决定
+首次分配和 mmap 的地址空间。
 一帧 4K ARGB 约 33 MB，256 MB 还能放得下好几块，正常客户端碰不到。
 
 这条只量单个池，量不到总量——见 §2。
@@ -48,7 +49,7 @@ over the 1073741824 byte pool limit for one client
 成 4K 是 66 MB，与 1 GiB 差 16 倍——上限要挡的是"开十个 250 MB 池"的客户端，不是
 正常页面。
 
-上限管的是"一条连接能让宿主读多少"：每帧整块 `pread` 的成本按池算，一个客户端
+上限管的是"一条连接能让宿主读多少"：首次整块读取/mmap 的成本按池算，一个客户端
 开十个 250 MB 的池就是每帧 2.5 GB。
 
 `shm-client --pool-budget` 是它的门禁：连续提 16 个各自合法的 100 MB 池、都不销毁
@@ -131,8 +132,8 @@ client: the compositor refused the 300 MB pool and dropped us
 
 ## 6. 还没做的
 
-- shm 每帧整块 `pread`（约 4 MB/帧）仍是主要成本，上限只是止血；按 damage 拷贝
-  或改 mmap 常驻是正解，记在 `docs/frame-clock-pacing.md` 的后续里；
+- shm 的 mmap + damage shadow 已落地（`docs/frame-metrics.md` §2）；纹理仍是完整
+  `GdkMemoryTexture`，所以“零拷贝”还没有，damage 只省 pool 读取；
 - 无头 selftest 里 GDK 未初始化，所以 40 次失败都停在"没有 display"这一步，
   并没有真正走到 EGL 导入失败；等 #29 让 selftest 真的导入 dmabuf 之后，
   这条路径才会被完整覆盖（描述符泄漏的验证不受影响：两条失败分支都在
