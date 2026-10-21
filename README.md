@@ -170,8 +170,14 @@ client saw. Each mode asks for a different set of protocol objects:
 ```
 
 with `--dmabuf`, `--text-input`, `--cursor-shape`, `--popup`, `--refused`,
-`--dnd-requests`, `--drag-out`, `--drag-in`, `--fullscreen`, `--gtk-client`. On a
-machine with no display they report `skipping` and exit 0.
+`--pool-budget`, `--dnd-requests`, `--drag-out`, `--drag-in`, `--fullscreen`,
+`--gtk-client`. On a machine with no display they report `skipping` and exit 0.
+
+`--pool-budget` is the one where the client is the attacker: it hands over sixteen
+100 MB pools — each of them legal on its own — and keeps them all alive, and the
+run fails unless the compositor takes some and refuses the next. It measured 10
+accepted, 1 refused against the 1 GiB per-connection ceiling
+(`docs/resource-limits.md` §2).
 
 `--dmabuf` is scored on the compositor's side of the import: the client falls
 back to `wl_shm` on any refusal and still exits 0, so the run counts what the
@@ -365,7 +371,7 @@ left behind. What it proves is that a real window maps, that a real Chromium
 session with the sandbox on loads a page and answers JavaScript, and that the
 existing gates run inside it: `find-gate.sh` (34 assertions), `permission-gate.sh`
 (58), `download-gate.sh` (46), `dnd-gate.sh` (59), `pixel-gate.sh` (12),
-`sandbox-soak.sh` (12) and `meson test` (13/13) all pass unchanged, and
+`sandbox-soak.sh` (12) and `meson test` (14/14) all pass unchanged, and
 `menu-gate.sh` passes 45 of its 47 —
 the two it skips are the ones that assert a popup surface reached a screen, which a
 display with no output device cannot do (`docs/headless-ci.md` §5). What it cannot
@@ -378,8 +384,8 @@ answer. `docs/headless-ci.md` is the write-up.
 `test/ci-all.sh` is the one command that runs the whole battery through it — proof,
 `meson test` and all seven gates, each in its own nested compositor, one verdict table
 with the skipped checks counted in a column of their own, non-zero exit if anything
-failed. Measured on this laptop: 367 s for the nine runs — 269 gate assertions plus
-`meson test` 13/13, with 2 checks skipped.
+failed. Measured on this laptop: 368 s for the nine runs — 269 gate assertions plus
+`meson test` 14/14, with 2 checks skipped.
 
 ```bash
 ./test/ci-all.sh                    # everything
@@ -473,7 +479,7 @@ They are the record of *why* the code is shaped like this:
 | `popup-compositing.md` | the surface stack, placement and dismissal of page popups |
 | `clipboard-bridge.md` | `wl_data_device` ↔ `GdkClipboard` in both directions |
 | `session-lifecycle.md` | starting, stopping and dying with the helper |
-| `resource-limits.md` | shm pool caps, allocation checks, the dmabuf fd leak |
+| `resource-limits.md` | shm pool caps per pool and per connection, allocation checks, the dmabuf fd leak |
 | `empty-request-slot.md` | a NULL request slot killing the whole desktop |
 | `wheel-resolution-and-key-repeat.md` | `axis_value120`, one frame per gesture, auto-repeat bookkeeping |
 | `clipboard-offer-during-client-init.md` | a legal `data_offer` sent one dispatch too early kills a GTK client |

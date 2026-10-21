@@ -90,6 +90,8 @@ static const struct wp_fractional_scale_v1_interface fractional_scale_impl;
 static void  nested_start_frame_clock (NestedCompositor *self);
 static void  surface_resource_destroyed (struct wl_resource *resource);
 static void  pool_resource_destroyed (struct wl_resource *resource);
+static void  nested_compositor_release_shm (NestedCompositor *self,
+                                            struct wl_client *client, gsize bytes);
 static void  surface_reset_viewport (NestedSurface *self);
 static gboolean surface_apply_viewport (NestedSurface *self,
                                         struct wl_resource *resource,
@@ -140,8 +142,53 @@ pool_unref (Pool *pool)
 {
   if (--pool->refcount > 0)
     return;
+  nested_compositor_release_shm (pool->compositor, pool->client, pool->size);
   close (pool->fd);
   g_free (pool);
+}
+
+/* ------------------------------------------------------------------ *
+ * Per-connection shm budget                                          *
+ *                                                                    *
+ * One pool is capped; these add up. A client that opens pool after    *
+ * pool otherwise holds as much of the host's memory as it likes, and  *
+ * every frame of it costs a readback of the whole thing.              *
+ * ------------------------------------------------------------------ */
+
+static gsize
+nested_compositor_shm_used (NestedCompositor *self, struct wl_client *client)
+{
+  return GPOINTER_TO_SIZE (g_hash_table_lookup (self->shm_budget, client));
+}
+
+/* The check and the write are separate because a refused request must not
+ * change the tally: nothing was taken, so there is nothing to give back. */
+static gboolean
+nested_compositor_shm_fits (NestedCompositor *self, struct wl_client *client,
+                            gsize bytes)
+{
+  return nested_compositor_shm_used (self, client) + bytes <= NESTED_SHM_MAX_CLIENT;
+}
+
+static void
+nested_compositor_add_shm (NestedCompositor *self, struct wl_client *client,
+                           gsize bytes)
+{
+  g_hash_table_insert (self->shm_budget, client,
+                       GSIZE_TO_POINTER (nested_compositor_shm_used (self, client)
+                                         + bytes));
+}
+
+static void
+nested_compositor_release_shm (NestedCompositor *self, struct wl_client *client,
+                               gsize bytes)
+{
+  gsize used = nested_compositor_shm_used (self, client);
+
+  if (used > bytes)
+    g_hash_table_insert (self->shm_budget, client, GSIZE_TO_POINTER (used - bytes));
+  else
+    g_hash_table_remove (self->shm_budget, client);
 }
 
 /* Every object that cites a serial — wl_pointer.enter, wl_data_device.enter, an
@@ -982,6 +1029,7 @@ static void
 shm_create_pool (struct wl_client *client, struct wl_resource *resource,
                  uint32_t id, int32_t fd, int32_t size)
 {
+  NestedCompositor *self = wl_resource_get_user_data (resource);
   struct wl_resource *pool_resource;
   struct stat info;
   Pool *pool;
@@ -1020,10 +1068,26 @@ shm_create_pool (struct wl_client *client, struct wl_resource *resource,
       return;
     }
 
+  if (!nested_compositor_shm_fits (self, client, (gsize) size))
+    {
+      wl_resource_post_error (resource, WL_SHM_ERROR_INVALID_FD,
+                              "this client holds %zu bytes, and %d more is over "
+                              "the %zu byte pool limit for one client",
+                              nested_compositor_shm_used (self, client), size,
+                              NESTED_SHM_MAX_CLIENT);
+      close (fd);
+      return;
+    }
+
   pool = g_new0 (Pool, 1);
   pool->fd = fd;
   pool->size = (size_t) size;
   pool->refcount = 1;
+  pool->client = client;
+  pool->compositor = self;
+  /* Charged before the resource exists, because pool_unref() — which every
+   * failure below goes through — gives the bytes back. */
+  nested_compositor_add_shm (self, client, (gsize) size);
 
   pool_resource = resource_create (client, &wl_shm_pool_interface,
                                    wl_resource_get_version (resource), id);
@@ -1032,6 +1096,10 @@ shm_create_pool (struct wl_client *client, struct wl_resource *resource,
       pool_unref (pool); /* the pool owns the fd from the moment it was made */
       return;
     }
+
+  g_debug ("shm: client %p now holds %zu of %zu bytes of pools",
+           (void *) client, nested_compositor_shm_used (self, client),
+           NESTED_SHM_MAX_CLIENT);
 
   wl_resource_set_implementation (pool_resource, &shm_pool_impl, pool,
                                   pool_resource_destroyed);
@@ -1199,6 +1267,20 @@ shm_pool_resize (struct wl_client *client, struct wl_resource *resource, int32_t
       return;
     }
 
+  /* Growing costs the same budget a second pool would have. */
+  if (!nested_compositor_shm_fits (pool->compositor, pool->client,
+                                   (gsize) size - pool->size))
+    {
+      wl_resource_post_error (resource, WL_SHM_ERROR_INVALID_FD,
+                              "this client holds %zu bytes, and growing to %d is "
+                              "over the %zu byte pool limit for one client",
+                              nested_compositor_shm_used (pool->compositor, pool->client),
+                              size, NESTED_SHM_MAX_CLIENT);
+      return;
+    }
+
+  nested_compositor_add_shm (pool->compositor, pool->client,
+                             (gsize) size - pool->size);
   pool->size = (size_t) size;
 }
 
@@ -1928,6 +2010,9 @@ nested_compositor_dispose (GObject *object)
       self->loop = NULL;
     }
 
+  /* After the clients, because releasing a pool writes in here. */
+  g_clear_pointer (&self->shm_budget, g_hash_table_destroy);
+
   g_clear_object (&self->primary);
   g_clear_object (&self->pointer_focus);
   g_clear_object (&self->keyboard_focus);
@@ -1971,6 +2056,7 @@ nested_compositor_init (NestedCompositor *self)
   self->pressed_keys = g_array_new (FALSE, FALSE, sizeof (uint32_t));
   self->dmabuf_formats = g_array_new (FALSE, FALSE, sizeof (DmabufFormat));
   self->dmabuf_table_fd = -1;
+  self->shm_budget = g_hash_table_new (NULL, NULL);
 }
 
 static void

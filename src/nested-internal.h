@@ -29,6 +29,14 @@ G_BEGIN_DECLS
  * frame. */
 #define NESTED_SHM_MAX_POOL ((int32_t) 256 * 1024 * 1024)
 
+/* What all the live pools of one client may add up to: four maximal pools. A real
+ * shm session measures two frames in flight — 4.98 MB for a 1000x653 window, and
+ * 66 MB if that window were 4K — so this is a ceiling for a client that means
+ * harm, not a budget a page runs into. The per-pool cap alone left the total
+ * unbounded: one connection could hand over as many maximal pools as it liked,
+ * and the host copies every one of them out on each commit. */
+#define NESTED_SHM_MAX_CLIENT ((gsize) 4 * NESTED_SHM_MAX_POOL)
+
 typedef struct _Pool Pool;
 typedef struct _Buffer Buffer;
 typedef struct _BufferUser BufferUser;
@@ -43,6 +51,12 @@ struct _Pool {
   int fd;
   size_t size;
   guint refcount;
+  /* Which connection's shm budget this sits in. The compositor is only ever
+   * looked at while it is alive: it destroys its clients before it drops the
+   * budget table, and a client going away destroys the pool resource that holds
+   * the last reference here. */
+  struct wl_client *client;
+  NestedCompositor *compositor;
 };
 
 /* A (fourcc, modifier) pair advertised through zwp_linux_dmabuf_v1. */
@@ -196,6 +210,8 @@ struct _NestedCompositor {
   struct wl_list surfaces;      /* NestedSurface.nested_link */
   struct wl_list seat_clients;  /* SeatClient.link */
   struct wl_list text_inputs;   /* TextInput.link */
+  /* Bytes of live wl_shm pool per connection, against NESTED_SHM_MAX_CLIENT. */
+  GHashTable *shm_budget;       /* struct wl_client * -> gsize */
 
   /* Format list for zwp_linux_dmabuf_v1, probed from the render node. Empty
    * means no dmabuf global at all: clients keep using wl_shm. */

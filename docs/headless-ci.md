@@ -144,16 +144,17 @@ KEEP_LOGS=1 ./test/ci-all.sh        # 保留每个 run 的完整 transcript
 
 ## 6. 实测
 
-`./test/ci-all.sh` 整套跑完 367 秒（T490，九条跑动的和，一次一条命令）。"断言"只数门禁自己的 ok
+`./test/ci-all.sh` 整套跑完 368 秒（T490，九条跑动的和，一次一条命令；2026-10-21
+加进 `seat-selftest-pool-budget` 之后重测的整表）。"断言"只数门禁自己的 ok
 行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 没有残留）：
 
 | run | 结果 | 断言 | 用时 |
 |---|---|---|---|
 | `proof`（无参数自检） | 通过 | 3 | 10s |
-| `unit`（`meson test -C builddir`） | 通过 | 13 OK | 16s |
+| `unit`（`meson test -C builddir`） | 通过 | 14 OK | 17s |
 | `pixel` | 通过 | 12 | 12s |
-| `find` | 通过 | 34 | 32s |
-| `permission` | 通过 | 58 | 60s |
+| `find` | 通过 | 34 | 31s |
+| `permission` | 通过 | 58 | 61s |
 | `download` | 通过 | 46 | 51s |
 | `dnd` | 通过 | 59 | 68s |
 | `menu` | 通过\* | 45（+2 skip） | 70s |

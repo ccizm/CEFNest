@@ -7,7 +7,7 @@
 # at this machine, so the run can be left going: that is what makes it a release
 # gate rather than the manual gates README documents one by one.
 #
-#   ./test/ci-all.sh                 # everything: measured 367 s on this laptop
+#   ./test/ci-all.sh                 # everything: measured 368 s on this laptop
 #   ./test/ci-all.sh find menu       # only the named ones
 #   KEEP_LOGS=1 ./test/ci-all.sh     # keep each run's full transcript
 #

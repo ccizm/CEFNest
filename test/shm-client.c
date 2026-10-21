@@ -200,6 +200,7 @@ static int cursor_asks;
  * --popup-reposition then moves the menu with a second set of rules. */
 static int use_popup;
 static int use_refused;
+static int use_pool_budget;
 static int use_popup_reposition;
 static int popups_opened;
 static int popup_repositioned;
@@ -2726,7 +2727,11 @@ static const struct wl_registry_listener registry_listener = {
  * needs. What is being checked is the compositor's side of the answer — it has
  * to stay up, and it has to give back the plane descriptors it was handed even
  * when it could not use them. The oversized pool comes last because the
- * compositor answers that one by killing this connection. */
+ * compositor answers that one by killing this connection.
+ *
+ * --pool-budget asks for a pile of pools that are individually legal, which is
+ * a different question: how much of the host one connection may hold in total.
+ * It kills the connection too, so it is a mode of its own. */
 
 #define PROBE_IMPORTS 40
 #define PROBE_POOL_SIZE (300 * 1024 * 1024)
@@ -2834,6 +2839,69 @@ probe_oversized_pool (void)
              PROBE_POOL_SIZE / (1024 * 1024));
 }
 
+/* The per-connection budget, which is the other half of the cap: sixteen pools
+ * of 100 MB are each legal on their own, and a host that only ever measures one
+ * of them lets a client hold 1.6 GB of its memory.
+ *
+ * The pools are kept alive rather than created and destroyed, because handing
+ * bytes back is the thing this probe is not testing, and a cycle of create/destroy
+ * would be refused by nothing. */
+#define PROBE_BUDGET_POOL_SIZE (100 * 1024 * 1024)
+#define PROBE_BUDGET_POOLS 16
+
+static void
+probe_pool_budget (void)
+{
+  int asked = 0;
+  int refused = 0;
+  int granted, i;
+
+  for (i = 0; i < PROBE_BUDGET_POOLS; i++)
+    {
+      int fd = memfd_create ("shm-client-budget", MFD_CLOEXEC);
+
+      if (fd < 0 || ftruncate (fd, PROBE_BUDGET_POOL_SIZE) < 0)
+        {
+          fprintf (stderr, "client: cannot make budget pool %d: %s\n",
+                   i, strerror (errno));
+          if (fd >= 0)
+            close (fd);
+          break;
+        }
+
+      /* The pool this returns is never destroyed: holding the bytes is the test. */
+      wl_shm_create_pool (shm, fd, PROBE_BUDGET_POOL_SIZE);
+      asked++;
+      if (wl_display_roundtrip (display) < 0)
+        {
+          refused = 1;
+          break;
+        }
+    }
+
+  granted = asked - (refused ? 1 : 0);
+
+  if (refused)
+    fprintf (stderr, "client: the compositor took %d pools of %d MB and refused "
+                     "the next one, so %d MB is what one connection may hold\n",
+             granted, PROBE_BUDGET_POOL_SIZE / (1024 * 1024),
+             granted * PROBE_BUDGET_POOL_SIZE / (1024 * 1024));
+  else
+    fprintf (stderr, "client: the compositor took all %d pools it was sent "
+                     "(%d MB) and refused none\n",
+             asked, asked * PROBE_BUDGET_POOL_SIZE / (1024 * 1024));
+
+  /* A budget that refuses the first pool is as wrong as one that refuses no
+   * pool: a client has to be able to paint at least one frame. */
+  if (!refused || granted < 1)
+    {
+      fprintf (stderr, "client: %d: the shm budget gate FAILED: the compositor "
+                       "granted %d of the %d pools it was sent\n",
+               __LINE__, granted, asked);
+      exit (1);
+    }
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -2878,6 +2946,8 @@ main (int argc, char *argv[])
         }
       else if (!strcmp (argv[i], "--refused"))
         use_refused = 1;
+      else if (!strcmp (argv[i], "--pool-budget"))
+        use_pool_budget = 1;
       else
         fprintf (stderr, "client: ignoring unknown argument '%s'\n", argv[i]);
     }
@@ -2949,6 +3019,14 @@ main (int argc, char *argv[])
     {
       probe_refused_imports ();
       probe_oversized_pool ();
+      return 0;
+    }
+
+  /* Its own mode because the answer to the pool that goes over the limit ends
+   * this connection, and nothing after it could be asked. */
+  if (use_pool_budget)
+    {
+      probe_pool_budget ();
       return 0;
     }
 
