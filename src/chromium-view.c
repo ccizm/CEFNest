@@ -26,6 +26,7 @@ struct _ChromiumView {
    * the source advertised. */
   GBytes *drag_bytes;
   char *drag_mime;        /* the mime prefetched for the live drag */
+  gboolean drag_cancelled; /* the drag left before the prefetch finished */
 };
 
 G_DEFINE_TYPE (ChromiumView, chromium_view, GTK_TYPE_WIDGET)
@@ -355,7 +356,7 @@ chromium_view_drop_enter (GtkDropTarget *target, double x, double y,
                           gpointer data)
 {
   ChromiumView *self = data;
-  GdkDrop *drop = gtk_drop_target_get_drop (target);
+  GdkDrop *drop = gtk_drop_target_get_current_drop (target);
 
   if (drop)
     chromium_view_drag_prefetch (drop, self);
@@ -399,7 +400,7 @@ chromium_view_watch_drops (ChromiumView *self)
 {
   GtkDropTarget *target = gtk_drop_target_new (GDK_TYPE_FILE_LIST,
                                                GDK_ACTION_COPY);
-  const GType types[] = { GDK_TYPE_FILE_LIST, G_TYPE_STRING };
+  GType types[] = { GDK_TYPE_FILE_LIST, G_TYPE_STRING };
 
   gtk_drop_target_set_gtypes (target, types, G_N_ELEMENTS (types));
   g_signal_connect (target, "enter", G_CALLBACK (chromium_view_drop_enter),
