@@ -374,12 +374,12 @@ given back、退休后再进来一条仍然 taken。每趟 check 里还断言 `n
 
 ## 8. 还没有
 
-- **拖入的宿主那一头已接**：`chromium-view.c` 在控件上装了 `GtkDropTarget`（收
-  `GDK_TYPE_FILE_LIST` 与字符串）。enter 时按格式挑 mime（uri-list/图片/纯文本）
-  并经 `gdk_drop_read_async` 预取至多 32 MiB 字节，随 `drag_from_host` 开拖；
-  motion 由视图既有的指针通路喂给嵌套座位；drop/leave 分别收尾。已知边界：
-  预取上限 32 MiB（更大的文件截断——真上传场景建议走剪贴板/文件路径），
-  enter 与预取完成之间的几十毫秒里页面看不到 dragenter。
+- **拖入的宿主那一头已接（合成式）**：控件装 `GtkDropTarget`（文件列表 +
+  字符串）。真实 drop 落下后才读出载荷（文件→uri-list、文本→text/plain），
+  然后 `drag_from_host(mimes, payload)` 开嵌套拖、一次 motion、立刻
+  `drag_from_host_drop` 收尾——整段嵌套拖压进真实 drop 的处理器里，与
+  GTK 自己的拖拽状态机零并发。上一版在 enter 时就预取并开拖的设计与外层
+  拖拽的活状态机相撞（`gdk_drop_status` 断言 + 窗口无响应），已废弃。
 - 拖动图标目前是客户端给的 surface，宿主没有替换成 GTK 的拖拽图像。
 - 越过窗口边界之后**两条** GTK 腿仍然只能人工测量，但出界那条已经接上：`gdk_drag_begin` 用
   toplevel 的 native surface，文本走 `text/plain`，图片走临时文件 + `GdkFileList`（§6.4）。拖入那条
