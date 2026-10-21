@@ -220,6 +220,21 @@ demo 收到信号后做 `gdk_content_provider_new_for_bytes()` + `gdk_drag_begin
 出界变成一次真 GTK 拖拽，得把手放到鼠标上量。`CEFNEST_DRAG_OUT=off` 干脆不连 handler，用来对照
 「没有宿主」时页面的拖拽是什么样。
 
+**这条怎么量**（人手一次，两分钟；只在真桌面上做，`test/ci-session.sh` 里外层 compositor
+拿不到真实 grab serial，量不出这一条）：
+
+1. 清空 `CEFNEST_DRAG_OUT`（默认就是"接住并举成宿主自己的 `GdkDrag`"），起
+   `./builddir/src/cefnest-demo`，载入 `test/dnd-page.html`；
+2. 把目标窗口（文件管理器或 gedit）摆在 demo **右边或下边**——路径上不许出现 GNOME 顶栏、
+   左上角热区和左侧 dock，这条量的每一步都可能失手；
+3. 真实鼠标从页面上的图按住、拖出 demo 窗口边界、进到目标窗口再松手；
+4. 读三样：demo 的 trace 里那次预取的 mime 与字节数、目标窗口是否把内容落下来、
+   `drop`/`failed`/`ended` 哪一个收尾。三条都对上，§6.4 才算测完，`test/dnd-gate.sh`
+   的 `out` 那一段也才允许从 `take` 换成默认值。
+
+同一次还能顺手量对面的腿（拖入）：从目标窗口往页面里拖，看 `drop-in` 那段的
+`dragenter/drop` 是不是页面对象收到而不是宿主吞掉。
+
 ### 6.5 踩到的坑：绑 v3 的客户端必须接住 `target`
 
 `seat-selftest-drag-out` 第一跑时 shm-client 被 signal 6 打死：

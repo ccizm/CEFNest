@@ -4,9 +4,10 @@
 问题：P4 需要一个能无人值守跑门禁的地方。本仓库的门禁全都"开真窗口"——在真桌面上
 跑等于把窗口糊在使用者脸上，所以它们一直是"文档化的手动门禁"。
 结果：`test/ci-session.sh` 起一个 nested mutter（GNOME Shell 48.7 的 `--headless`
-模式），把任意命令塞进那个 Wayland 会话里跑。不装包、不用 sudo、跑完不留进程；六条
-门禁原样搬进去全绿，唯一要改的是 `menu-gate.sh` 里那两条"弹层上了屏"的断言——那块
-显示器没有屏可上，于是它们报成 skip（§5）。
+模式），把任意命令塞进那个 Wayland 会话里跑；`test/ci-all.sh` 在它上面把 proof、
+`meson test` 和六条门禁串成一条命令的发布闸门。不装包、不用 sudo、跑完不留进程；
+六条门禁全绿，唯一要改的是 `menu-gate.sh` 里那两条"弹层上了屏"的断言——那块显示器
+没有屏可上，于是它们报成 skip（§5）。
 
 ## 1. 底座：这台机器上现成有什么
 
@@ -77,6 +78,22 @@ surface 真的上了屏"的门禁读它，把那几条报成 skip 并把数量�
 ./test/ci-session.sh bash -c './test/find-gate.sh && ./test/menu-gate.sh'
 ```
 
+### 全套：`test/ci-all.sh`
+
+发布闸门是**一条命令**，不是一个循环脚本：proof、`meson test`、六条门禁按顺序跑，
+每个 run 各起一个 nested mutter，跑完打印判定表，任何一条 FAIL 就整体非零退出。
+
+```bash
+./test/ci-all.sh                    # 全套
+./test/ci-all.sh find menu          # 只点名跑两条
+KEEP_LOGS=1 ./test/ci-all.sh        # 保留每个 run 的完整 transcript
+```
+
+每个 run 单独起会话，是拿 ~10s/条换"挂掉的那条只烧自己那一行"：塞进同一块显示器时，
+一条卡死或把外层会话弄脏，后面所有门禁的判定就一起没了——一套只能回答"里面某个地方
+挂了"的门禁不是门禁。表里的 `skip` 也单独占一列：门禁的 skip 只在**这块显示器证明
+不了**时发生（§5），所以绿线后面必须能把跳过条数数出来。
+
 ## 5. 它证明什么，不证明什么
 
 证明：真窗口能在一块真 Wayland 显示器上映射；真 Chromium 会话（`sandbox=on`）能起、
@@ -101,29 +118,35 @@ surface 真的上了屏"的门禁读它，把那几条报成 skip 并把数量�
 
 ## 6. 实测
 
-一台机器、一次一条命令，每条门禁都是独立起停一个 nested mutter。"断言"只数门禁自己
-的 ok 行，不含 harness 那三行（socket 起来了 / payload 退出 0 / 没有残留）：
+`./test/ci-all.sh` 整套跑完 364 秒（T490，一次一条命令）。"断言"只数门禁自己的 ok
+行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 没有残留）：
 
-| 跑法 | 结果 | 断言 | 用时 |
+| run | 结果 | 断言 | 用时 |
 |---|---|---|---|
-| 无参数（proof） | 通过 | 3 层 transcript + 无残留 | ~15s |
-| `meson test -C builddir` | 通过 | 13/13 OK | |
-| `./test/find-gate.sh real` | 通过 | 10 | 26s |
-| `./test/permission-gate.sh` | 通过 | 58 | 63s |
-| `./test/download-gate.sh` | 通过 | 46 | 56s |
-| `./test/dnd-gate.sh` | 通过 | 59 | 69s |
-| `./test/sandbox-soak.sh` | 通过 | 12 | 50s |
-| `./test/menu-gate.sh` | 通过 + 2 skip | 45（另 2 条要显示器，见 §5） | |
-| `bash -c './test/find-gate.sh real && ./test/menu-gate.sh fake'` | 两条门禁都通过 | 45（+1 skip），一块显示器喂两个门禁 | 53s |
+| `proof`（无参数自检） | 通过 | 3 | 12s |
+| `unit`（`meson test -C builddir`） | 通过 | 13 OK | 16s |
+| `find` | 通过 | 34 | 33s |
+| `permission` | 通过 | 58 | 62s |
+| `download` | 通过 | 46 | 51s |
+| `dnd` | 通过 | 59 | 68s |
+| `menu` | 通过\* | 45（+2 skip） | 72s |
+| `soak` | 通过 | 12 | 50s |
 
-自检模式那三条断言（`nested compositor on WAYLAND_DISPLAY=`、`HTTP 200`、
-`script [0-9]+ ok value="DND-PAGE`）证明的是这块显示器真的能用；`meson test` 里
-selftest 那 11 个模式本来就在进程内起嵌套 compositor，不依赖外层显示器，这一跑证明
-的是它们在会话里也不受干扰。
+\* 那 2 条是"弹层上了屏"，这块显示器没有屏可上（§5）。
 
-在 §8 那个看门狗之前，`find-gate.sh` 这一跑是 4/6，失败的全是 `real-scroll` 的
-`scrollTop was 0 after the step`——不是门禁脆弱，是页面真的冻住了。
-`./test/find-gate.sh real`（真桌面）10 行照旧全过，看门狗没有把能用的一侧改坏。
+两条补充测量：
+
+- `./test/ci-session.sh ./test/find-gate.sh real` 单跑 = 10 断言 / 26s；
+  `bash -c './test/find-gate.sh real && ./test/menu-gate.sh fake'` 同一块显示器 =
+  45 断言 + 1 skip / 53s——共享会话这条路径是可用的，只是 `ci-all` 故意不这么跑。
+- 在 §8 那个看门狗之前，`find-gate.sh` 这一跑是 4/6，失败的全是 `real-scroll` 的
+  `scrollTop was 0 after the step`——不是门禁脆弱，是页面真的冻住了。
+  `./test/find-gate.sh real`（真桌面）10 行照旧全过，看门狗没有把能用的一侧改坏。
+
+proof 模式那三条断言（`nested compositor on WAYLAND_DISPLAY=`、`HTTP 200`、
+`script [0-9]+ ok value="DND-PAGE`）证明的是这块显示器真的能用；`unit` 里 selftest
+那 11 个模式本来就在进程内起嵌套 compositor、不依赖外层显示器，那一跑证明的是它们在
+会话里也不受干扰。
 
 ## 7. 换一台机器需要什么
 

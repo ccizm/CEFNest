@@ -352,6 +352,17 @@ display cycle, which is exactly the failure mode `docs/frame-clock-pacing.md` §
 documents, where a client left waiting on that cycle stopped animating and stopped
 painting. `docs/headless-ci.md` is the write-up.
 
+`test/ci-all.sh` is the one command that runs the whole battery through it — proof,
+`meson test` and all six gates, each in its own nested compositor, one verdict table
+with the skipped checks counted in a column of their own, non-zero exit if anything
+failed. Measured on this laptop: 364 s for the eight runs — 257 gate assertions plus
+`meson test` 13/13, with 2 checks skipped.
+
+```bash
+./test/ci-all.sh                    # everything
+./test/ci-all.sh find menu          # only these two
+```
+
 ## Using it as a library
 
 `meson install` puts `libcefnest.so` in `libdir`, three headers in
