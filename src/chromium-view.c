@@ -20,6 +20,12 @@ struct _ChromiumView {
   gboolean im_focused;
   gulong fullscreen_notify_handler;
   GtkWidget *fullscreen_window;
+
+  /* A drag carried in from outside the window: the bytes were prefetched at
+   * enter so the page's own offer reads real data, and the mime list is what
+   * the source advertised. */
+  GBytes *drag_bytes;
+  char *drag_mime;        /* the mime prefetched for the live drag */
 };
 
 G_DEFINE_TYPE (ChromiumView, chromium_view, GTK_TYPE_WIDGET)
@@ -252,6 +258,160 @@ chromium_view_watch_fullscreen (ChromiumView *self)
                                            gtk_window_is_fullscreen (GTK_WINDOW (root)));
 }
 
+/* -------------------------------------------------------------- *
+ * Drops from outside the window                                   *
+ *                                                                 *
+ * A file manager or another application dragging onto the view is *
+ * carried into the page. The enter prefetches the payload bytes   *
+ * over the GdkDrop and opens the compositor's host-carried drag   *
+ * with them; pointer motion is already the path that walks a live *
+ * drag across the surface tree; the drop retires it and the page  *
+ * reads the payload through the offer it was given. text/uri-list *
+ * is the contract file managers speak; image and plain text follow*
+ * the same path with their own mime.                              * */
+
+static const char *
+drag_mime_from_formats (GdkContentFormats *formats)
+{
+  const char *const *mimes = gdk_content_formats_get_mime_types (formats, NULL);
+  static const char *const preferred[] = {
+    "text/uri-list", "text/plain;charset=utf-8", "text/plain",
+  };
+  gsize i, j;
+
+  for (i = 0; mimes && mimes[i]; i++)
+    {
+      if (g_str_has_prefix (mimes[i], "image/"))
+        return mimes[i];
+      for (j = 0; j < G_N_ELEMENTS (preferred); j++)
+        if (!strcmp (mimes[i], preferred[j]))
+          return mimes[i];
+    }
+
+  return NULL;
+}
+
+static void
+chromium_view_drag_prefetch_done (GObject *source, GAsyncResult *result,
+                                  gpointer data)
+{
+  g_autoptr (ChromiumView) self = CHROMIUM_VIEW (data);
+  g_autoptr (GError) error = NULL;
+  const char *out_mime = NULL;
+  GInputStream *stream = gdk_drop_read_finish (GDK_DROP (source), result,
+                                               &out_mime, &error);
+  g_autoptr (GBytes) bytes = NULL;
+
+  if (!stream)
+    {
+      g_debug ("chromium-view: drag prefetch failed: %s", error->message);
+      return;
+    }
+
+  bytes = g_input_stream_read_bytes (stream, 32 << 20, NULL, &error);
+  g_object_unref (stream);
+  if (error)
+    {
+      g_debug ("chromium-view: drag payload prefetch failed: %s",
+               error->message);
+      g_clear_error (&error);
+      return;
+    }
+
+  if (self->drag_cancelled)
+    return; /* the drag left before the prefetch finished */
+
+  g_bytes_unref (self->drag_bytes);
+  self->drag_bytes = g_steal_pointer (&bytes);
+
+  g_debug ("chromium-view: carrying a drag in (%s, %" G_GSIZE_FORMAT " bytes)",
+           self->drag_mime, g_bytes_get_size (self->drag_bytes));
+  const char *mimes[2] = { self->drag_mime, NULL };
+
+  nested_compositor_drag_from_host (self->compositor, mimes,
+                                    self->drag_bytes, FALSE);
+}
+
+static void
+chromium_view_drag_prefetch (GdkDrop *drop, ChromiumView *self)
+{
+  const char *mime = drag_mime_from_formats (gdk_drop_get_formats (drop));
+
+  g_clear_pointer (&self->drag_mime, g_free);
+  g_clear_pointer (&self->drag_bytes, g_bytes_unref);
+  if (!mime)
+    return;
+
+  self->drag_mime = g_strdup (mime);
+  self->drag_cancelled = FALSE;
+  gdk_drop_read_async (drop, (const char *[]){ mime, NULL },
+                       G_PRIORITY_DEFAULT, NULL,
+                       chromium_view_drag_prefetch_done,
+                       g_object_ref (self));
+}
+
+static void
+chromium_view_drop_enter (GtkDropTarget *target, double x, double y,
+                          gpointer data)
+{
+  ChromiumView *self = data;
+  GdkDrop *drop = gtk_drop_target_get_drop (target);
+
+  if (drop)
+    chromium_view_drag_prefetch (drop, self);
+}
+
+static void
+chromium_view_drop_motion (GtkDropTarget *target, double x, double y,
+                           gpointer data)
+{
+  ChromiumView *self = data;
+
+  /* The page's own dragover highlight is driven by the pointer motion the
+   * view already forwards; nothing extra to do here. */
+  nested_compositor_notify_pointer_motion (self->compositor, x, y);
+}
+
+static void
+chromium_view_drop_leave (GtkDropTarget *target, gpointer data)
+{
+  ChromiumView *self = data;
+
+  self->drag_cancelled = TRUE;
+  nested_compositor_drag_from_host_cancel (self->compositor);
+  g_clear_pointer (&self->drag_bytes, g_bytes_unref);
+  g_clear_pointer (&self->drag_mime, g_free);
+}
+
+static void
+chromium_view_drop_got (GtkDropTarget *target, GValue *value, double x,
+                        double y, gpointer data)
+{
+  ChromiumView *self = data;
+
+  /* The page reads the payload through the offer the compositor opened with
+   * the prefetched bytes; this is what retires the drag. */
+  nested_compositor_drag_from_host_drop (self->compositor);
+}
+
+static void
+chromium_view_watch_drops (ChromiumView *self)
+{
+  GtkDropTarget *target = gtk_drop_target_new (GDK_TYPE_FILE_LIST,
+                                               GDK_ACTION_COPY);
+  const GType types[] = { GDK_TYPE_FILE_LIST, G_TYPE_STRING };
+
+  gtk_drop_target_set_gtypes (target, types, G_N_ELEMENTS (types));
+  g_signal_connect (target, "enter", G_CALLBACK (chromium_view_drop_enter),
+                    self);
+  g_signal_connect (target, "motion", G_CALLBACK (chromium_view_drop_motion),
+                    self);
+  g_signal_connect (target, "drop", G_CALLBACK (chromium_view_drop_got), self);
+  g_signal_connect (target, "leave", G_CALLBACK (chromium_view_drop_leave),
+                    self);
+  gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (target));
+}
+
 static void
 chromium_view_on_map (GtkWidget *widget, gpointer data)
 {
@@ -260,6 +420,24 @@ chromium_view_on_map (GtkWidget *widget, gpointer data)
 
   /* While the view is on screen, the display's clipboard is the one the
    * clients copy to and paste from. */
+  nested_compositor_set_clipboard (self->compositor,
+                                   gdk_display_get_clipboard (gtk_widget_get_display (widget)));
+
+  /* Client frames are paced by the same display cycle the widget paints on:
+   * a client that asks for a frame is answered at the start of a cycle, so
+   * what it commits lands on the next one instead of a fixed timer quantum
+   * later — and a hidden window pauses the clients along with it. */
+  nested_compositor_set_frame_clock (self->compositor,
+                                     gtk_widget_get_frame_clock (GTK_WIDGET (widget)));
+  /* Page fullscreen requests turn into window fullscreen here, and the
+   * window's real state flows back to the client. */
+  g_signal_connect_object (self->compositor, "window-fullscreen-request",
+                           G_CALLBACK (chromium_view_on_fullscreen_request),
+                           self, 0);
+  chromium_view_watch_fullscreen (self);
+  chromium_view_watch_drops (self);
+
+
   nested_compositor_set_clipboard (self->compositor,
                                    gdk_display_get_clipboard (gtk_widget_get_display (widget)));
 
