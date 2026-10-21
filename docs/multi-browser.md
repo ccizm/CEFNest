@@ -31,6 +31,10 @@
 - demo 在 `windowed` 的 `browser-created` 上开第二个 `GtkWindow`，用共享 compositor 的
   view 绑定该 CEF window 的 surface；
 - 主 tab 窗口固定绑定 tab CEF window 的 surface，独立窗口不再抢主 view；
+- `::open-url`（页面 `window.open`、菜单"在新窗口打开"）不再另起 demo 进程，而是
+  `chromium_session_new_browser(url, windowed=TRUE)` 走同一个 helper，随后的
+  `browser-created` 自动给它开 GTK 窗口；独立的 `open_url_in_new_window()` 进程路径
+  只留作没有活跃 session 时的兜底；
 - 实测：`new-window` 后主窗口仍显示 MENU-PAGE，第二个 GTK 窗口显示 spellcheck 页面；
   `select-browser 1` 切回 tab 后主窗口内容保持正确。
 

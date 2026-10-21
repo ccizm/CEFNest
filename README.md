@@ -491,9 +491,9 @@ back from under the host), `::zoom-changed` (the CEF zoom level the helper read
 back after a zoom command or a main-frame load; 0.0 is 100 %, 0.5 is one Chrome UI
 step), `::primary-selection` (the selected page text pushed to the host, which
 writes it to Gtk's primary clipboard), `::copy-text` (a URL chosen from a link/image/media menu row — the host
-owns the clipboard), `::open-url` (a URL chosen from a new-window menu row; the
-demo starts a second window with its own CEF profile, a library host can open it
-however it likes), `::closed`
+owns the clipboard), `::open-url` (a URL chosen from a new-window menu row — the
+demo asks the shared helper for a standalone browser, which gets its own GTK
+window; a library host can route it however it likes), `::closed`
 (the helper is gone and will not come back, with which of the four reasons: the
 host stopped it, the helper closed the browser, its channel hung up, or the
 process was reaped — a death reports either of the last two, which is why an

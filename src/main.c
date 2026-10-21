@@ -545,12 +545,20 @@ session_copy_text (ChromiumSession *session, const char *text, gpointer data)
 static void
 session_open_url (ChromiumSession *session, const char *url, gpointer data)
 {
-  (void) session; (void) data;
+  (void) data;
 
   if (!url || !*url)
     return;
 
   g_printerr ("demo: open-url %s\n", url);
+  /* The single-helper path: a standalone browser in the same helper gets its
+   * own GTK window through ::browser-created. The separate-process spawn below
+   * is only for the pathological case of the signal without a live session. */
+  if (session && demo.view && demo.browser_windows)
+    {
+      chromium_session_new_browser (session, url, TRUE);
+      return;
+    }
   open_url_in_new_window (url);
 }
 
