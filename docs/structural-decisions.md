@@ -5,6 +5,10 @@
 
 ## 1. 单 helper 多 browser 路由
 
+**决定（2026-10-21）**：单 helper、多 browser；标签和独立窗口都要支持。当前实现先落地
+helper 注册表、标签条和 `new-window` 的 CEF toplevel；独立 host 窗口仍需要
+`ChromiumView` 共享 compositor / 绑定 surface 的下一层改动，见 `docs/multi-browser.md`。
+
 现状：一个 helper 进程创建一个 `CefBrowserView`/一个 browser；控制 socket 的命令和
 事件没有 browser 标识，`ChromiumSession` 也是一对一。
 
@@ -36,8 +40,9 @@ window，不能直接扩成多 window 而保持语义。
 linux64_minimal
 ```
 
-CEF 的 Spotify 构建服务按 `linux64`/`linuxarm64` 等 flavor 提供二进制，但本机没有这两类
-节点/包可验证；不能只改 URL 就声称“支持”。要收口需要：
+**决定（2026-10-21）**：只支持 `linux64`（amd64）和 `linuxarm64`（aarch64）。
+`scripts/fetch-cef.sh` 已按 `CEF_ARCH` 选择这两个 CEF minimal 包；但本机只有 x86_64，
+arm64 仍需目标机验证。要收口需要：
 
 1. 找到对应架构、对应 CEF 154 的官方 minimal 包，或决定自建；
 2. 在目标架构上实际跑 `scripts/fetch-cef.sh`、helper 构建、`meson test` 和至少一条真

@@ -78,11 +78,14 @@ demo: renderer exited status=1 error=9 9
 
 ## 3. 现在通道上有的东西
 
-命令 22 条，事件 23 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
+命令 25 条，事件 26 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
 
 | 方向 | 名字 | 载荷 |
 | --- | --- | --- |
-| host → helper | `load` | `url` |
+| host → helper | `new-browser` | `url`、`mode`（`tab`/`window`；同一 helper 里的新 CEF browser） |
+| host → helper | `select-browser` | `browser`（标签激活；窗口模式也会 focus 那个 CefWindow） |
+| host → helper | `close-browser` | `browser`（只关这个 browser；最后一个关掉 helper） |
+| host → helper | `load` | `url`，可带 `browser`；缺省 = 当前激活 browser |
 | host → helper | `back` `forward` `reload` `stop` `quit` | `reload` 多一个 `hard` |
 | host → helper | `zoom-in` `zoom-out` `zoom-reset` | 无（CEF zoom level 步进 0.5；reset 回 0.0） |
 | host → helper | `js` | `code`、`id`（语句形状；页面侧 `eval`，受 CSP `unsafe-eval` 限制） |
@@ -98,7 +101,10 @@ demo: renderer exited status=1 error=9 9
 | host → helper | `context-menu-select` | `id`、`flags`（可选，API 上没开）（**`context-menu` 必须被答**：helper 同时只持有一个请求，不答就再也问不出第二个） |
 | host → helper | `context-menu-dismiss` | 无（`Cancel()`：关掉而不执行任何命令，这条回答的意思是"什么也没选"） |
 | host → helper | `permission-respond` | `id`、`result`（`accept`/`deny`/`dismiss`；**`permission-request` 必须被答**，而且 media 那边的 `accept` 只能是"整份给"——`Continue()` 要求 `allowed_permissions` 等于请求里的 `required`） |
-| helper → host | `ready` | `cef`、`pid`、`url` |
+| helper → host | `ready` | `cef`、`pid`、`url`（第一个 browser 的握手） |
+| helper → host | `browser-created` | `browser`、`url`、`windowed` |
+| helper → host | `browser-selected` | `browser`、`windowed` |
+| helper → host | `browser-closed` | `browser` |
 | helper → host | `address` | `url`（只有真正提交的导航才发） |
 | helper → host | `title` | `title` |
 | helper → host | `loading` | `loading`、`can_go_back`、`can_go_forward` |
@@ -121,6 +127,11 @@ demo: renderer exited status=1 error=9 9
 | helper → host | `permission-request` | `id`、`kind`（`media`/`prompt`）、`origin`、`permissions[]`、`raw`（mask 原值；两套枚举只存在于 `include/internal/cef_types.h`，公共头文件一个都不列） |
 | helper → host | `permission-dismissed` | `id`、`result`（**只有 prompt 有这条**：`CefMediaAccessCallback` 上没有"宿主没答、被浏览器自己关掉"的回调，media 只能一直握着） |
 | helper → host | `status` `closed` | 文本 / 无 |
+
+所有带页面的 helper → host 事件都带 `browser`（当前激活 browser 的 CEF id）；`new-browser`
+创建的 browser 在页面加载前先发 `browser-created`，所以 `url` 是请求的目标地址。现有命令
+里的 `browser` 字段是可选的，缺省仍是“当前激活 browser”，这让旧的单 browser 调用保持
+兼容。
 
 字节数一律走 JSON 的 double：`CefDictionaryValue` **只有 `SetInt(int)`，没有 64 位 setter**，
 而 `GetTotalBytes()` 他们就是 `int64_t`。double 在 2^53 以内是精确的，这条通道上的文件不可能

@@ -32,6 +32,13 @@ typedef struct {
   GtkWidget *find_entry;
   GtkWidget *find_case;
   GtkWidget *find_label;
+
+  /* Multi-browser chrome: one tab button per CEF browser created by this
+   * helper. Standalone (windowed) browsers are listed too until a separate
+   * host window layer exists. */
+  GtkWidget *tabs;
+  GHashTable *tab_buttons;      /* int id -> GtkButton* */
+  int active_browser;
 } Demo;
 
 static Demo demo;
@@ -47,6 +54,13 @@ static uint64_t demo_frame_count (void);
 #endif
 
 static void session_ready (ChromiumSession *session, gpointer data);
+static void session_browser_created (ChromiumSession *session, int id,
+                                     const char *url, gboolean windowed,
+                                     gpointer data);
+static void session_browser_selected (ChromiumSession *session, int id,
+                                      gpointer data);
+static void session_browser_closed (ChromiumSession *session, int id,
+                                    gpointer data);
 static void script_note_helper_gone (const char *reason);
 
 static void
@@ -153,6 +167,98 @@ stop_client (GtkButton *button, gpointer data)
  * socket. Everything below is the toolbar for that; the compositor path is
  * unchanged, so the same widget still works with a plain Wayland client.
  * ------------------------------------------------------------------------ */
+
+static void
+tab_clicked (GtkButton *button, gpointer data)
+{
+  int id = GPOINTER_TO_INT (data);
+  chromium_session_select_browser (demo.session, id);
+}
+
+static void
+session_browser_created (ChromiumSession *session, int id, const char *url,
+                         gboolean windowed, gpointer data)
+{
+  GtkWidget *button;
+  const char *shown = url && *url ? url : (windowed ? "window" : "blank");
+
+  if (!demo.tabs)
+    return;
+  button = gtk_button_new_with_label (shown);
+  gtk_widget_set_tooltip_text (button,
+                               windowed ? "standalone browser" : "tab");
+  g_object_set_data (G_OBJECT (button), "browser-id", GINT_TO_POINTER (id));
+  g_signal_connect (button, "clicked", G_CALLBACK (tab_clicked),
+                    GINT_TO_POINTER (id));
+  gtk_box_append (GTK_BOX (demo.tabs), button);
+  if (!demo.tab_buttons)
+    demo.tab_buttons = g_hash_table_new (g_direct_hash, g_direct_equal);
+  g_hash_table_insert (demo.tab_buttons, GINT_TO_POINTER (id), button);
+  if (id == demo.active_browser)
+    gtk_widget_add_css_class (button, "suggested-action");
+  g_printerr ("demo: browser %d created %s%s\n", id, windowed ? "[window] " : "",
+              shown);
+}
+
+static void
+session_browser_selected (ChromiumSession *session, int id, gpointer data)
+{
+  GtkWidget *button;
+
+  demo.active_browser = id;
+  if (!demo.tab_buttons)
+    return;
+  GHashTableIter iter;
+  gpointer key, value;
+  g_hash_table_iter_init (&iter, demo.tab_buttons);
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    {
+      if (GPOINTER_TO_INT (key) == id)
+        gtk_widget_add_css_class (GTK_WIDGET (value), "suggested-action");
+      else
+        gtk_widget_remove_css_class (GTK_WIDGET (value), "suggested-action");
+    }
+  button = g_hash_table_lookup (demo.tab_buttons, GINT_TO_POINTER (id));
+  if (button)
+    gtk_widget_grab_focus (button);
+  g_printerr ("demo: browser %d selected\n", id);
+}
+
+static void
+session_browser_closed (ChromiumSession *session, int id, gpointer data)
+{
+  GtkWidget *button;
+
+  if (!demo.tab_buttons)
+    return;
+  button = g_hash_table_lookup (demo.tab_buttons, GINT_TO_POINTER (id));
+  if (button)
+    {
+      g_hash_table_remove (demo.tab_buttons, GINT_TO_POINTER (id));
+      gtk_box_remove (GTK_BOX (demo.tabs), button);
+    }
+  g_printerr ("demo: browser %d closed\n", id);
+}
+
+static void
+new_tab_clicked (GtkButton *button, gpointer data)
+{
+  const char *url = demo.session ? chromium_session_get_uri (demo.session) : NULL;
+
+  if (demo.session)
+    chromium_session_new_browser (demo.session, url && *url ? url : "about:blank",
+                                  FALSE);
+}
+
+static void
+new_window_clicked (GtkButton *button, gpointer data)
+{
+  const char *url = demo.session ? chromium_session_get_uri (demo.session) : NULL;
+
+  if (demo.session)
+    chromium_session_new_browser (demo.session, url && *url ? url : "about:blank",
+                                  TRUE);
+}
 
 static void
 session_changed (ChromiumSession *session, gpointer data)
@@ -1331,6 +1437,16 @@ build_toolbar (GtkHeaderBar *header)
   GtkWidget *entry;
   GError *error = NULL;
 
+  button = gtk_button_new_with_label ("+");
+  gtk_widget_set_tooltip_text (button, "新标签 / New tab");
+  g_signal_connect (button, "clicked", G_CALLBACK (new_tab_clicked), NULL);
+  gtk_header_bar_pack_start (header, button);
+
+  button = gtk_button_new_with_label ("▣");
+  gtk_widget_set_tooltip_text (button, "新窗口 / New window");
+  g_signal_connect (button, "clicked", G_CALLBACK (new_window_clicked), NULL);
+  gtk_header_bar_pack_start (header, button);
+
   demo.back = button = gtk_button_new_from_icon_name ("go-previous-symbolic");
   gtk_widget_set_tooltip_text (button, "后退 / Back");
   gtk_widget_set_sensitive (button, FALSE);
@@ -1391,6 +1507,12 @@ build_toolbar (GtkHeaderBar *header)
   g_signal_connect (demo.session, "permission-dismissed",
                     G_CALLBACK (session_permission_dismissed), NULL);
   g_signal_connect (demo.session, "closed", G_CALLBACK (session_closed), NULL);
+  g_signal_connect (demo.session, "browser-created",
+                    G_CALLBACK (session_browser_created), NULL);
+  g_signal_connect (demo.session, "browser-selected",
+                    G_CALLBACK (session_browser_selected), NULL);
+  g_signal_connect (demo.session, "browser-closed",
+                    G_CALLBACK (session_browser_closed), NULL);
 
   if (!chromium_session_start (demo.session, initial_url (), &error))
     {
@@ -1781,7 +1903,9 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
 
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
- * "js <code>", "js-expr <expression>", "a11y-on", "a11y-off", "frames", "wait <ms>",
+ * "js <code>", "js-expr <expression>", "a11y-on", "a11y-off", "frames",
+ * "new-tab <url>", "new-window <url>", "select-browser <id>",
+ * "close-browser <id>", "wait <ms>",
  * "shot <path>", "dump <path>", "hover <x> <y>",
  * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
  * "drag-hold <x0> <y0> <x1> <y1> [button]", "release [button]", "surfaces",
@@ -2040,7 +2164,10 @@ script_run_next (void)
                             !strncmp (line, "find", 4) ||
                             !strncmp (line, "menu-", 5) ||
                             !strncmp (line, "perm-", 5) ||
-                            !strncmp (line, "a11y-", 5)))
+                            !strncmp (line, "a11y-", 5) ||
+                            !strncmp (line, "new-", 4) ||
+                            !strncmp (line, "select-browser", 14) ||
+                            !strncmp (line, "close-browser", 13)))
         {
           /* Not a step that was skipped: without a session no later line of this
            * script can show a page either, so the run has already failed. Print
@@ -2078,6 +2205,24 @@ script_run_next (void)
       else if (!strcmp (line, "a11y-off"))
         {
           chromium_session_set_accessibility (demo.session, FALSE);
+          continue;
+        }
+      else if (!strncmp (line, "new-tab ", 8) ||
+               !strncmp (line, "new-window ", 11))
+        {
+          gboolean windowed = !strncmp (line, "new-window ", 11);
+          const char *url = line + (windowed ? 11 : 8);
+          chromium_session_new_browser (demo.session, url, windowed);
+          continue;
+        }
+      else if (!strncmp (line, "select-browser ", 15))
+        {
+          chromium_session_select_browser (demo.session, atoi (line + 15));
+          continue;
+        }
+      else if (!strncmp (line, "close-browser ", 14))
+        {
+          chromium_session_close_browser (demo.session, atoi (line + 14));
           continue;
         }
       else if (!strncmp (line, "js-expr ", 8))
@@ -2870,6 +3015,9 @@ activate (GApplication *application, gpointer data)
     }
 
   box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  demo.tabs = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_add_css_class (demo.tabs, "toolbar");
+  gtk_box_append (GTK_BOX (box), demo.tabs);
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (demo.view));
   gtk_widget_set_vexpand (GTK_WIDGET (demo.view), TRUE);
   gtk_window_set_child (GTK_WINDOW (demo.window), box);

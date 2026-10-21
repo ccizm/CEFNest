@@ -34,6 +34,20 @@ void               chromium_session_set_accessibility (ChromiumSession *self,
  * from a timer if a host wants a graph. */
 uint64_t           chromium_session_get_frame_count (ChromiumSession *self);
 
+/* One helper can host several browsers. The first one is started by
+ * chromium_session_start(); these create further browsers in the same helper.
+ * @windowed FALSE puts the browser in the shared tab window, TRUE creates a
+ * standalone CefWindow. ::browser-created (id, url, windowed),
+ * ::browser-selected (id) and ::browser-closed (id) report the lifecycle; CEF
+ * assigns @id, so a host should key its own tab/window map from the signal. */
+void               chromium_session_new_browser   (ChromiumSession *self,
+                                                   const char *url,
+                                                   gboolean windowed);
+void               chromium_session_select_browser (ChromiumSession *self,
+                                                    int id);
+void               chromium_session_close_browser  (ChromiumSession *self,
+                                                    int id);
+
 void               chromium_session_load_uri      (ChromiumSession *self,
                                                    const char *uri);
 void               chromium_session_go_back       (ChromiumSession *self);

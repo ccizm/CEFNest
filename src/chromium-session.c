@@ -35,6 +35,9 @@ enum {
   SIG_POPUP_REQUESTED,
   SIG_PAGE_MESSAGE,
   SIG_PRIMARY_SELECTION,
+  SIG_BROWSER_CREATED,
+  SIG_BROWSER_SELECTED,
+  SIG_BROWSER_CLOSED,
   SIG_DOWNLOAD_BEGIN,
   SIG_DOWNLOAD_PROGRESS,
   SIG_DOWNLOAD_END,
@@ -362,6 +365,29 @@ handle_event (ChromiumSession *self, const char *line)
 
       chromium_session_set_state (self, NULL, NULL,
                                   loading, can_go_back, can_go_forward);
+      return;
+    }
+
+  if (!strcmp (event, "browser-created"))
+    {
+      int id = (int) json_object_get_int_member (object, "browser");
+      g_signal_emit (self, signals[SIG_BROWSER_CREATED], 0, id,
+                     json_object_get_string_member (object, "url"),
+                     json_object_get_boolean_member (object, "windowed"));
+      return;
+    }
+
+  if (!strcmp (event, "browser-selected"))
+    {
+      int id = (int) json_object_get_int_member (object, "browser");
+      g_signal_emit (self, signals[SIG_BROWSER_SELECTED], 0, id);
+      return;
+    }
+
+  if (!strcmp (event, "browser-closed"))
+    {
+      int id = (int) json_object_get_int_member (object, "browser");
+      g_signal_emit (self, signals[SIG_BROWSER_CLOSED], 0, id);
       return;
     }
 
@@ -1855,6 +1881,55 @@ chromium_session_set_view (ChromiumSession *self, ChromiumView *view)
   self->view = view;
 }
 
+void
+chromium_session_new_browser (ChromiumSession *self, const char *url,
+                              gboolean windowed)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "new-browser");
+  command_add_string (builder, "url", url ? url : "");
+  command_add_string (builder, "mode", windowed ? "window" : "tab");
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_select_browser (ChromiumSession *self, int id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "select-browser");
+  json_builder_set_member_name (builder, "browser");
+  json_builder_add_int_value (builder, id);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_close_browser (ChromiumSession *self, int id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "close-browser");
+  json_builder_set_member_name (builder, "browser");
+  json_builder_add_int_value (builder, id);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
 uint64_t
 chromium_session_get_frame_count (ChromiumSession *self)
 {
@@ -2270,6 +2345,16 @@ chromium_session_class_init (ChromiumSessionClass *klass)
   signals[SIG_PRIMARY_SELECTION] =
     g_signal_new ("primary-selection", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_BROWSER_CREATED] =
+    g_signal_new ("browser-created", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_BOOLEAN);
+  signals[SIG_BROWSER_SELECTED] =
+    g_signal_new ("browser-selected", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
+  signals[SIG_BROWSER_CLOSED] =
+    g_signal_new ("browser-closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
   signals[SIG_POPUP_REQUESTED] =
     g_signal_new ("popup-requested", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);

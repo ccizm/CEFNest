@@ -119,6 +119,27 @@ long g_auto_quit_ms = 0;
 CefRefPtr<CefBrowser> g_browser;
 CefRefPtr<CefWindow> g_window;
 
+/* One helper can own several browsers. A tab and a standalone window differ
+ * only in which CefWindow the CefBrowserView is parented to; everything on the
+ * control channel is keyed by the browser id CEF assigns. */
+struct BrowserSlot {
+  int slot = 0;                 /* request-side key, until CEF assigns id */
+  bool windowed = false;
+  CefRefPtr<CefBrowser> browser;
+  CefRefPtr<CefBrowserView> view;
+  CefRefPtr<CefWindow> window;
+  std::string start_url;
+};
+std::map<int, BrowserSlot> g_browser_slots;  /* keyed by CEF browser id */
+std::map<int, int> g_slot_to_browser;        /* pending slot -> assigned id */
+int g_next_browser_slot = 1;
+int g_active_browser_id = 0;
+int g_select_slot = 0;
+CefRefPtr<CefWindow> g_tab_window;
+
+int CreateNewBrowser(const std::string& url, bool windowed);
+void SelectBrowserById(int id);
+
 void QuitOnce() {
   if (g_quit_requested)
     return;
@@ -338,6 +359,8 @@ void Emit(CefRefPtr<CefDictionaryValue> dict) {
 CefRefPtr<CefDictionaryValue> NewEvent(const char* name) {
   CefRefPtr<CefDictionaryValue> dict = CefDictionaryValue::Create();
   dict->SetString("event", name);
+  if (g_active_browser_id != 0)
+    dict->SetInt("browser", g_active_browser_id);
   return dict;
 }
 
@@ -345,6 +368,43 @@ void EmitStatus(const std::string& message) {
   CefRefPtr<CefDictionaryValue> dict = NewEvent("status");
   dict->SetString("message", message);
   Emit(dict);
+}
+
+static BrowserSlot* FindSlotForBrowser(CefRefPtr<CefBrowser> browser) {
+  if (!browser)
+    return nullptr;
+  auto it = g_browser_slots.find(browser->GetIdentifier());
+  return it == g_browser_slots.end() ? nullptr : &it->second;
+}
+
+void SelectBrowserById(int id) {
+  auto it = g_browser_slots.find(id);
+  if (it == g_browser_slots.end() || !it->second.browser)
+    {
+      EmitStatus("no-such-browser");
+      return;
+    }
+
+  BrowserSlot* slot = &it->second;
+  BrowserSlot* old = FindSlotForBrowser(g_browser);
+  if (old && old != slot && old->view)
+    old->view->SetVisible(false);
+
+  g_browser = slot->browser;
+  g_window = slot->window;
+  g_active_browser_id = id;
+  if (slot->view)
+    {
+      slot->view->SetVisible(true);
+      if (slot->window)
+        slot->window->Layout();
+      slot->view->RequestFocus();
+    }
+
+  CefRefPtr<CefDictionaryValue> event = NewEvent("browser-selected");
+  event->SetInt("browser", id);
+  event->SetBool("windowed", slot->windowed);
+  Emit(event);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1126,10 +1186,51 @@ void HandleCommand(const std::string& line) {
   const std::string name = command->GetString("cmd").ToString();
 
   if (name == "quit") {
-    if (g_browser && g_browser->GetHost())
-      g_browser->GetHost()->CloseBrowser(true);
-    else
+    /* A multi-browser helper has to close every browser, not just the active
+     * one: OnBeforeClose only ends the message loop when the map is empty. */
+    bool any = false;
+    for (auto& entry : g_browser_slots) {
+      if (entry.second.browser && entry.second.browser->GetHost()) {
+        if (!entry.second.windowed && entry.second.view && entry.second.window)
+          entry.second.window->RemoveChildView(entry.second.view);
+        entry.second.browser->GetHost()->CloseBrowser(true);
+        any = true;
+      }
+    }
+    if (!any)
       QuitOnce();
+    return;
+  }
+
+  if (name == "new-browser") {
+    const std::string url = command->GetString("url").ToString();
+    const bool windowed =
+        command->HasKey("mode") &&
+        command->GetString("mode").ToString() == "window";
+    CreateNewBrowser(url, windowed);
+    return;
+  }
+
+  if (name == "select-browser") {
+    SelectBrowserById(command->GetInt("browser"));
+    return;
+  }
+
+  if (name == "close-browser") {
+    const int id = command->HasKey("browser")
+                       ? command->GetInt("browser")
+                       : g_active_browser_id;
+    auto it = g_browser_slots.find(id);
+    if (it == g_browser_slots.end() || !it->second.browser) {
+      EmitStatus("no-such-browser");
+      return;
+    }
+    /* A tab is a child of the shared CefWindow. Closing the browser while its
+     * view is still attached makes CEF tear the window down, which would take
+     * every other tab with it; detach first, then close. */
+    if (!it->second.windowed && it->second.view)
+      it->second.window->RemoveChildView(it->second.view);
+    it->second.browser->GetHost()->CloseBrowser(true);
     return;
   }
 
@@ -1620,6 +1721,8 @@ class HelperClient : public CefClient,
                      public CefKeyboardHandler,
                      public CefRequestHandler {
  public:
+  explicit HelperClient(int slot) : slot_(slot) {}
+
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override {
     return this;
   }
@@ -1669,15 +1772,56 @@ class HelperClient : public CefClient,
 
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
-    g_browser = browser;
-    fprintf(stderr, "helper: browser created, id=%d\n",
-            browser->GetIdentifier());
+    auto pending = g_slot_to_browser.find(slot_);
+    BrowserSlot* slot = nullptr;
+    if (pending != g_slot_to_browser.end()) {
+      auto it = g_browser_slots.find(pending->second);
+      if (it != g_browser_slots.end())
+        slot = &it->second;
+      g_slot_to_browser.erase(pending);
+    }
+    if (slot) {
+      /* The map starts under the request slot so commands can find the view
+       * before CEF has finished creating the browser. Copy before erasing:
+       * the erase destroys the value that `slot` points at. */
+      BrowserSlot entry = *slot;
+      g_browser_slots.erase(entry.slot);
+      entry.slot = browser->GetIdentifier();
+      entry.browser = browser;
+      g_browser_slots[entry.slot] = entry;
+      slot = &g_browser_slots[entry.slot];
+    }
 
-    CefRefPtr<CefDictionaryValue> dict = NewEvent("ready");
-    dict->SetString("cef", CEF_VERSION);
-    dict->SetInt("pid", static_cast<int>(::getpid()));
-    dict->SetString("url", browser->GetMainFrame()->GetURL().ToString());
-    Emit(dict);
+    const bool select_this = slot && slot->slot == g_select_slot;
+    if (!g_browser || select_this)
+      SelectBrowserById(browser->GetIdentifier());
+    else if (slot && slot->view)
+      slot->view->SetVisible(false);
+    if (select_this)
+      g_select_slot = 0;
+
+    fprintf(stderr, "helper: browser created, id=%d slot=%d windowed=%d\n",
+            browser->GetIdentifier(), slot ? slot->slot : 0,
+            slot ? slot->windowed : 0);
+
+    CefRefPtr<CefDictionaryValue> created = NewEvent("browser-created");
+    created->SetInt("browser", browser->GetIdentifier());
+    created->SetString("url", slot && !slot->start_url.empty()
+                                  ? slot->start_url
+                                  : browser->GetMainFrame()->GetURL().ToString());
+    created->SetBool("windowed", slot ? slot->windowed : false);
+    Emit(created);
+
+    /* The first browser still carries the original ready handshake; later
+     * browser-created events are enough for a host that already knows the
+     * helper. */
+    if (g_browser_slots.size() == 1) {
+      CefRefPtr<CefDictionaryValue> dict = NewEvent("ready");
+      dict->SetString("cef", CEF_VERSION);
+      dict->SetInt("pid", static_cast<int>(::getpid()));
+      dict->SetString("url", browser->GetMainFrame()->GetURL().ToString());
+      Emit(dict);
+    }
 
     // Deterministic accessibility enablement: a windowed browser in
     // STATE_ENABLED runs Chromium's complete mode — all platform (AT-SPI)
@@ -1731,10 +1875,31 @@ class HelperClient : public CefClient,
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
-    fprintf(stderr, "helper: browser closing\n");
-    g_browser = nullptr;
-    Emit(NewEvent("closed"));
-    QuitOnce();
+    const int id = browser->GetIdentifier();
+    fprintf(stderr, "helper: browser %d closing\n", id);
+
+    auto it = g_browser_slots.find(id);
+    if (it != g_browser_slots.end())
+      g_browser_slots.erase(it);
+
+    CefRefPtr<CefDictionaryValue> closed = NewEvent("browser-closed");
+    closed->SetInt("browser", id);
+    Emit(closed);
+
+    if (g_browser_slots.empty()) {
+      g_browser = nullptr;
+      g_window = nullptr;
+      g_active_browser_id = 0;
+      Emit(NewEvent("closed"));
+      QuitOnce();
+      return;
+    }
+
+    if (g_active_browser_id == id) {
+      g_browser = nullptr;
+      auto next = g_browser_slots.begin();
+      SelectBrowserById(next->first);
+    }
   }
 
   void OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
@@ -1873,6 +2038,7 @@ class HelperClient : public CefClient,
   IMPLEMENT_REFCOUNTING(HelperClient);
 
  private:
+  int slot_ = 0;
   CefRefPtr<CefDownloadHandler> download_handler_{new HelperDownloadHandler};
   CefRefPtr<CefFindHandler> find_handler_{new HelperFindHandler};
   CefRefPtr<CefContextMenuHandler> context_menu_handler_{
@@ -1906,10 +2072,16 @@ class HelperWindowDelegate : public CefWindowDelegate {
 
   void OnWindowDestroyed(CefRefPtr<CefWindow> window) override {
     CEF_REQUIRE_UI_THREAD();
-    g_window = nullptr;
+    if (g_window == window)
+      g_window = nullptr;
+    if (g_tab_window == window)
+      g_tab_window = nullptr;
     fprintf(stderr, "helper: window destroyed\n");
     browser_view_ = nullptr;
-    QuitOnce();
+    /* A tab's window outlives individual browser views; only the last window
+     * may end the message loop. */
+    if (g_browser_slots.empty())
+      QuitOnce();
   }
 
   // The page is the whole window: the GTK host draws the chrome.
@@ -1941,6 +2113,76 @@ class HelperWindowDelegate : public CefWindowDelegate {
  private:
   CefRefPtr<CefBrowserView> browser_view_;
 };
+
+int CreateNewBrowser(const std::string& url, bool windowed) {
+  const int slot = g_next_browser_slot++;
+  CefRefPtr<HelperClient> client(new HelperClient(slot));
+  CefRefPtr<HelperBrowserViewDelegate> view_delegate(
+      new HelperBrowserViewDelegate);
+
+  /* CefBrowserView::CreateBrowserView can reach OnAfterCreated synchronously;
+   * the slot must already be discoverable by the request-side id. */
+  BrowserSlot entry;
+  entry.slot = slot;
+  entry.windowed = windowed;
+  entry.start_url = url;
+  g_browser_slots[slot] = entry;
+  g_slot_to_browser[slot] = slot;
+  /* Set before CreateBrowserView: OnAfterCreated can run synchronously and then
+   * it is this flag that makes the new tab active. */
+  g_select_slot = slot;
+
+  CefBrowserSettings browser_settings;
+  browser_settings.background_color = 0xff101828;
+  CefRefPtr<CefBrowserView> view = CefBrowserView::CreateBrowserView(
+      client, url, browser_settings, nullptr, nullptr, view_delegate);
+  if (!view) {
+    fprintf(stderr, "helper: CreateBrowserView failed for slot %d\n", slot);
+    g_browser_slots.erase(slot);
+    g_slot_to_browser.erase(slot);
+    EmitStatus("browser-create-failed");
+    return 0;
+  }
+  g_browser_slots[slot].view = view;
+
+  if (!windowed && g_tab_window) {
+    g_browser_slots[slot].window = g_tab_window;
+    g_tab_window->AddChildView(view);
+    const bool active = g_active_browser_id == slot || g_select_slot == slot;
+    if (active) {
+      BrowserSlot* old = FindSlotForBrowser(g_browser);
+      if (old && old->view && old->slot != slot)
+        old->view->SetVisible(false);
+      view->SetVisible(true);
+      g_tab_window->Layout();
+      view->RequestFocus();
+    } else {
+      view->SetVisible(false);
+    }
+    fprintf(stderr, "helper: new tab slot %d in tab window%s\n", slot,
+            active ? " (active)" : "");
+    return slot;
+  }
+
+  CefRefPtr<HelperWindowDelegate> window_delegate(
+      new HelperWindowDelegate(view));
+  CefRefPtr<CefWindow> window =
+      CefWindow::CreateTopLevelWindow(window_delegate);
+  if (!window) {
+    fprintf(stderr, "helper: CreateTopLevelWindow failed for slot %d\n", slot);
+    g_browser_slots.erase(slot);
+    g_slot_to_browser.erase(slot);
+    EmitStatus("window-create-failed");
+    return 0;
+  }
+
+  g_browser_slots[slot].window = window;
+  if (!windowed && !g_tab_window)
+    g_tab_window = window;
+  fprintf(stderr, "helper: new %s slot %d\n",
+          windowed ? "window" : "tab", slot);
+  return slot;
+}
 
 void PrintEnvironment() {
   // GDK_BACKEND belongs here with the display variables: GTK picks its backend
@@ -2030,32 +2272,13 @@ int main(int argc, char** argv) {
       socket_path.empty() ? PickUrl(argc, argv) : std::string();
   fprintf(stderr, "helper: url=%s\n", url.c_str());
 
-  CefRefPtr<HelperClient> client(new HelperClient);
-  CefRefPtr<HelperBrowserViewDelegate> view_delegate(
-      new HelperBrowserViewDelegate);
-
-  CefBrowserSettings browser_settings;
-  browser_settings.background_color = 0xff101828;
-
-  CefRefPtr<CefBrowserView> browser_view = CefBrowserView::CreateBrowserView(
-      client, url, browser_settings, nullptr, nullptr, view_delegate);
-  if (!browser_view) {
-    fprintf(stderr, "helper: CreateBrowserView failed\n");
+  const int first_slot = CreateNewBrowser(url, false);
+  if (first_slot <= 0) {
     control.Shutdown();
     CefShutdown();
     return 1;
   }
-
-  CefRefPtr<HelperWindowDelegate> window_delegate(
-      new HelperWindowDelegate(browser_view));
-  CefRefPtr<CefWindow> window =
-      CefWindow::CreateTopLevelWindow(window_delegate);
-  if (!window) {
-    fprintf(stderr, "helper: CreateTopLevelWindow failed\n");
-    control.Shutdown();
-    CefShutdown();
-    return 1;
-  }
+  g_select_slot = first_slot;
 
   CefRunMessageLoop();
   control.Shutdown();
