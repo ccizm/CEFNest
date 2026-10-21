@@ -134,9 +134,15 @@ dismiss（`session: context menu dismissed by a navigation`），`real-nav` 门�
   `menu_pending` 清掉并发送 `context-menu-dismiss`；如果 GTK 先 popdown、后发按钮回调，同一次点击的
   命令就丢了。现在 `::closed` 只安排一个 idle，由 `menu_release_later()` 在事件排空后决定：还 pending
   才 dismiss；同一击已经 `select` 就什么都不发。
-- **popover 拆掉后把键盘焦点还给 `ChromiumView`。** 菜单显示期间它需要拿焦点；关闭/选中后如果焦点为空
-  或还停在旧菜单上，session 在 50 ms 后把它交还 view（若用户已经点了地址栏等别的控件则不动），否则
-  页面会保持最后一帧但再也收不到键盘。实测日志：菜单打开 `has-focus=0`，dismiss 后回到 `has-focus=1`。
+- **菜单是非模态的，页面焦点不丢。** `gtk_popover_set_autohide(FALSE)` 避免 GtkPopover 的 modal
+  keyboard grab；打开期间 `ChromiumView` 仍 `has-focus=1`，页面继续拥有键盘。关闭菜单不再靠
+  popover 的 grab，而由 session 装的三个守卫负责：窗口上的 capture button 事件（点在菜单 surface
+  上的排除）、capture Escape、以及窗口 `notify::active` 变 false。点击菜单按钮后仍保留原来的
+  50 ms `grab_focus(ChromiumView)` 兜底；用户点了地址栏等控件则不抢。
+
+  非模态菜单的键盘导航由 session 自己的窗口 capture key controller 提供，**焦点始终留在页面**：
+  `Up/Down` 或 `Tab/Shift+Tab` 移动，`Home/End` 到两端，`Enter/Space` 激活，`Esc` 关闭；
+  控制/Alt/Super 组合键不下拦，仍交给页面。选中行用 `cefnest-menu-selected` 高亮。鼠标点选仍然有效。
 - Wayland 上 popover 是**它自己的 surface**，所以 `shot` 抓 view 抓不到它。这就是 session 要打那条
   `context menu mapped=1 size=...` debug 的原因：进程内唯一能证明「菜单到了屏幕」的地方，也是门禁
   断言它的地方。**但这条断言问的是显示器，不是菜单**：`./test/ci-session.sh` 那块没有输出设备的
@@ -195,3 +201,40 @@ dismiss（`session: context menu dismissed by a navigation`），`real-nav` 门�
 - `flags`（中键、修饰键）在 API 上没开；check / radio 的勾选标记没画；submenu 不展开。
 - 一条挂起的请求在 helper **退出**时会怎么样，没测：`context-menu-select` 发不出去，宿主那边
   `menu_pending` 立着，但 session 已经关了。等 `docs/session-lifecycle.md` 那侧有结论时一起看。
+
+## 10. 拼写建议默认关闭；打开时菜单关掉后把光标收回来（2026-10-21）
+
+**默认关闭**：helper 给 Chromium 加 `--disable-spell-checking`，并在每次主 frame
+`load-end` 后把 `input/textarea/[contenteditable]` 的 `spellcheck` 设为 `false`（包括之后
+新增的节点）。这样不会有拼写建议菜单，也不会先把 misspelled word 选中，粘贴问题从源头消失。
+需要保留浏览器拼写体验时设 `CHROMIUM_SPELLCHECK=1`。
+
+如果显式打开，仍保留下面的校验/恢复逻辑：
+
+Chromium 在把拼写建议菜单交给宿主之前，会先把 misspelled word 选成当前选区。菜单关闭后
+这个选区还在，下一次 Ctrl+V 就替换整个词，而不是插在光标处。
+
+helper 在 `RunContextMenu` 里记录：
+
+```text
+IsEditable() && GetMisspelledWord() 非空
+```
+
+并在菜单回答后执行一段不经过 `eval` 的脚本，把 input/textarea 的 `selectionEnd` 折成
+caret；contenteditable 则把 document selection 折到末尾。 **`MENU_ID_PASTE` /
+`MENU_ID_PASTE_MATCH_STYLE` 要在 `Continue` 之前折**，这样菜单里的“粘贴”不会把选中的词
+替换掉；**`MENU_ID_SELECT_ALL` 不折**，因为选区就是它的结果；其他命令（复制、建议、自定义
+行）在 `Continue` 之后折，建议替换仍然按 CEF 自己的逻辑完成。helper 自己关菜单
+（`OnContextMenuDismissed`）也会折。
+
+影响范围是刻意收窄的：
+
+- 只有 **可编辑且 `GetMisspelledWord()` 非空** 的菜单；
+- 链接、图片、媒体、普通选区、没有拼写错误的编辑菜单都不折 caret；
+- 菜单外的键盘 Ctrl+V 和菜单里的 Paste 都会在光标处插入，不会再替换整个词；
+- 折到 `selectionEnd` 是“词后面”而不是原始点击位置；CEF 没有把原 caret 放到 params 里，
+  这是当前能做的最小修复。若以后要精确到点击字符，需要把 CEF 的 selection/caret 信息
+  一起上线，或做更细的页面事件记录。
+
+本地 CEF 的 minimal profile 没有拼写字典，复现不出 suggestion 菜单；这条按 CEF 回调路径
+实现，需在带字典的真实 profile 上手工确认。

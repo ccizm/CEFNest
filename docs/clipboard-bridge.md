@@ -106,10 +106,15 @@ client: selection cleared
 四种是 +18，`--refused` 是 +13（绝对数随起始环境漂移，看增量）。两个方向在改完之后又各跑
 了一遍：`pasting 19 bytes of the widget clipboard` 和 `a client copied ... (27 bytes)`。
 
-## 5. 还没做的
+## 5. 中键主选区（已接）与还没做的
 
 * 原生 Wayland 宿主下、窗口真的拿到键盘焦点时的那一次端到端确认——需要一个真人点进窗口，
   或者一个能给窗口 focus 的无头宿主（机器上没有 weston/cage，没法自己起一个会话）。
 * 图片、URI 列表这类非文本剪贴板仍然不桥：`mime_is_text()` 之外的一律当作"没有选区"播出去，
   避免客户端粘到一份过期文本。
-* `zwp_primary_selection_v1`（X11 的中键选区）没有实现，属于 #28 的协议天花板决定项。
+* `zwp_primary_selection_device_manager_v1` 已在 2026-10-21 接上：`nested-data-device.c` 里
+  有独立的 primary source/device/offer，host→page 实测把 274 字节的 host primary 粘进
+  textarea。page→host 的 source/offer 路径也已实现，但本轮 CEF 只创建 primary device，
+  页面选中文本**没有创建 primary source**；这是 CEF/Chromium 的写 primary 行为，不是协议
+  桥缺失。验证用 `CHROMIUM_PRIMARYSET` / `CHROMIUM_PRIMARYWATCH`，fixture 是
+  `test/primary-page.html`。

@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<body style="margin:0;font:18px sans-serif;background:#fff;color:#024">
+  <p style="margin:20px">primary selection fixture</p>
+  <textarea id="t" style="position:absolute;left:20px;top:70px;width:520px;height:120px;font:18px sans-serif">primary from the page</textarea>
+  <pre id="log" style="position:absolute;left:20px;top:220px"></pre>
+<script>
+  const t = document.getElementById('t');
+  t.focus();
+  t.setSelectionRange(0, 7);
+  document.getElementById('log').textContent =
+    'selection=' + t.selectionStart + '..' + t.selectionEnd;
+</script>
+</body>

@@ -1779,7 +1779,8 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
 
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
- * "js <code>", "wait <ms>", "shot <path>", "dump <path>", "hover <x> <y>",
+ * "js <code>", "js-expr <expression>", "wait <ms>", "shot <path>",
+ * "dump <path>", "hover <x> <y>",
  * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
  * "drag-hold <x0> <y0> <x1> <y1> [button]", "release [button]", "surfaces",
  * "wheel <dx> <dy>", "mute", "unmute", "download-accept <path>",
@@ -2027,6 +2028,7 @@ script_run_next (void)
       /* Everything but the page commands works without a helper: a plain
        * Wayland client can be driven through the same script. */
       if (!demo.session && (!strncmp (line, "load ", 5) || !strncmp (line, "js ", 3) ||
+                            !strncmp (line, "js-expr ", 8) ||
                             !strcmp (line, "back") || !strcmp (line, "forward") ||
                             !strcmp (line, "reload") || !strcmp (line, "reload-hard") ||
                             !strcmp (line, "stop") || !strcmp (line, "mute") ||
@@ -2058,6 +2060,12 @@ script_run_next (void)
       else if (!strncmp (line, "load ", 5))
         {
           chromium_session_load_uri (demo.session, line + 5);
+          continue;
+        }
+      else if (!strncmp (line, "js-expr ", 8))
+        {
+          chromium_session_run_javascript_expression (demo.session, line + 8,
+                                                      session_script.index);
           continue;
         }
       else if (!strncmp (line, "js ", 3))
@@ -2597,6 +2605,37 @@ clipboard_seed (const char *why)
               gtk_window_is_active (demo.window));
 }
 
+static void
+primary_read_done (GObject *clipboard, GAsyncResult *result, gpointer data)
+{
+  g_autofree char *text = gdk_clipboard_read_text_finish (GDK_CLIPBOARD (clipboard),
+                                                          result, NULL);
+
+  g_printerr ("demo: primary is '%s'\n", text ? text : "(no text)");
+}
+
+static void
+primary_changed (GObject *clipboard, GParamSpec *pspec, gpointer data)
+{
+  gdk_clipboard_read_text_async (GDK_CLIPBOARD (clipboard), NULL,
+                                 primary_read_done, NULL);
+}
+
+static void
+primary_seed (const char *why)
+{
+  const char *seed = g_getenv ("CHROMIUM_PRIMARYSET");
+  GdkClipboard *clipboard;
+
+  if (!seed || !*seed || !demo.window)
+    return;
+
+  clipboard = gtk_widget_get_primary_clipboard (GTK_WIDGET (demo.window));
+  gdk_clipboard_set_text (clipboard, seed);
+  g_printerr ("demo: seeded the primary selection with '%s' (%s, window active=%d)\n",
+              seed, why, gtk_window_is_active (demo.window));
+}
+
 /* Wayland gives the selection to a client only while that client holds keyboard
  * focus, so a seed sent before the window is activated can be taken straight
  * back — and an empty clipboard looks exactly like a bridge that cannot paste.
@@ -2611,24 +2650,43 @@ window_active_changed (GtkWindow *window, GParamSpec *pspec, gpointer data)
 
   reseeded = TRUE;
   clipboard_seed ("on activation");
+  primary_seed ("on activation");
 }
 
 static void
 setup_clipboard_test (void)
 {
-  GdkClipboard *clipboard;
   const char *seed = g_getenv ("CHROMIUM_CLIPSET");
+  const char *watch = g_getenv ("CHROMIUM_CLIPWATCH");
+  const char *primary = g_getenv ("CHROMIUM_PRIMARYSET");
+  const char *primary_watch = g_getenv ("CHROMIUM_PRIMARYWATCH");
 
-  if (!seed && !g_getenv ("CHROMIUM_CLIPWATCH"))
+  if (!seed && !watch && !primary && !primary_watch)
     return;
 
-  clipboard = gdk_display_get_clipboard (gtk_widget_get_display (GTK_WIDGET (demo.window)));
-  g_signal_connect (clipboard, "notify::content", G_CALLBACK (clipboard_changed), NULL);
-
-  if (seed && *seed)
+  if (seed || watch)
     {
-      g_signal_connect (demo.window, "notify::active", G_CALLBACK (window_active_changed), NULL);
-      clipboard_seed ("at startup");
+      GdkClipboard *clipboard =
+        gdk_display_get_clipboard (gtk_widget_get_display (GTK_WIDGET (demo.window)));
+      g_signal_connect (clipboard, "notify::content", G_CALLBACK (clipboard_changed), NULL);
+    }
+
+  if (primary || primary_watch)
+    {
+      GdkClipboard *clipboard =
+        gtk_widget_get_primary_clipboard (GTK_WIDGET (demo.window));
+      g_signal_connect (clipboard, "notify::content",
+                        G_CALLBACK (primary_changed), NULL);
+    }
+
+  if ((seed && *seed) || (primary && *primary))
+    {
+      g_signal_connect (demo.window, "notify::active",
+                        G_CALLBACK (window_active_changed), NULL);
+      if (seed && *seed)
+        clipboard_seed ("at startup");
+      if (primary && *primary)
+        primary_seed ("at startup");
     }
 }
 

@@ -347,6 +347,8 @@ chromium_view_on_map (GtkWidget *widget, gpointer data)
    * clients copy to and paste from. */
   nested_compositor_set_clipboard (self->compositor,
                                    gdk_display_get_clipboard (gtk_widget_get_display (widget)));
+  nested_compositor_set_primary_clipboard (
+    self->compositor, gtk_widget_get_primary_clipboard (widget));
 
   /* Client frames are paced by the same display cycle the widget paints on:
    * a client that asks for a frame is answered at the start of a cycle, so
@@ -361,24 +363,6 @@ chromium_view_on_map (GtkWidget *widget, gpointer data)
                            self, 0);
   chromium_view_watch_fullscreen (self);
   chromium_view_watch_drops (self);
-
-
-  nested_compositor_set_clipboard (self->compositor,
-                                   gdk_display_get_clipboard (gtk_widget_get_display (widget)));
-
-  /* Client frames are paced by the same display cycle the widget paints on:
-   * a client that asks for a frame is answered at the start of a cycle, so
-   * what it commits lands on the next one instead of a fixed timer quantum
-   * later — and a hidden window pauses the clients along with it. */
-  nested_compositor_set_frame_clock (self->compositor,
-                                     gtk_widget_get_frame_clock (GTK_WIDGET (widget)));
-  /* Page fullscreen requests turn into window fullscreen here, and the
-   * window's real state flows back to the client. */
-  g_signal_connect_object (self->compositor, "window-fullscreen-request",
-                           G_CALLBACK (chromium_view_on_fullscreen_request),
-                           self, 0);
-  chromium_view_watch_fullscreen (self);
-
 
   surface = gtk_native_get_surface (GTK_NATIVE (gtk_widget_get_native (GTK_WIDGET (self))));
 
@@ -403,6 +387,7 @@ chromium_view_on_unmap (GtkWidget *widget, gpointer data)
 
   chromium_view_unwatch_scale (self);
   nested_compositor_set_clipboard (self->compositor, NULL);
+  nested_compositor_set_primary_clipboard (self->compositor, NULL);
   nested_compositor_set_frame_clock (self->compositor, NULL);
 
   if (self->fullscreen_notify_handler)

@@ -103,6 +103,15 @@ surface 真的上了屏"的门禁读它，把那几条报成 skip 并把数量�
 ./test/ci-all.sh                    # 全套
 ./test/ci-all.sh find menu          # 只点名跑两条
 KEEP_LOGS=1 ./test/ci-all.sh        # 保留每个 run 的完整 transcript
+
+真实站点巡检是 opt-in，不在默认七条里（外部站点会改版/限流）：
+
+```bash
+CI_ALL_REAL=1 ./test/ci-all.sh real
+```
+
+`real` 这一行由 `test/real-sites.sh` 自己为每站起 `ci-session.sh`；`ci-all` 不再套外层
+session。产物和五站表见 `docs/real-sites.md`。
 ```
 
 每个 run 单独起会话，是拿 ~10s/条换"挂掉的那条只烧自己那一行"：塞进同一块显示器时，

@@ -383,7 +383,7 @@ given back、退休后再进来一条仍然 taken。每趟 check 里还断言 `n
 - **人工实测通过（2026-10-21）**：真实文本拖入 → 无卡死，页面 drop 处理器
   触发（标题 GOT-DROP）。
 - 拖动图标目前是客户端给的 surface，宿主没有替换成 GTK 的拖拽图像。
-- 越过窗口边界之后两条 GTK 腿都已接上并经人工拖文本实测（出界：编辑器收到 token；拖入：页面 drop 触发、无卡死）：`gdk_drag_begin` 用
-  toplevel 的 native surface，文本走 `text/plain`，图片走临时文件 + `GdkFileList`（§6.4）。拖入那条
-  对面的外层 `GdkDrop` 还没有 `GtkDropTarget`。两个都要 GDK 手里有一次真实的、它自己见过的按下，
-  脚本给不了。
+- 越过窗口边界之后两条 GTK 腿都已接上并经人工拖文本实测（出界：编辑器收到 token；拖入：页面 drop
+  触发、无卡死）：出界 `gdk_drag_begin` 用 toplevel 的 native surface，文本走 `text/plain`，图片走
+  临时文件 + `GdkFileList`（§6.4）；拖入由 `GtkDropTarget` 在真实 drop 后合成嵌套拖（§7.5）。
+  两条都需要 GDK 手里有一次真实的、它自己见过的按下，脚本给不了。

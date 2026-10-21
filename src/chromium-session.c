@@ -87,8 +87,16 @@ struct _ChromiumSession {
    * it, and the two widgets that draw it while this side is the one that does. */
   gboolean menu_pending;
   GtkWidget *menu_popover;
+  GtkWidget *menu_box;
+  GtkWidget *menu_selected;
   guint menu_release_source;
   guint menu_focus_source;
+  /* Non-modal menu guards: outside click, Escape, and the window going
+   * inactive. They are installed with the popover and removed on release. */
+  GtkWindow *menu_window;
+  GtkEventController *menu_outside_controller;
+  GtkEventController *menu_key_controller;
+  gulong menu_active_handler;
 
   /* Permission requests this side has asked about and not yet answered. Unlike a
    * menu, several are open at once, so it is a set of ids rather than a flag —
@@ -745,6 +753,224 @@ menu_restore_view_focus (ChromiumSession *self, GtkWidget *popover)
     gtk_widget_grab_focus (GTK_WIDGET (self->view));
 }
 
+/* The menu is deliberately non-modal: GtkPopover's autohide is what grabs the
+ * keyboard and makes the page lose focus. A context menu is a pointer gesture,
+ * so the page keeps focus and these three guards close it instead. */
+static gboolean
+menu_outside_event (GtkEventControllerLegacy *controller, GdkEvent *event,
+                    gpointer data)
+{
+  ChromiumSession *self = data;
+  GdkSurface *popover_surface;
+
+  if (!self->menu_popover)
+    return FALSE;
+  if (gdk_event_get_event_type (event) != GDK_BUTTON_PRESS)
+    return FALSE;
+
+  /* A click on the popover's own surface belongs to its buttons. */
+  popover_surface = gtk_native_get_surface (GTK_NATIVE (self->menu_popover));
+  if (popover_surface && gdk_event_get_surface (event) == popover_surface)
+    return FALSE;
+
+  chromium_session_context_menu_dismiss (self);
+  /* Do not also click the page/link/toolbar under the dismissing click. */
+  return TRUE;
+}
+
+static GPtrArray *
+menu_button_list (ChromiumSession *self)
+{
+  GPtrArray *buttons = g_ptr_array_new ();
+  GtkWidget *child;
+
+  if (!self->menu_box)
+    return buttons;
+  for (child = gtk_widget_get_first_child (self->menu_box); child;
+       child = gtk_widget_get_next_sibling (child))
+    if (GTK_IS_BUTTON (child) && gtk_widget_get_sensitive (child))
+      g_ptr_array_add (buttons, child);
+  return buttons;
+}
+
+static void
+menu_set_selected (ChromiumSession *self, GtkWidget *button)
+{
+  if (self->menu_selected == button)
+    return;
+  if (self->menu_selected)
+    gtk_widget_remove_css_class (self->menu_selected, "cefnest-menu-selected");
+  self->menu_selected = button;
+  if (button)
+    gtk_widget_add_css_class (button, "cefnest-menu-selected");
+}
+
+static void
+menu_move_selection (ChromiumSession *self, gboolean forward)
+{
+  g_autoptr (GPtrArray) buttons = menu_button_list (self);
+  guint i, next = 0;
+
+  if (buttons->len == 0)
+    return;
+
+  if (!self->menu_selected)
+    next = forward ? 0 : buttons->len - 1;
+  else
+    {
+      for (i = 0; i < buttons->len; i++)
+        if (g_ptr_array_index (buttons, i) == self->menu_selected)
+          break;
+      if (i == buttons->len)
+        next = forward ? 0 : buttons->len - 1;
+      else if (forward)
+        next = (i + 1) % buttons->len;
+      else
+        next = (i + buttons->len - 1) % buttons->len;
+    }
+
+  menu_set_selected (self, g_ptr_array_index (buttons, next));
+}
+
+static void
+menu_select_edge (ChromiumSession *self, gboolean last)
+{
+  g_autoptr (GPtrArray) buttons = menu_button_list (self);
+
+  if (buttons->len == 0)
+    return;
+  menu_set_selected (self, g_ptr_array_index (buttons, last ? buttons->len - 1 : 0));
+}
+
+static void
+menu_activate_selected (ChromiumSession *self)
+{
+  if (!self->menu_selected)
+    menu_move_selection (self, TRUE);
+  if (self->menu_selected && gtk_widget_get_sensitive (self->menu_selected))
+    g_signal_emit_by_name (self->menu_selected, "clicked");
+}
+
+static gboolean
+menu_key_pressed (GtkEventControllerKey *controller, guint keyval,
+                  guint keycode, GdkModifierType state, gpointer data)
+{
+  ChromiumSession *self = data;
+
+  if (!self->menu_popover)
+    return FALSE;
+
+  if (keyval == GDK_KEY_Escape)
+    {
+      chromium_session_context_menu_dismiss (self);
+      return TRUE;
+    }
+
+  /* Leave page shortcuts alone; only bare navigation keys reach the menu. */
+  if (state & (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK))
+    return FALSE;
+
+  switch (keyval)
+    {
+    case GDK_KEY_Up:
+    case GDK_KEY_KP_Up:
+      menu_move_selection (self, FALSE);
+      return TRUE;
+    case GDK_KEY_Down:
+    case GDK_KEY_KP_Down:
+      menu_move_selection (self, TRUE);
+      return TRUE;
+    case GDK_KEY_Home:
+    case GDK_KEY_KP_Home:
+      menu_select_edge (self, FALSE);
+      return TRUE;
+    case GDK_KEY_End:
+    case GDK_KEY_KP_End:
+      menu_select_edge (self, TRUE);
+      return TRUE;
+    case GDK_KEY_Tab:
+      menu_move_selection (self, !(state & GDK_SHIFT_MASK));
+      return TRUE;
+    case GDK_KEY_ISO_Left_Tab:
+      menu_move_selection (self, FALSE);
+      return TRUE;
+    case GDK_KEY_Return:
+    case GDK_KEY_KP_Enter:
+    case GDK_KEY_space:
+    case GDK_KEY_KP_Space:
+      menu_activate_selected (self);
+      return TRUE;
+    default:
+      return FALSE;
+    }
+}
+
+static void
+menu_window_active_changed (GtkWindow *window, GParamSpec *pspec, gpointer data)
+{
+  ChromiumSession *self = data;
+
+  if (self->menu_popover && !gtk_window_is_active (window))
+    chromium_session_context_menu_dismiss (self);
+}
+
+static void
+menu_install_guards (ChromiumSession *self)
+{
+  GtkRoot *root;
+  GtkEventController *controller;
+
+  if (!self->view)
+    return;
+  root = gtk_widget_get_root (GTK_WIDGET (self->view));
+  if (!GTK_IS_WINDOW (root))
+    return;
+
+  self->menu_window = g_object_ref (GTK_WINDOW (root));
+
+  controller = gtk_event_controller_legacy_new ();
+  gtk_event_controller_set_propagation_phase (controller, GTK_PHASE_CAPTURE);
+  g_signal_connect (controller, "event", G_CALLBACK (menu_outside_event), self);
+  gtk_widget_add_controller (GTK_WIDGET (root), controller);
+  self->menu_outside_controller = g_object_ref (controller);
+
+  controller = gtk_event_controller_key_new ();
+  gtk_event_controller_set_propagation_phase (controller, GTK_PHASE_CAPTURE);
+  g_signal_connect (controller, "key-pressed",
+                    G_CALLBACK (menu_key_pressed), self);
+  gtk_widget_add_controller (GTK_WIDGET (root), controller);
+  self->menu_key_controller = g_object_ref (controller);
+
+  self->menu_active_handler =
+    g_signal_connect (root, "notify::active",
+                      G_CALLBACK (menu_window_active_changed), self);
+}
+
+static void
+menu_remove_guards (ChromiumSession *self)
+{
+  if (self->menu_window)
+    {
+      if (self->menu_active_handler != 0)
+        g_signal_handler_disconnect (self->menu_window, self->menu_active_handler);
+      self->menu_active_handler = 0;
+
+      if (self->menu_outside_controller)
+        {
+          gtk_widget_remove_controller (GTK_WIDGET (self->menu_window),
+                                        self->menu_outside_controller);
+          g_clear_object (&self->menu_outside_controller);
+        }
+      if (self->menu_key_controller)
+        {
+          gtk_widget_remove_controller (GTK_WIDGET (self->menu_window),
+                                        self->menu_key_controller);
+          g_clear_object (&self->menu_key_controller);
+        }
+      g_clear_object (&self->menu_window);
+    }
+}
+
 /* Put the menu's widgets back. The popover is reached both from the answer path
  * and from its own ::closed, so this has to survive being called twice. */
 /* grab_focus() from inside the popover teardown can be refused while the
@@ -784,6 +1010,8 @@ menu_release (ChromiumSession *self)
       g_object_unref (self);      /* the reference menu_release_soon () took */
     }
 
+  menu_remove_guards (self);
+
   if (popover)
     {
       /* This side is the one putting the menu down, so the answer to the helper is
@@ -793,6 +1021,8 @@ menu_release (ChromiumSession *self)
       if (GTK_IS_WIDGET (gtk_widget_get_parent (popover)))
         gtk_widget_unparent (popover);
       g_object_unref (popover);
+      self->menu_box = NULL;
+      self->menu_selected = NULL;
 
       /* Hand the keyboard back after the popover (and its focus widget) is
        * gone; otherwise the page keeps the last frame but stops taking keys. */
@@ -864,6 +1094,8 @@ menu_ensure_css (GtkWidget *view)
     "popover.cefnest-menu > contents.cefnest-menu-content { padding: 0; }"
     ".cefnest-menu-box { padding: 4px; }"
     ".cefnest-menu-box button { padding: 4px 8px; }"
+    ".cefnest-menu-box button.cefnest-menu-selected {"
+    "  background-color: alpha(currentColor, 0.12); }"
     ".cefnest-menu-box separator { margin: 3px 0; }");
   display = gtk_widget_get_display (view);
   if (display)
@@ -994,6 +1226,8 @@ session_menu_show (ChromiumSession *self, int x, int y, GList *items)
    * it has to be able to put it down from three different places. */
   gtk_widget_set_parent (popover, GTK_WIDGET (self->view));
   self->menu_popover = g_object_ref (popover);
+  self->menu_box = box;
+  self->menu_selected = NULL;
 
   point.x = x;
   point.y = y;
@@ -1002,6 +1236,9 @@ session_menu_show (ChromiumSession *self, int x, int y, GList *items)
   gtk_popover_set_pointing_to (GTK_POPOVER (popover), &point);
   gtk_popover_set_position (GTK_POPOVER (popover), GTK_POS_BOTTOM);
   gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
+  /* Keep the keyboard on the page while the menu is up. GtkPopover's default
+   * autohide is also its modal grab; outside clicks/Escape are handled below. */
+  gtk_popover_set_autohide (GTK_POPOVER (popover), FALSE);
 
   /* GTK_POS_BOTTOM anchors the surface according to the popover's halign:
    * CENTER (the default) straddles the pointer, START puts the menu's left edge
@@ -1012,6 +1249,7 @@ session_menu_show (ChromiumSession *self, int x, int y, GList *items)
 
   g_signal_connect (popover, "closed", G_CALLBACK (menu_popover_closed), self);
 
+  menu_install_guards (self);
   gtk_popover_popup (GTK_POPOVER (popover));
   g_debug ("session: context menu with %u items drawn at %d,%d", index, x, y);
   g_timeout_add_once (300, menu_report_size, g_object_ref (popover));
@@ -1608,6 +1846,27 @@ chromium_session_run_javascript (ChromiumSession *self, const char *code, int id
 
   json_builder_begin_object (builder);
   command_add_string (builder, "cmd", "js");
+  command_add_string (builder, "code", code);
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_run_javascript_expression (ChromiumSession *self,
+                                            const char *code, int id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (code != NULL);
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "js-expr");
   command_add_string (builder, "code", code);
   json_builder_set_member_name (builder, "id");
   json_builder_add_int_value (builder, id);

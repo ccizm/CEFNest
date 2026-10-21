@@ -41,6 +41,12 @@ ALL_RUNS=(
   "menu|./test/menu-gate.sh|420"
   "soak|./test/sandbox-soak.sh|600"
 )
+# Real sites are external and change under us, so they are opt-in. The batch
+# starts one ci-session per site itself; wrapping it in another ci-session would
+# nest two headless mutters for no gain, hence the special case in the loop.
+if [ "${CI_ALL_REAL:-0}" = 1 ]; then
+  ALL_RUNS+=("real|./test/real-sites.sh|1800")
+fi
 
 LOGS=$(mktemp -d)
 only=("$@")
@@ -63,7 +69,9 @@ for spec in "${ALL_RUNS[@]}"; do
   wanted "$label" || continue
   log=$LOGS/$label.log
   t0=$(date +%s)
-  if [ -z "$payload" ]; then
+  if [ "$label" = real ]; then
+    timeout "$tmo" "$payload" >"$log" 2>&1
+  elif [ -z "$payload" ]; then
     PAYLOAD_TIMEOUT=$tmo ./test/ci-session.sh >"$log" 2>&1
   else
     PAYLOAD_TIMEOUT=$tmo ./test/ci-session.sh bash -c "$payload" >"$log" 2>&1

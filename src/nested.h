@@ -53,6 +53,12 @@ void              nested_compositor_get_size        (NestedCompositor *self,
  * leaves the widget is handed to the host through ::drag-out, not to @clipboard. */
 void              nested_compositor_set_clipboard   (NestedCompositor *self,
                                                      GdkClipboard *clipboard);
+/* The primary selection (middle-click) bridge. Same shape as @clipboard, but
+ * text-only and independent of the ordinary clipboard: a client's selection is
+ * mirrored to @primary and the host's primary is offered to clients. Pass NULL
+ * on unmap. */
+void              nested_compositor_set_primary_clipboard (NestedCompositor *self,
+                                                           GdkClipboard *primary);
 /* Carrying a page's drag outside the window. While a drag is in flight its
  * payload lives in the client's wl_data_source, and this compositor is the only
  * thing that can read it: the destination it would go to is not one of ours. So

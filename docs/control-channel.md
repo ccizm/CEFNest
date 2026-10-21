@@ -78,14 +78,15 @@ demo: renderer exited status=1 error=9 9
 
 ## 3. 现在通道上有的东西
 
-命令 18 条，事件 22 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
+命令 19 条，事件 22 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
 
 | 方向 | 名字 | 载荷 |
 | --- | --- | --- |
 | host → helper | `load` | `url` |
 | host → helper | `back` `forward` `reload` `stop` `quit` | `reload` 多一个 `hard` |
 | host → helper | `zoom-in` `zoom-out` `zoom-reset` | 无（CEF zoom level 步进 0.5；reset 回 0.0） |
-| host → helper | `js` | `code`、`id` |
+| host → helper | `js` | `code`、`id`（语句形状；页面侧 `eval`，受 CSP `unsafe-eval` 限制） |
+| host → helper | `js-expr` | `code`、`id`（表达式直接嵌入，不经过 `eval`；CSP 严格页面用这条） |
 | host → helper | `mute` | `on`（缺省 = 翻转） |
 | host → helper | `download-accept` | `id`、`path`（绝对路径，父目录得宿主自己建） |
 | host → helper | `download-reject` | `id`（拒绝未开始的、取消在飞的，同一条） |
@@ -186,7 +187,7 @@ host` / `helper closed the browser` / `control channel closed` / `process exited
 | 上下文菜单 | `CefContextMenuHandler::RunContextMenu` + `CefMenuModel` + `CefRunContextMenuCallback` | **已做**（2026-10-21） | 判据到这里已经不够用了：`download-*` 是"挂着等回答"，`find-*` 是"不发回答"，而 `context-menu` 是**必须回答**——CEF 只有这一条路把菜单交给宿主，`RunContextMenu` 返回 true 之后画与不画、答与不答全在宿主手上，而实测（`docs/context-menu.md` §2）证明 Chromium 同时只允许一个没答的请求，不答就等于把右键弄坏。形状是最省的一种：模型（`items` 五条属性）+ 坐标上线，答案下去，中间没有任何进度。`CefContextMenuParams` 留在 helper：模型本身已经是它的回答，`link URL` 这类"宿主想加自己的行"的信息是下一个增量，不是这次没有量的部分 |
 | 权限提示 | `CefPermissionHandler` + `CefMediaAccessCallback` + `CefPermissionPromptCallback` | **已做**（2026-10-21） | 和菜单同一个判据：`OnRequestMediaAccessPermission` / `OnShowPermissionPrompt` 返回 true 之后，**页面就站在宿主的回答上**，不答不是安静而是 promise 永不 settle（基线实测：通知、剪贴板读、MIDI sysex 三条全 `pending`）。形状仍然最省：问题（origin + 名单 + mask）上线，一个词的答案回去，中间没有进度。两处"不能替宿主决定"留在原地：media 的 `accept` 只能整份给（`Continue()` 要求 `allowed` 等于 `required`），所以 API 上没开名单参数；反过来，`storage.persist()`、`permissions.query()` 和 idle 那三种问法根本不走 `CefPermissionHandler`（通知是走的，实测过），通道上因此没有它们——不是没做，是 CEF 那边没有可以问的地方（`docs/permission-prompt.md` §1、§10） |
 
-反过来，**这 18 条够用**的证据还是这套组件的全部交互：导航（`load`/`back`/`forward`/
+反过来，**这 19 条够用**的证据还是这套组件的全部交互：导航（`load`/`back`/`forward`/
 `reload`/`stop`）、页面缩放（`zoom-*`）、任意脚本（`js` 一条顶十条，页内状态、标题、当前 URL 都能自己读）、退出
 （`quit`）、加上现在这几条要回话的（`download-*`、`find-*`、`context-menu-*`、`permission-*`）。要加的新命令
 得先说明它不能用 `js` 表达——上面那张表里除了 DevTools，其余几条其实都能用 `js` 大致凑出来，

@@ -48,6 +48,13 @@ void               chromium_session_run_javascript (ChromiumSession *self,
                                                    const char *code,
                                                    int id);
 
+/* The CSP-safe form: code is embedded as an expression and wrapped without
+ * eval(), for pages whose script-src forbids unsafe-eval. Use run_javascript()
+ * for statement-shaped code; both answer through ::script-result. */
+void               chromium_session_run_javascript_expression (ChromiumSession *self,
+                                                               const char *code,
+                                                               int id);
+
 /* The page's sound leaves the helper through its own audio process and lands on
  * the host's speakers (docs/audio-path.md), so this is the only switch the
  * embedding app has. chromium_session_get_muted () reports what the helper read

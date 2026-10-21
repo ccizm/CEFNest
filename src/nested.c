@@ -15,6 +15,7 @@
 #include "cursor-shape-server-protocol.h"
 #include "fractional-scale-server-protocol.h"
 #include "linux-dmabuf-server-protocol.h"
+#include "primary-selection-server-protocol.h"
 #include "text-input-server-protocol.h"
 #include "viewporter-server-protocol.h"
 #include "xdg-shell-server-protocol.h"
@@ -2052,6 +2053,7 @@ nested_compositor_init (NestedCompositor *self)
   wl_list_init (&self->surfaces);
   wl_list_init (&self->seat_clients);
   wl_list_init (&self->data_devices);
+  wl_list_init (&self->primary_devices);
   wl_list_init (&self->text_inputs);
   self->pressed_keys = g_array_new (FALSE, FALSE, sizeof (uint32_t));
   self->dmabuf_formats = g_array_new (FALSE, FALSE, sizeof (DmabufFormat));
@@ -2206,6 +2208,10 @@ nested_compositor_new (GError **error)
     wl_global_create (self->display, &wl_data_device_manager_interface,
                       NESTED_DATA_DEVICE_MANAGER_VERSION, self,
                       data_device_manager_bind);
+  self->global_primary_selection =
+    wl_global_create (self->display,
+                      &zwp_primary_selection_device_manager_v1_interface, 1,
+                      self, primary_selection_manager_bind);
   self->global_text_input =
     wl_global_create (self->display, &zwp_text_input_manager_v3_interface,
                       NESTED_TEXT_INPUT_VERSION, self, text_input_manager_bind);

@@ -203,6 +203,7 @@ struct _NestedCompositor {
   struct wl_global *global_viewporter;
   struct wl_global *global_fractional;
   struct wl_global *global_data;
+  struct wl_global *global_primary_selection;
   struct wl_global *global_text_input;
   struct wl_global *global_cursor_shape;
 
@@ -230,6 +231,15 @@ struct _NestedCompositor {
    * holds, buffered so a client can be served without blocking the loop. */
   struct wl_list data_devices;      /* DataDevice.link */
   DataSource *selection_source;
+  struct wl_list primary_devices;  /* PrimaryDevice.link */
+  DataSource *primary_source;
+  ClipboardTransfer *primary_transfer;
+  GdkClipboard *primary_clipboard;
+  gulong primary_handler;
+  GBytes *primary_bytes;
+  char *primary_mime;
+  guint primary_echo;
+  guint primary_replay_id;
   Drag *drag;                       /* the wl_data_device drag in progress, or NULL */
   ClipboardTransfer *clipboard_transfer;
   /* The payload of a drag that left the widget, read out of the client's
@@ -382,6 +392,8 @@ struct wl_resource *buffer_resource_new (struct wl_client *client,
 /* nested-data-device.c */
 void        data_device_manager_bind (struct wl_client *client, void *data,
                                       uint32_t version, uint32_t id);
+void        primary_selection_manager_bind (struct wl_client *client, void *data,
+                                            uint32_t version, uint32_t id);
 void        data_device_shutdown     (NestedCompositor *self);
 /* A drag takes the pointer away from the seat until the button that started it
  * is released: the position goes to wl_data_device.motion and nothing to

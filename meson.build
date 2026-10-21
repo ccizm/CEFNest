@@ -143,6 +143,22 @@ fractional_scale_code = custom_target(
   command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
 )
 
+primary_selection_xml = protocols_dir / 'unstable/primary-selection/primary-selection-unstable-v1.xml'
+
+primary_selection_server_header = custom_target(
+  'primary-selection-server-header',
+  input: primary_selection_xml,
+  output: 'primary-selection-server-protocol.h',
+  command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
+)
+
+primary_selection_code = custom_target(
+  'primary-selection-code',
+  input: primary_selection_xml,
+  output: 'primary-selection-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+
 text_input_xml = protocols_dir / 'unstable/text-input/text-input-unstable-v3.xml'
 
 text_input_server_header = custom_target(

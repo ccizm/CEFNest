@@ -73,7 +73,7 @@ zwp_linux_dmabuf_v1 5
 | `zwp_keyboard_shortcuts_inhibit_manager_v1` | 不给 | 同上：我们没有快捷键系统可抑制 |
 | `zwp_pointer_gestures_v1` 3 | 暂不给 | 触控板捏合缩放。真 Chromium 会绑它，损失是页面里的捏合缩放不可用；补齐要捏合手势→Chromium 的整条链路，等有触控板需求再议 |
 | `zwp_tablet_manager_v2` | 暂不给 | 数位板。损失同上，等需求 |
-| `zwp_primary_selection_device_manager_v1` 1 | 暂不给 | 中键主选区粘贴。`wl_data_device` 剪贴板桥（`docs/clipboard-bridge.md`）已覆盖主复制路径；损失只有 X11 式中键粘贴 |
+| `zwp_primary_selection_device_manager_v1` 1 | **给**（2026-10-21） | 中键主选区：独立的 source/device/offer，文本双向桥到 GTK primary clipboard。普通 `wl_data_device` 剪贴板仍是另一条通道；两者不互相替代 |
 | `zxdg_exporter_v1/v2`、`zxdg_importer_v1/v2` | 不给 | xdg-foreign，GDK 在 mutter 上做窗口定位/激活握手用；单一 toplevel 用不上 |
 | `wl_drm` 2 | 永不 | 遗留 dmabuf 协议，`zwp_linux_dmabuf_v1` 5 已是正身 |
 

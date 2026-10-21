@@ -4,6 +4,8 @@
 
 #include "nested-internal.h"
 
+#include "primary-selection-server-protocol.h"
+
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +15,8 @@
 
 typedef struct _DataOffer DataOffer;
 typedef struct _DataDevice DataDevice;
+typedef struct _PrimaryDevice PrimaryDevice;
+typedef struct _PrimaryOffer PrimaryOffer;
 
 /* ------------------------------------------------------------------ *
  * wl_data_device_manager                                             *
@@ -43,7 +47,9 @@ struct _DataSource {
   NestedCompositor *compositor;
   GPtrArray *mime_types;      /* char *, owned */
   struct wl_list offers;      /* DataOffer.source_link */
+  struct wl_list primary_offers; /* PrimaryOffer.source_link */
   uint32_t dnd_actions;       /* the mask wl_data_source.set_actions named */
+  gboolean primary;           /* this resource is zwp_primary_selection_source_v1 */
   /* A source with no resource is the compositor's own: the host picked a drag
    * up somewhere outside the window and is carrying it in, so the bytes are
    * already here instead of being asked for over a pipe. */
@@ -58,6 +64,20 @@ struct _DataOffer {
   struct wl_list device_link;
 };
 
+struct _PrimaryDevice {
+  struct wl_resource *resource;
+  NestedCompositor *compositor;
+  struct wl_list link;
+  struct wl_list offers;      /* PrimaryOffer.device_link */
+};
+
+struct _PrimaryOffer {
+  struct wl_resource *resource;
+  NestedCompositor *compositor;
+  DataSource *source;         /* NULL: the host primary clipboard */
+  struct wl_list source_link;
+  struct wl_list device_link;
+};
 struct _DataDevice {
   struct wl_resource *resource;
   NestedCompositor *compositor;
@@ -123,11 +143,20 @@ struct _ClipboardTransfer {
 static const struct wl_data_source_interface data_source_impl;
 static const struct wl_data_offer_interface data_offer_impl;
 static const struct wl_data_device_interface data_device_impl;
+static const struct zwp_primary_selection_source_v1_interface primary_source_impl;
+static const struct zwp_primary_selection_offer_v1_interface primary_offer_impl;
+static const struct zwp_primary_selection_device_v1_interface primary_device_impl;
+static const struct zwp_primary_selection_device_manager_v1_interface
+  primary_manager_impl;
 
 static void data_offer_resource_destroyed (struct wl_resource *resource);
 static void compositor_advertise_selection (NestedCompositor *self);
 static void compositor_clipboard_read_done (GObject *clipboard, GAsyncResult *result,
                                             gpointer user_data);
+static void primary_advertise (NestedCompositor *self);
+static gboolean primary_replay_selection (gpointer data);
+static void primary_device_advertise (PrimaryDevice *device, DataSource *source);
+static void primary_offer_resource_destroyed (struct wl_resource *resource);
 
 static void drag_cancel (Drag *drag);
 static void drag_destroy (Drag *drag, gboolean tell_host);
@@ -355,6 +384,24 @@ clipboard_transfer_on_data (int fd, GIOCondition condition, gpointer user_data)
 }
 
 static void
+data_source_send_mime (DataSource *source, const char *mime, int fd)
+{
+  if (source->primary)
+    wl_resource_post_event (source->resource, 0, mime, fd);
+  else
+    wl_data_source_send_send (source->resource, mime, fd);
+}
+
+static void
+data_source_cancel (DataSource *source)
+{
+  if (source->primary)
+    wl_resource_post_event (source->resource, 1);
+  else
+    wl_data_source_send_cancelled (source->resource);
+}
+
+static void
 clipboard_transfer_start (NestedCompositor *self, DataSource *source, const char *mime,
                           TransferFinish finish, ClipboardTransfer **slot)
 {
@@ -371,7 +418,7 @@ clipboard_transfer_start (NestedCompositor *self, DataSource *source, const char
 
   /* libwayland dups the fd while encoding, so the write end stays ours and we
    * are the ones who must close it. */
-  wl_data_source_send_send (source->resource, mime, fds[1]);
+  data_source_send_mime (source, mime, fds[1]);
   close (fds[1]);
 
   transfer = g_new0 (ClipboardTransfer, 1);
@@ -722,6 +769,445 @@ compositor_on_clipboard_changed (GObject *clipboard, GParamSpec *pspec, gpointer
 {
   compositor_paste_clipboard (data);
 }
+
+/* ------------------------------------------------------------------ *
+ * zwp_primary_selection_unstable_v1                                   *
+ *                                                                    *
+ * The primary selection is a second, text-only clipboard. The same   *
+ * two directions as wl_data_device are needed, but there is no drag  *
+ * and no action negotiation: a source, a per-client device/offer,    *
+ * and set_selection. GTK 4 exposes the host side as a GdkClipboard   *
+ * from gtk_widget_get_primary_clipboard().                           *
+ * ------------------------------------------------------------------ */
+
+typedef struct {
+  NestedCompositor *self;
+  int fd;
+} PrimaryPaste;
+
+static void
+primary_source_finish (NestedCompositor *self, const char *mime, GBytes *bytes)
+{
+  const guint8 *data;
+  gsize size = 0;
+  char *text;
+
+  if (!bytes)
+    return;
+
+  data = g_bytes_get_data (bytes, &size);
+  while (size > 0 && data[size - 1] == 0)
+    size--;
+  text = g_strndup ((const char *) data, size);
+  {
+    char *valid = g_utf8_make_valid (text, -1);
+
+    g_free (text);
+    text = valid;
+  }
+
+  g_clear_pointer (&self->primary_bytes, g_bytes_unref);
+  g_clear_pointer (&self->primary_mime, g_free);
+  if (*text)
+    {
+      self->primary_bytes = g_bytes_new (text, strlen (text));
+      self->primary_mime = g_strdup (text_mimes[0]);
+    }
+
+  if (self->primary_clipboard && !self->primary_echo)
+    {
+      self->primary_echo++;
+      gdk_clipboard_set_text (self->primary_clipboard, text);
+      self->primary_echo--;
+    }
+
+  g_debug ("nested: a client set the primary selection to %u bytes of %s",
+           (guint) strlen (text), mime);
+  g_free (text);
+}
+
+static void
+primary_client_transfer (NestedCompositor *self, DataSource *source,
+                         const char *mime)
+{
+  clipboard_transfer_start (self, source, mime, primary_source_finish,
+                            &self->primary_transfer);
+}
+
+static void
+primary_paste_read_done (GObject *clipboard, GAsyncResult *result, gpointer data)
+{
+  PrimaryPaste *paste = data;
+  char *text = gdk_clipboard_read_text_finish (GDK_CLIPBOARD (clipboard), result, NULL);
+
+  if (text && *text)
+    {
+      GBytes *bytes = g_bytes_new_take (text, strlen (text));
+
+      clipboard_send_bytes (bytes, paste->fd);
+      g_bytes_unref (bytes);
+    }
+  else
+    {
+      g_free (text);
+      close (paste->fd);
+      g_debug ("nested: the primary clipboard had nothing to paste");
+    }
+
+  g_object_unref (paste->self);
+  g_free (paste);
+}
+
+static void
+primary_paste_later (NestedCompositor *self, int fd)
+{
+  PrimaryPaste *paste;
+
+  if (!self->primary_clipboard)
+    {
+      close (fd);
+      return;
+    }
+
+  paste = g_new0 (PrimaryPaste, 1);
+  paste->self = g_object_ref (self);
+  paste->fd = fd;
+  gdk_clipboard_read_text_async (self->primary_clipboard, NULL,
+                                 primary_paste_read_done, paste);
+}
+
+static void
+primary_clipboard_read_done (GObject *clipboard, GAsyncResult *result,
+                             gpointer user_data)
+{
+  NestedCompositor *self = user_data;
+  GError *error = NULL;
+  char *text;
+
+  text = gdk_clipboard_read_text_finish (GDK_CLIPBOARD (clipboard), result, &error);
+  if (!text || !*text)
+    {
+      if (error)
+        g_debug ("nested: the primary clipboard gave no text: %s", error->message);
+      g_clear_error (&error);
+      g_free (text);
+      g_clear_pointer (&self->primary_bytes, g_bytes_unref);
+      g_clear_pointer (&self->primary_mime, g_free);
+    }
+  else
+    {
+      g_clear_pointer (&self->primary_bytes, g_bytes_unref);
+      g_clear_pointer (&self->primary_mime, g_free);
+      self->primary_bytes = g_bytes_new (text, strlen (text));
+      self->primary_mime = g_strdup (text_mimes[0]);
+      g_debug ("nested: primary clipboard text is %u bytes: '%.60s'",
+               (guint) strlen (text), text);
+      g_free (text);
+    }
+
+  if (!self->primary_source)
+    primary_advertise (self);
+}
+
+static void
+primary_paste_clipboard (NestedCompositor *self)
+{
+  const char *const *types;
+  const char *mime = NULL;
+  gsize n_types = 0;
+  gsize i;
+
+  if (!self->primary_clipboard || self->primary_echo)
+    return;
+
+  types = gdk_content_formats_get_mime_types (
+    gdk_clipboard_get_formats (self->primary_clipboard), &n_types);
+  for (i = 0; i < n_types && !mime; i++)
+    if (mime_is_text (types[i]))
+      mime = types[i];
+
+  if (!mime)
+    {
+      g_debug ("nested: the primary clipboard holds no text (%u formats)",
+               (guint) n_types);
+      g_clear_pointer (&self->primary_bytes, g_bytes_unref);
+      g_clear_pointer (&self->primary_mime, g_free);
+      if (!self->primary_source)
+        primary_advertise (self);
+      return;
+    }
+
+  g_debug ("nested: primary clipboard has %s, reading it", mime);
+  gdk_clipboard_read_text_async (self->primary_clipboard, NULL,
+                                 primary_clipboard_read_done, self);
+}
+
+static void
+primary_on_clipboard_changed (GObject *clipboard, GParamSpec *pspec, gpointer data)
+{
+  primary_paste_clipboard (data);
+}
+
+static void
+primary_offers_detach (DataSource *source)
+{
+  while (!wl_list_empty (&source->primary_offers))
+    {
+      PrimaryOffer *offer =
+        wl_container_of (source->primary_offers.next, offer, source_link);
+
+      wl_list_remove (&offer->source_link);
+      wl_list_init (&offer->source_link);
+      offer->source = NULL;
+    }
+}
+
+static gboolean
+primary_replay_selection (gpointer data)
+{
+  NestedCompositor *self = data;
+  struct wl_list *link;
+
+  self->primary_replay_id = 0;
+
+  for (link = self->primary_devices.next; link != &self->primary_devices;
+       link = link->next)
+    {
+      PrimaryDevice *device = wl_container_of (link, device, link);
+
+      primary_device_advertise (device, self->primary_source);
+    }
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+primary_advertise (NestedCompositor *self)
+{
+  if (self->primary_replay_id)
+    return;
+
+  self->primary_replay_id = g_idle_add (primary_replay_selection, self);
+}
+
+static void
+primary_device_advertise (PrimaryDevice *device, DataSource *source)
+{
+  NestedCompositor *self = device->compositor;
+  struct wl_resource *offer_resource;
+  PrimaryOffer *offer;
+  GPtrArray *types;
+  gsize i;
+
+  if (source && source->resource &&
+      wl_resource_get_client (source->resource) ==
+        wl_resource_get_client (device->resource))
+    return;
+
+  if (!source && !self->primary_bytes)
+    {
+      wl_resource_post_event (device->resource, 1,
+                              (struct wl_resource *) NULL);
+      return;
+    }
+
+  types = g_ptr_array_new ();
+  if (source)
+    for (i = 0; i < source->mime_types->len; i++)
+      g_ptr_array_add (types, g_ptr_array_index (source->mime_types, i));
+  else
+    for (i = 0; i < G_N_ELEMENTS (text_mimes); i++)
+      g_ptr_array_add (types, (char *) text_mimes[i]);
+
+  if (types->len == 0)
+    {
+      g_ptr_array_free (types, TRUE);
+      wl_resource_post_event (device->resource, 1,
+                              (struct wl_resource *) NULL);
+      return;
+    }
+
+  offer_resource = resource_create (wl_resource_get_client (device->resource),
+                                    &zwp_primary_selection_offer_v1_interface, 1, 0);
+  if (!offer_resource)
+    {
+      g_ptr_array_free (types, TRUE);
+      return;
+    }
+
+  offer = g_new0 (PrimaryOffer, 1);
+  offer->resource = offer_resource;
+  offer->compositor = self;
+  offer->source = source;
+  wl_list_init (&offer->source_link);
+  wl_list_init (&offer->device_link);
+  wl_list_insert (&device->offers, &offer->device_link);
+  if (source)
+    wl_list_insert (&source->primary_offers, &offer->source_link);
+  wl_resource_set_implementation (offer_resource, &primary_offer_impl, offer,
+                                  primary_offer_resource_destroyed);
+
+  g_debug ("nested: primary offer id %u to device %u (%u types)",
+           wl_resource_get_id (offer_resource), wl_resource_get_id (device->resource),
+           (guint) types->len);
+  wl_resource_post_event (device->resource, 0, offer_resource);
+  for (i = 0; i < types->len; i++)
+    wl_resource_post_event (offer_resource, 0, g_ptr_array_index (types, i));
+  wl_resource_post_event (device->resource, 1, offer_resource);
+  g_ptr_array_free (types, TRUE);
+}
+
+static void
+primary_offer_receive (struct wl_client *client, struct wl_resource *resource,
+                       const char *mime_type, int32_t fd)
+{
+  PrimaryOffer *offer = wl_resource_get_user_data (resource);
+  NestedCompositor *self = offer->compositor;
+
+  if (offer->source)
+    {
+      if (offer->source->mime_types->len == 0 ||
+          !mime_can_serve (g_ptr_array_index (offer->source->mime_types, 0),
+                           mime_type))
+        {
+          close (fd);
+          return;
+        }
+      data_source_send_mime (offer->source, mime_type, fd);
+      close (fd);
+      return;
+    }
+
+  if (self->primary_mime && !mime_can_serve (self->primary_mime, mime_type))
+    {
+      close (fd);
+      return;
+    }
+
+  if (!self->primary_bytes)
+    {
+      primary_paste_later (self, fd);
+      return;
+    }
+
+  clipboard_send_bytes (self->primary_bytes, fd);
+}
+
+static void
+primary_offer_destroy (struct wl_client *client, struct wl_resource *resource)
+{
+  wl_resource_destroy (resource);
+}
+
+static void
+primary_offer_resource_destroyed (struct wl_resource *resource)
+{
+  PrimaryOffer *offer = wl_resource_get_user_data (resource);
+
+  if (offer->source)
+    wl_list_remove (&offer->source_link);
+  wl_list_remove (&offer->device_link);
+  g_free (offer);
+}
+
+static void
+primary_source_offer (struct wl_client *client, struct wl_resource *resource,
+                      const char *mime_type)
+{
+  DataSource *source = wl_resource_get_user_data (resource);
+  gsize i;
+
+  if (!mime_type)
+    return;
+  for (i = 0; i < source->mime_types->len; i++)
+    if (!strcmp (g_ptr_array_index (source->mime_types, i), mime_type))
+      return;
+  g_ptr_array_add (source->mime_types, g_strdup (mime_type));
+}
+
+static void
+primary_source_destroy (struct wl_client *client, struct wl_resource *resource)
+{
+  wl_resource_destroy (resource);
+}
+
+static void
+primary_device_set_selection (struct wl_client *client,
+                              struct wl_resource *resource,
+                              struct wl_resource *source_resource,
+                              uint32_t serial)
+{
+  NestedCompositor *self =
+    ((PrimaryDevice *) wl_resource_get_user_data (resource))->compositor;
+  DataSource *source = NULL;
+  const char *mime;
+
+  if (source_resource)
+    {
+      if (!wl_resource_instance_of (source_resource,
+                                    &zwp_primary_selection_source_v1_interface,
+                                    &primary_source_impl))
+        return;
+      source = wl_resource_get_user_data (source_resource);
+    }
+
+  if (self->primary_source && self->primary_source != source)
+    data_source_cancel (self->primary_source);
+
+  clipboard_transfer_cancel (self->primary_transfer);
+  self->primary_source = source;
+
+  if (!source)
+    {
+      primary_advertise (self);
+      return;
+    }
+
+  g_debug ("nested: primary selection set by client, %u type%s",
+           source->mime_types->len, source->mime_types->len == 1 ? "" : "s");
+  primary_advertise (self);
+  mime = pick_text_mime (source->mime_types);
+  if (mime)
+    primary_client_transfer (self, source, mime);
+}
+
+static void
+primary_device_destroy (struct wl_client *client, struct wl_resource *resource)
+{
+  wl_resource_destroy (resource);
+}
+
+static void
+primary_device_resource_destroyed (struct wl_resource *resource)
+{
+  PrimaryDevice *device = wl_resource_get_user_data (resource);
+
+  while (!wl_list_empty (&device->offers))
+    {
+      PrimaryOffer *offer =
+        wl_container_of (device->offers.next, offer, device_link);
+
+      wl_resource_destroy (offer->resource);
+    }
+
+  wl_list_remove (&device->link);
+  g_free (device);
+}
+
+static const struct zwp_primary_selection_offer_v1_interface primary_offer_impl = {
+  .receive = primary_offer_receive,
+  .destroy = primary_offer_destroy,
+};
+
+static const struct zwp_primary_selection_source_v1_interface primary_source_impl = {
+  .offer = primary_source_offer,
+  .destroy = primary_source_destroy,
+};
+
+static const struct zwp_primary_selection_device_v1_interface primary_device_impl = {
+  .set_selection = primary_device_set_selection,
+  .destroy = primary_device_destroy,
+};
 
 /* ------------------------------------------------------------------ *
  * The drag                                                           *
@@ -1700,6 +2186,24 @@ data_source_resource_destroyed (struct wl_resource *resource)
   DataSource *source = wl_resource_get_user_data (resource);
   NestedCompositor *self = source->compositor;
 
+  if (source->primary)
+    {
+      /* Offers are the clients' to destroy; detach them so a later receive
+       * falls back to the host primary clipboard instead of a dead source. */
+      primary_offers_detach (source);
+
+      if (self->primary_source == source)
+        {
+          self->primary_source = NULL;
+          clipboard_transfer_cancel (self->primary_transfer);
+          primary_advertise (self);
+        }
+
+      g_clear_pointer (&source->mime_types, g_ptr_array_unref);
+      g_free (source);
+      return;
+    }
+
   /* "If source is destroyed, the drag-and-drop session will be cancelled": the
    * drag is called off first, and its hold on this resource is dropped before
    * that happens, because a source being destroyed cannot be sent anything. */
@@ -1914,6 +2418,99 @@ static const struct wl_data_device_interface data_device_impl = {
   .release = data_device_release,
 };
 
+/* ------------------------------------ zwp_primary_selection_device_manager_v1 */
+
+static void
+primary_manager_create_source (struct wl_client *client,
+                               struct wl_resource *resource, uint32_t id)
+{
+  NestedCompositor *self = wl_resource_get_user_data (resource);
+  struct wl_resource *source_resource;
+  DataSource *source = g_new0 (DataSource, 1);
+
+  source->compositor = self;
+  source->primary = TRUE;
+  source->mime_types = g_ptr_array_new_with_free_func (g_free);
+  wl_list_init (&source->offers);
+  wl_list_init (&source->primary_offers);
+
+  source_resource = resource_create (client,
+                                     &zwp_primary_selection_source_v1_interface,
+                                     1, id);
+  if (!source_resource)
+    {
+      g_clear_pointer (&source->mime_types, g_ptr_array_unref);
+      g_free (source);
+      return;
+    }
+
+  source->resource = source_resource;
+  wl_resource_set_implementation (source_resource, &primary_source_impl, source,
+                                  data_source_resource_destroyed);
+  g_debug ("nested: primary source id %u created", wl_resource_get_id (source_resource));
+}
+
+static void
+primary_manager_get_device (struct wl_client *client,
+                            struct wl_resource *resource, uint32_t id,
+                            struct wl_resource *seat)
+{
+  NestedCompositor *self = wl_resource_get_user_data (resource);
+  PrimaryDevice *device = g_new0 (PrimaryDevice, 1);
+  struct wl_resource *device_resource;
+
+  device->compositor = self;
+  wl_list_init (&device->offers);
+
+  device_resource = resource_create (client, &zwp_primary_selection_device_v1_interface,
+                                     1, id);
+  if (!device_resource)
+    {
+      g_free (device);
+      return;
+    }
+
+  device->resource = device_resource;
+  wl_resource_set_implementation (device_resource, &primary_device_impl, device,
+                                  primary_device_resource_destroyed);
+  wl_list_insert (&self->primary_devices, &device->link);
+  g_debug ("nested: primary device id %u created",
+           wl_resource_get_id (device_resource));
+
+  if (!self->primary_source && !self->primary_bytes)
+    primary_paste_clipboard (self);
+  else
+    primary_advertise (self);
+}
+
+static void
+primary_manager_destroy (struct wl_client *client, struct wl_resource *resource)
+{
+  wl_resource_destroy (resource);
+}
+
+static const struct zwp_primary_selection_device_manager_v1_interface
+  primary_manager_impl = {
+    .create_source = primary_manager_create_source,
+    .get_device = primary_manager_get_device,
+    .destroy = primary_manager_destroy,
+  };
+
+void
+primary_selection_manager_bind (struct wl_client *client, void *data,
+                                uint32_t version, uint32_t id)
+{
+  struct wl_resource *resource =
+    resource_create (client, &zwp_primary_selection_device_manager_v1_interface,
+                     version, id);
+
+  if (resource)
+    {
+      wl_resource_set_implementation (resource, &primary_manager_impl, data, NULL);
+      g_debug ("nested: primary selection manager bound by client");
+    }
+}
+
 /* ------------------------------------------------------ wl_data_device_manager */
 
 static void
@@ -1928,6 +2525,7 @@ data_device_manager_create_data_source (struct wl_client *client, struct wl_reso
   source->compositor = self;
   source->mime_types = g_ptr_array_new_with_free_func (g_free);
   wl_list_init (&source->offers);
+  wl_list_init (&source->primary_offers);
 
   source_resource = resource_create (client, &wl_data_source_interface,
                                      wl_resource_get_version (resource), id);
@@ -2021,6 +2619,33 @@ nested_compositor_set_clipboard (NestedCompositor *self, GdkClipboard *clipboard
   compositor_paste_clipboard (self);
 }
 
+void
+nested_compositor_set_primary_clipboard (NestedCompositor *self,
+                                         GdkClipboard *clipboard)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  if (self->primary_clipboard == clipboard)
+    return;
+
+  if (self->primary_clipboard)
+    {
+      if (self->primary_handler != 0)
+        g_signal_handler_disconnect (self->primary_clipboard, self->primary_handler);
+      self->primary_handler = 0;
+      g_clear_object (&self->primary_clipboard);
+    }
+
+  if (!clipboard)
+    return;
+
+  self->primary_clipboard = g_object_ref (clipboard);
+  self->primary_handler =
+    g_signal_connect (self->primary_clipboard, "notify::content",
+                      G_CALLBACK (primary_on_clipboard_changed), self);
+  primary_paste_clipboard (self);
+}
+
 /* Dispose path: the transfer's watch fires on the main loop, so it must not
  * reach for an object that is going away. */
 void
@@ -2035,5 +2660,19 @@ data_device_shutdown (NestedCompositor *self)
     {
       self->clipboard_transfer->compositor = NULL;
       clipboard_transfer_cancel (self->clipboard_transfer);
+    }
+
+  if (self->primary_transfer)
+    {
+      self->primary_transfer->compositor = NULL;
+      clipboard_transfer_cancel (self->primary_transfer);
+    }
+
+  if (self->primary_clipboard)
+    {
+      if (self->primary_handler != 0)
+        g_signal_handler_disconnect (self->primary_clipboard, self->primary_handler);
+      self->primary_handler = 0;
+      g_clear_object (&self->primary_clipboard);
     }
 }

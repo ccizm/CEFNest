@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<body style="margin:0;font:18px sans-serif;background:#fff;color:#024">
+  <p style="margin:20px">spellcheck fixture — type a misspelled word here</p>
+  <textarea id="t" spellcheck="true"
+            style="position:absolute;left:20px;top:70px;width:520px;height:120px;font:18px sans-serif">editable text herell</textarea>
+  <pre id="log" style="position:absolute;left:20px;top:220px"></pre>
+<script>
+  const t = document.getElementById('t');
+  document.getElementById('log').textContent =
+    'spellcheck=' + t.spellcheck;
+</script>
+</body>

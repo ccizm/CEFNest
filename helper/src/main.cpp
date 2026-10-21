@@ -85,6 +85,13 @@ constexpr size_t kMaxResultBytes = 64 * 1024;
  * length the server never told. */
 constexpr int64_t kProgressByteStep = 256 * 1024;
 
+/* Default-off spellcheck. The user asked for no suggestion menu and no word
+ * selection; the command-line switch alone is not enough on every CEF build, so
+ * the renderer side also turns the attribute off and keeps new editable nodes
+ * covered. CHROMIUM_SPELLCHECK=1 restores the old behavior. */
+constexpr char kDisableSpellcheckScript[] =
+    R"JS((function(){var fix=function(){var nodes=document.querySelectorAll("input,textarea,[contenteditable]");for(var i=0;i<nodes.length;i++){try{nodes[i].spellcheck=false;}catch(e){}}};fix();if(!window.__cefnestNoSpellcheck){window.__cefnestNoSpellcheck=1;new MutationObserver(fix).observe(document.documentElement,{childList:true,subtree:true});}})();)JS";
+
 const char kDefaultUrl[] =
     "data:text/html;charset=utf-8,"
     "%3Cbody%20style%3D%22margin%3A0%3Bbackground%3A%23101828%3B"
@@ -510,6 +517,71 @@ class HelperFindHandler : public CefFindHandler {
 // documented behaviour and the safe one for a host that stops replying.
 CefRefPtr<CefRunContextMenuCallback> g_menu_callback;
 
+/* Chromium selects the misspelled word before it hands the menu over. The
+ * selection is useful to its suggestion commands but wrong after the menu is
+ * gone: the next Ctrl+V replaces the word instead of inserting at the caret.
+ * Keep the frame and collapse to the selection end after the answer. */
+CefRefPtr<CefFrame> g_menu_restore_frame;
+bool g_menu_restore_caret = false;
+unsigned int g_menu_generation = 0;
+
+void CollapseCaretInFrame(CefRefPtr<CefFrame> frame) {
+  if (!frame || !frame->IsValid())
+    return;
+
+  // Direct script text, not eval: the same CSP-safe shape as js-expr. For an
+  // input/textarea collapse its own range; for contenteditable collapse the
+  // document selection. The word is deliberately left at the caret, not
+  // selected.
+  frame->ExecuteJavaScript(
+      R"JS((function(){try{var e=document.activeElement;if(!e)return;var done=false;if(typeof e.setSelectionRange==="function"){try{var p=e.selectionEnd;e.setSelectionRange(p,p);done=true;}catch(x){}}if(!done){var s=window.getSelection();if(s&&s.rangeCount){var r=s.getRangeAt(0);r.collapse(false);s.removeAllRanges();s.addRange(r);}}}catch(e){}})();)JS",
+      "cefnest-helper", 0);
+  fprintf(stderr, "helper: collapsed the spellcheck word selection after the menu\n");
+}
+
+void RestoreCaretAfterSpellcheck() {
+  if (!g_menu_restore_caret)
+    return;
+
+  CefRefPtr<CefFrame> frame = g_menu_restore_frame;
+  g_menu_restore_caret = false;
+  g_menu_restore_frame = nullptr;
+  CollapseCaretInFrame(frame);
+}
+
+class RestoreCaretTask : public CefTask {
+ public:
+  RestoreCaretTask(CefRefPtr<CefFrame> frame, unsigned int generation)
+      : frame_(frame), generation_(generation) {}
+
+  void Execute() override {
+    if (generation_ != g_menu_generation)
+      return;
+    CollapseCaretInFrame(frame_);
+  }
+
+  IMPLEMENT_REFCOUNTING(RestoreCaretTask);
+
+ private:
+  CefRefPtr<CefFrame> frame_;
+  unsigned int generation_;
+};
+
+/* Post, don't run inline: a default command such as a spelling suggestion may
+ * be queued by Continue() after this callback returns. Clearing the selection in
+ * the same task could make CEF's replacement see no word. */
+void ScheduleCaretRestoreAfterSpellcheck() {
+  if (!g_menu_restore_caret)
+    return;
+
+  CefRefPtr<CefFrame> frame = g_menu_restore_frame;
+  g_menu_restore_caret = false;
+  g_menu_restore_frame = nullptr;
+  if (!frame || !frame->IsValid())
+    return;
+  CefPostTask(TID_UI, new RestoreCaretTask(frame, g_menu_generation));
+}
+
 const char* MenuItemTypeName(cef_menu_item_type_t type) {
   switch (type) {
     case MENUITEMTYPE_COMMAND:
@@ -549,9 +621,20 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
                       CefRefPtr<CefRunContextMenuCallback> callback) override {
     CEF_REQUIRE_UI_THREAD();
 
+    // A menu that was still pending is replaced by this one; put the old
+    // selection back before looking at the new params.
+    RestoreCaretAfterSpellcheck();
+    ++g_menu_generation;
+
     // Whatever the host left unanswered is over before this one starts; the ref
     // going away is how CEF is told so.
     g_menu_callback = callback;
+
+    g_menu_restore_caret =
+        params->IsEditable() && !params->GetMisspelledWord().empty();
+    g_menu_restore_frame = frame;
+    if (g_menu_restore_caret)
+      fprintf(stderr, "helper: spellcheck menu will collapse the word selection\n");
 
     // Alloy's default model has no link/image/media actions. Add the browser
     // rows the node actually supports, and let OnContextMenuCommand execute
@@ -709,6 +792,7 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
     if (!g_menu_callback)
       return;
 
+    RestoreCaretAfterSpellcheck();
     g_menu_callback = nullptr;
     Emit(NewEvent("context-menu-dismissed"));
   }
@@ -941,7 +1025,7 @@ class HelperPermissionHandler : public CefPermissionHandler {
 // evaluates it, turns the result into JSON itself, and hands that one text to
 // kReportFunction. Statements work as well as expressions because eval() yields
 // the last value; a script that returns nothing reports null, not a failure.
-std::string WrapScript(const std::string& code, int id) {
+std::string WrapScript(const std::string& code, int id, bool expression_only) {
   CefRefPtr<CefValue> quoted = CefValue::Create();
   quoted->SetString(code);
   // JSON string syntax is a subset of JavaScript string syntax, so the code can
@@ -958,7 +1042,14 @@ std::string WrapScript(const std::string& code, int id) {
   out += "} catch (e) {}";
   out += "}";
   out += "var __value;";
-  out += "try { __value = eval(" + literal + "); }";
+  if (expression_only) {
+    // Direct embedding, not eval(): pages with a script-src CSP reject eval()
+    // even when the embedder compiled this script itself. js-expr is for
+    // inspection expressions (and IIFEs); js remains the statement/eval form.
+    out += "try { __value = (" + code + "); }";
+  } else {
+    out += "try { __value = eval(" + literal + "); }";
+  }
   out += "catch (e) { __report(false, 'null', String((e && e.message) ? e.message : e)); return; }";
   out += "if (typeof __value === 'undefined') { __report(true, 'null', ''); return; }";
   out += "var __text;";
@@ -1211,8 +1302,19 @@ void HandleCommand(const std::string& line) {
     CefRefPtr<CefRunContextMenuCallback> callback;
     callback.swap(g_menu_callback);
     const int flags = command->HasKey("flags") ? command->GetInt("flags") : 0;
-    callback->Continue(command->GetInt("id"),
-                       static_cast<cef_event_flags_t>(flags));
+    const int command_id = command->GetInt("id");
+    // Paste is the one command whose result depends on the selection it sees.
+    // Collapse first so it inserts at the caret, not over the spellcheck word.
+    // Select All is the opposite: the selection is the result, so leave it.
+    if (command_id == MENU_ID_PASTE ||
+        command_id == MENU_ID_PASTE_MATCH_STYLE)
+      RestoreCaretAfterSpellcheck();
+    if (command_id == MENU_ID_SELECT_ALL) {
+      g_menu_restore_caret = false;
+      g_menu_restore_frame = nullptr;
+    }
+    callback->Continue(command_id, static_cast<cef_event_flags_t>(flags));
+    ScheduleCaretRestoreAfterSpellcheck();
     return;
   }
 
@@ -1225,6 +1327,7 @@ void HandleCommand(const std::string& line) {
     // still calls OnContextMenuDismissed afterwards, by which time the
     // callback is gone and nothing more is emitted.
     callback->Cancel();
+    RestoreCaretAfterSpellcheck();
     return;
   }
 
@@ -1265,7 +1368,7 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
-  if (name == "js") {
+  if (name == "js" || name == "js-expr") {
     const std::string code = command->GetString("code").ToString();
     if (code.empty()) {
       EmitStatus("js-needs-code");
@@ -1277,7 +1380,8 @@ void HandleCommand(const std::string& line) {
       return;
     }
     const int id = command->HasKey("id") ? command->GetInt("id") : 0;
-    frame->ExecuteJavaScript(WrapScript(code, id), "cefnest-helper", 0);
+    frame->ExecuteJavaScript(WrapScript(code, id, name == "js-expr"),
+                             "cefnest-helper", 0);
     // The answer comes back from the renderer as a js-result event. Nothing is
     // emitted here: a navigation away from the frame can lose the script, and
     // an ack would promise a delivery the page has not confirmed.
@@ -1422,6 +1526,11 @@ class HelperApp : public CefApp {
     if (EnvOrEmpty("CHROMIUM_HELPER_DISABLE_GPU") == "1") {
       command_line->AppendSwitch("disable-gpu");
       fprintf(stderr, "helper: --disable-gpu\n");
+    }
+
+    if (EnvOrEmpty("CHROMIUM_SPELLCHECK") != "1") {
+      command_line->AppendSwitch("disable-spell-checking");
+      fprintf(stderr, "helper: spellcheck disabled (CHROMIUM_SPELLCHECK=1 enables)\n");
     }
   }
 
@@ -1602,6 +1711,11 @@ class HelperClient : public CefClient,
       CefRefPtr<CefDictionaryValue> zoom = NewEvent("zoom");
       zoom->SetDouble("level", browser->GetHost()->GetZoomLevel());
       Emit(zoom);
+    }
+
+    if (EnvOrEmpty("CHROMIUM_SPELLCHECK") != "1") {
+      frame->ExecuteJavaScript(kDisableSpellcheckScript, "cefnest-helper", 0);
+      fprintf(stderr, "helper: spellcheck disabled in the page\n");
     }
   }
 

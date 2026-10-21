@@ -13,6 +13,7 @@ libcefnest = shared_library(
     viewporter_server_header, viewporter_code,
     fractional_scale_server_header, fractional_scale_code,
     text_input_server_header, text_input_code,
+    primary_selection_server_header, primary_selection_code,
     cursor_shape_server_header, cursor_shape_code, tablet_code ],
   c_args: [
     '-DHELPER_PATH="' + helper_default_path + '"',
