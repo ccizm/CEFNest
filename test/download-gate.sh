@@ -217,9 +217,11 @@ import time
 # gate.bin is 6000 bytes and answers in one write, so the small attachment is
 # long finished before the run looks at it. stream.bin is 1 MiB dribbled out at
 # 32 KiB per 100 ms: on a loopback address that is the only way a download can
-# still be in flight when something tries to cancel it.
+# still be in flight when something tries to cancel it. second.bin is the
+# second attachment the named-accept scenario runs next to a live stream.
 BLOB = b"cefnest download gate payload\n" * 200
 STREAM = b"x" * (2 * 1024 * 1024)
+SECOND = b"s" * 4321
 CHUNK = 32 * 1024
 
 
@@ -232,7 +234,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path.startswith("/blob"):
+        if self.path.startswith("/blob2"):
+            self._headers("second.bin", len(SECOND))
+            self.wfile.write(SECOND)
+        elif self.path.startswith("/blob"):
             self._headers("gate.bin", len(BLOB))
             self.wfile.write(BLOB)
         elif self.path.startswith("/stream"):
@@ -324,6 +329,45 @@ EOF
   expect 'download [0-9]+ end state=cancelled' "$WORK/real-cancel.log" real-cancel
   expect_no 'state=complete' "$WORK/real-cancel.log" real-cancel
   echo "  info real-cancel: $(ls -A "$WORK/cancel" | tr '\n' ' ')"
+
+  # Two downloads alive at once: one parked, one accepted and in flight. The
+  # positional steps always reach the first row, so this run is the one that
+  # proves the named steps can say which download they mean. Second.bin goes to
+  # its own path by name; the in-flight stream is cancelled by name and may not
+  # leave anything behind.
+  #
+  # The last wait is long on purpose. Second.bin is on disk the moment its path
+  # is named (measured: mtime lands with the accept line), but CEF only reports
+  # the terminal complete 3.2-5.7 s later — measured three times on this
+  # scenario — because the final state update goes out with Chromium's batched
+  # download-database flush rather than with the move. A 4 s window lost the line
+  # while the file was there (docs/download-path.md).
+  script real-named <<EOF
+load http://127.0.0.1:$PORT/stream
+wait 1500
+download-accept $WORK/named/stream.bin
+load http://127.0.0.1:$PORT/blob2
+wait 1500
+download-accept-name second $WORK/named/second.bin
+download-reject-name stream
+wait 9000
+close
+EOF
+  run_demo real-named "$WORK/real-named.log" "$HELPER" \
+    CEFNEST_DOWNLOAD_ASK=1 CEFNEST_DOWNLOAD_DIR="$WORK/named"
+  expect 'download [0-9]+ begin name=stream\.bin' "$WORK/real-named.log" real-named
+  expect 'download [0-9]+ begin name=second\.bin' "$WORK/real-named.log" real-named
+  expect 'download [0-9]+ end state=complete path=.*/named/second\.bin' \
+    "$WORK/real-named.log" real-named
+  expect 'download [0-9]+ end state=cancelled' "$WORK/real-named.log" real-named
+  expect_count 'end state=cancelled' "$WORK/real-named.log" 1 real-named
+  expect_count 'state=complete' "$WORK/real-named.log" 1 real-named
+  expect_file "$WORK/named/second.bin" real-named 4321
+  if [ -e "$WORK/named/stream.bin" ]; then
+    bad "real-named: stream.bin landed in $WORK/named"
+  else
+    ok "real-named: no stream.bin in $WORK/named"
+  fi
 
   # Never answered: CEF cancels the download when the parked gate dies with the
   # process, so the run that walks away from a request leaves nothing behind.

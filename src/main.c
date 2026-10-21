@@ -593,6 +593,7 @@ session_script_result (ChromiumSession *session, int id, gboolean ok,
 typedef struct {
   int id;
   char *name;
+  char *url;
   gboolean decided;   /* a path or a refusal has gone to the helper */
   gboolean finished;  /* download-end arrived */
   GtkWidget *info;
@@ -606,6 +607,7 @@ free_download_row (gpointer data)
   DownloadRow *row = data;
 
   g_free (row->name);
+  g_free (row->url);
   g_free (row);
 }
 
@@ -625,22 +627,6 @@ download_row_for (int id)
   return NULL;
 }
 
-static DownloadRow *
-download_first_row (gboolean (*pick) (const DownloadRow *row))
-{
-  GtkWidget *child;
-
-  for (child = demo.downloads ? gtk_widget_get_first_child (demo.downloads) : NULL;
-       child; child = gtk_widget_get_next_sibling (child))
-    {
-      DownloadRow *row = g_object_get_data (G_OBJECT (child), "cefnest-download");
-
-      if (row && pick (row))
-        return row;
-    }
-  return NULL;
-}
-
 static gboolean
 row_undecided (const DownloadRow *row)
 {
@@ -651,6 +637,37 @@ static gboolean
 row_open (const DownloadRow *row)
 {
   return !row->finished;
+}
+
+/* Scripted runs cannot know Chromium's download ids in advance — they keep
+ * counting up across runs from one cache directory — but they do know what
+ * they asked the page for. A substring of the suggested name or the URL is
+ * what a gate names a download with when two are alive at once. NULL matches
+ * every row the picker accepts. */
+static DownloadRow *
+download_find_row (const char *substring, gboolean (*pick) (const DownloadRow *row))
+{
+  GtkWidget *child;
+
+  for (child = demo.downloads ? gtk_widget_get_first_child (demo.downloads) : NULL;
+       child; child = gtk_widget_get_next_sibling (child))
+    {
+      DownloadRow *row = g_object_get_data (G_OBJECT (child), "cefnest-download");
+
+      if (!row || !pick (row))
+        continue;
+      if (!substring ||
+          (row->name && strstr (row->name, substring)) ||
+          (row->url && strstr (row->url, substring)))
+        return row;
+    }
+  return NULL;
+}
+
+static DownloadRow *
+download_first_row (gboolean (*pick) (const DownloadRow *row))
+{
+  return download_find_row (NULL, pick);
 }
 
 static void
@@ -882,6 +899,7 @@ session_download_begin (ChromiumSession *session, int id, const char *url,
 
   row->id = id;
   row->name = g_steal_pointer (&name);
+  row->url = g_strdup (url);
   row->info = info;
   row->accept = accept;
   row->reject = reject;
@@ -2468,6 +2486,53 @@ script_run_next (void)
           if (!row)
             {
               g_warning ("demo: no download left to reject");
+              continue;
+            }
+          download_reject (row);
+          continue;
+        }
+      else if (!strncmp (line, "download-accept-name ", 21))
+        {
+          /* Two downloads alive at once: the first-row steps cannot say which
+           * one they mean, and a gate knows the file it asked for, not
+           * Chromium's id. First word is a substring of the suggested name or
+           * the URL, the rest is the path. */
+          const char *rest = line + 21;
+          const char *space = strchr (rest, ' ');
+          const char *path;
+          DownloadRow *row;
+
+          if (!space || space == rest || !space[1])
+            {
+              g_warning ("demo: download-accept-name wants '<substring> <path>',"
+                         " got '%s'", rest);
+              continue;
+            }
+          path = space + 1;
+          g_autofree char *substring = g_strndup (rest, space - rest);
+          row = download_find_row (substring, row_undecided);
+          if (!row)
+            {
+              g_warning ("demo: no undecided download matches '%s'", substring);
+              continue;
+            }
+          download_accept (row, path);
+          continue;
+        }
+      else if (!strncmp (line, "download-reject-name ", 21))
+        {
+          const char *substring = line + 21;
+          DownloadRow *row;
+
+          if (!*substring)
+            {
+              g_warning ("demo: download-reject-name wants a substring");
+              continue;
+            }
+          row = download_find_row (substring, row_open);
+          if (!row)
+            {
+              g_warning ("demo: no open download matches '%s'", substring);
               continue;
             }
           download_reject (row);

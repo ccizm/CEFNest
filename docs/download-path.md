@@ -1,9 +1,9 @@
-# 下载：一个挂住的问题，和三条实测语义
+# 下载：一个挂住的问题，和四条实测语义
 
-日期：2026-10-21
+日期：2026-10-21（第四条 2026-10-22）
 问题：任务 P2-1（#34–#38）。`docs/control-channel.md` 第 4 节以前把下载判成「不做」，理由
 是它不是一问一答：要落盘、要给路径、有进度、能取消。这一篇把形状补出来，并且把 CEF 154
-那三个只有实测才知道的行为钉住。
+那只有实测才知道的行为钉住——一开始是三条，`real-named` 那一跑撞出了第四条。
 
 ## 1. 形状：门禁可以挂着，但只能挂一个
 
@@ -68,9 +68,9 @@ chunked 下载从头到尾只发得出**一条**进度事件。所以加了第�
 `json_object_get_double_member` 读回来再转 `gint64`——double 在 2^53 以内精确，2^53 字节
 （8 PiB）的文件不是这条通道要商量的事。
 
-## 4. 三条只能实测的语义
+## 4. 四条只能实测的语义
 
-这三条都不在头文件里，是真 Chromium 教的，`test/download-gate.sh` 把它们钉住了。
+这几条都不在头文件里，是真 Chromium 教的，`test/download-gate.sh` 把它们钉住了。
 
 ### 4.1 `OnDownloadUpdated` 会先于 `OnBeforeDownload` 到
 
@@ -119,6 +119,28 @@ demo: download 21 end state=cancelled path= bytes=0
 `received_bytes=0`——和 4.3 的形状**故意一致**，宿主分不出这两种「没有」，也不需要分：
 两条都表示没有文件。一次真机拒绝实测到恰好一条 `end state=cancelled`。
 
+### 4.4 门禁挂久了再给路径，`complete` 会晚 3–6 s 才来
+
+`real-named` 第一次跑就把这条撞了出来。转录（时间戳是门禁给每行盖的）：
+
+```
+00:46:13.958 demo: download 136 accept path=/tmp/.../named/second.bin
+00:46:13.961 demo: download 135 end state=cancelled path= bytes=0     ← 另一条按名砍掉
+00:46:16.664 demo: download 136 end state=complete path=/tmp/.../named/second.bin
+```
+
+`second.bin` 的 mtime 是 `00:46:13.956`——**文件在给路径的那一刻就落盘了**，`end` 却在
+2.7 s 之后才到。连着三次实测 `accept`→`end state=complete` 的间隔是 **3.24 / 4.12 / 5.72 s**。
+字节早在 4.2 节说的那条 `percent=100` 里就到了，`Continue()` 只是把它挪进最终路径，
+可 CEF 的终止更新不是跟着这次挪动来的，它和 Chromium 下载库的批量落盘一起排。
+另一种情形能证明它是「排着」而不是「丢了」：同一条 second.bin，在另一条 stream 自然跑完
+的时候，`end` 就紧跟在那条 stream 的最后一条 progress 后面出来——有活动把它冲出来了。
+
+宿主代码这里没有任何补救可做：`CefDownloadItem` 不给「已写盘」这个状态，helper 也不该拿
+`percent=100` 冒充 `complete`。能做的是把语义写清楚（4.2 已经写过一次，这条是它的加强版：
+`complete` 不只是「写盘」，还会晚几秒），以及让门禁等够——`real-named` 的收尾等待从 4 s
+改成 9 s，因为 4 s 真的会只看到文件、看不到事件。
+
 ## 5. 策略的默认值：demo 面板做了什么
 
 `src/main.c` 的下载区只做两件事——把 id 变成一行 UI，和决定要不要立刻给路径：
@@ -127,7 +149,7 @@ demo: download 21 end state=cancelled path= bytes=0
 | --- | --- |
 | （都不设） | 自动接受，写到 XDG 下载目录（拿不到就 `$HOME`） |
 | `CEFNEST_DOWNLOAD_DIR=<绝对路径>` | 同上，但写到这个目录；不存在就建 |
-| `CEFNEST_DOWNLOAD_ASK=1` | 谁都不自动接受，行停在那里等「保存」/「丢弃」，等脚本步骤 `download-accept <path>` / `download-reject` |
+| `CEFNEST_DOWNLOAD_ASK=1` | 谁都不自动接受，行停在那里等「保存」/「丢弃」，等脚本步骤 `download-accept <path>` / `download-reject`（按名寻址的变体见 §脚本步骤） |
 
 两个都可以设：`ASK=1` 赢，目录只在人真的点了保存时用来算一个默认名。策略是在启动时打印
 出来的，转录里能看到，门禁就靠这行确认自己跑的是哪条政策：
@@ -140,9 +162,15 @@ demo: downloads: dir=/tmp/dlprobe/refuse ask=1
 不是某个 id：一个静态脚本没法预先知道 Chromium 的编号（§1）。`reject` 挑第一个还没结束的
 行，所以它既能拒未开始的、也能砍在飞的，和协议里那条命令一致。
 
+按位置挑在两个下载同时活着的时候说不清指谁。`download-accept-name <子串> <path>` 和
+`download-reject-name <子串>` 按**建议名或 URL 的子串**挑行——脚本知道自己向页面要的是
+哪个文件，不知道 Chromium 的编号。门禁场景 `real-named`（§6）同时挂一个在飞的 stream.bin
+和一个停着的 second.bin：按名接受 second 到自己的路径、按名砍掉 stream，断言目录里只有
+second.bin、且两种 end 各恰好一条。
+
 ## 6. 门禁
 
-`test/download-gate.sh`（`fake` / `real` / 两者）十次运行、41 条断言：
+`test/download-gate.sh`（`fake` / `real` / 两者）十一次运行、50 条断言：
 
 | 场景 | 钉住的东西 |
 | --- | --- |
@@ -155,15 +183,17 @@ demo: downloads: dir=/tmp/dlprobe/refuse ask=1
 | `real-auto` | 真 `Content-Disposition: attachment` → `download-begin`，6000 字节落盘 |
 | `real-refuse` | 真机拒绝：恰好一条 `cancelled`，目录空 |
 | `real-cancel` | 真机在飞取消：`percent` 在 1–99 之间，`cancelled` |
+| `real-named` | 两个下载同时活着时按名寻址：second 落自己的路径、stream 被砍且不留文件 |
 | `real-never` | 真机不答：目录空（进程退出时门禁自己烂掉，没有文件） |
 
-`real-*` 那四次要一个真的 HTTP 服务器，脚本自己起了一个临时线程服务器：`/blob` 一次写完
-6000 字节，`/stream` 2 MiB 按 32 KiB / 100 ms 往外滴。**滴是必要的**——本地地址上一次
-不加控制的下载，在宿主有机会取消之前就已经 `complete` 了，第一版门禁就是这么撞上「no
-download left to reject」的。
+`real-*` 那五次要一个真的 HTTP 服务器，脚本自己起了一个临时线程服务器：`/blob` 一次写完
+6000 字节，`/blob2` 4321 字节是给 `real-named` 的第二个附件，`/stream` 2 MiB 按 32 KiB /
+100 ms 往外滴。**滴是必要的**——本地地址上一次不加控制的下载，在宿主有机会取消之前就已经
+`complete` 了，第一版门禁就是这么撞上「no download left to reject」的。`real-named` 的收尾
+等待写死 9 s，因为 4.4 那条 `complete` 的迟到：4 s 的时候文件在、事件还没来。
 
 它开真窗口、跑真浏览器，所以和 `test/*.session` 同一档：手跑门禁，不进 `meson test`。
-`meson test -C builddir` 14/14 与 `python3 test/audit-impl-slots.py builddir` 不受影响。
+`meson test -C builddir` 15/15 与 `python3 test/audit-impl-slots.py builddir` 不受影响。
 
 
 ## 暂停 / 恢复（2026-10-21）

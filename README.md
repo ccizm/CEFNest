@@ -141,7 +141,7 @@ of it is reproducible runs:
 | `CHROMIUM_HELPER` | set (to anything) to force session mode; a path here must contain `/`, and it is used as written even when it does not exist |
 | `CEFNEST_HELPER` | the same rule one step earlier: a path with `/` in it wins over `CHROMIUM_HELPER`. With neither set, the library resolves the helper itself — compiled-in install path, then the cmake tree it was built next to (`docs/packaging.md`) |
 | `CHROMIUM_URL` | page to open |
-| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `zoom-in`, `zoom-out`, `zoom-reset`, `js`, `js-expr`, `a11y-on`, `a11y-off`, `frames`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `drop-in <x0> <y0> <x1> <y1> [text] [mimes]`, `drop-in-hold`, `drop-in-move <x> <y>`, `drop-in-drop`, `drop-in-cancel`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `download-pause`, `download-resume`,
+| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `zoom-in`, `zoom-out`, `zoom-reset`, `js`, `js-expr`, `a11y-on`, `a11y-off`, `frames`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `drop-in <x0> <y0> <x1> <y1> [text] [mimes]`, `drop-in-hold`, `drop-in-move <x> <y>`, `drop-in-drop`, `drop-in-cancel`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `download-accept-name <substring> <path>`, `download-reject-name <substring>`,
 `new-tab <url>`, `new-window <url>`, `select-browser <id>`, `close-browser <id>`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `perm-accept <id>`, `perm-deny <id>`, `perm-dismiss <id>`, `close`, `quit` — see `test/*.session`. Navigation, JS, zoom, mute, download, find, menu and permission steps need a helper session — any of them in a run that has none ends it with status 1 instead of being skipped, while `wait`, `shot`, `dump`, `surfaces`, `hover`, `click`, `drag`, `wheel`, `drop-in*` and `close` drive the nested compositor alone |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_WINDOW` | `fullscreen` or `maximize`, for deterministic geometry |
@@ -174,8 +174,8 @@ menus/primary/a11y are in `docs/minimal-host.md`.
 ## Test
 
 ```bash
-meson test -C builddir                       # 13 tests
-meson test -C builddir --suite selftest      # the eleven seat selftests
+meson test -C builddir                       # 15 tests
+meson test -C builddir --suite selftest      # the thirteen seat selftests
 meson test -C builddir --suite protocol      # the implementation-slot audit
 meson test -C builddir --suite unit          # the helper-path resolution rule
 ```
@@ -190,7 +190,8 @@ client saw. Each mode asks for a different set of protocol objects:
 
 with `--dmabuf`, `--text-input`, `--cursor-shape`, `--popup`, `--refused`,
 `--pool-budget`, `--dnd-requests`, `--drag-out`, `--drag-in`, `--fullscreen`,
-`--gtk-client`. On a machine with no display they report `skipping` and exit 0.
+`--second-window`, `--gtk-client`. On a machine with no display they report
+`skipping` and exit 0.
 
 `--pool-budget` is the one where the client is the attacker: it hands over sixteen
 100 MB pools — each of them legal on its own — and keeps them all alive, and the
@@ -223,6 +224,23 @@ script to nobody.
 client, so it is the one place that can tell whether the bytes it was handed are
 the bytes it was promised, and it compares them itself and exits 1 on a mismatch
 rather than leaving the verdict to a log line.
+
+`--second-window` is the multi-window input gate, and it is the one run where the
+client's picture *is* the assertion. One `shm-client` maps a second toplevel
+(`nested-shm-test-second`) beside its first and paints the window `wl_keyboard`
+named red (`#c04040`), the other green (`#40c040`), redrawing on every enter and
+leave — two toplevels from one client, because two CEF windows are also two
+toplevels from one helper. `seat-selftest` then names the input surface at each
+window, calls `nested_compositor_clear_input_surface()` once from a window that
+does not own the input and once from the one that does, and at every checkpoint
+checks three things that can disagree: the compositor's own
+`keyboard_focus`/`pointer_focus`, the `nested_compositor_get_toplevels()`
+inventory, and the centre pixel of each toplevel pulled out with
+`gdk_texture_download()`. Dropping the owner guard and dropping the retarget
+inside `clear_input_surface` each turned a green run red, which is why the
+pixels are in the assertion at all — a gate that only checks state and never the
+wire is not a gate (`docs/empty-request-slot.md`). The step table and what the
+run cannot yet say are in `docs/multi-browser.md`.
 
 What the compositor sends is only half of it, so the wheel is also checked where
 it matters:
@@ -426,12 +444,17 @@ its own accord, or no helper to start at all, in which case there is no `::close
 to report and the script engine says it itself (`docs/session-lifecycle.md` §4–§6),
 and that the
 existing gates run inside it: `find-gate.sh` (34 assertions), `permission-gate.sh`
-(58), `download-gate.sh` (46), `dnd-gate.sh` (59), `pixel-gate.sh` (12),
+(58), `download-gate.sh` (54), `dnd-gate.sh` (59), `pixel-gate.sh` (12),
 `primary-gate.sh` (2), `multi-browser-gate.sh` (6),
-`sandbox-soak.sh` (12) and `meson test` (14/14) all pass unchanged, and
-`menu-gate.sh` passes 45 of its 47 —
+`sandbox-soak.sh` (12) and `meson test` (15/15) all pass unchanged, and
+`menu-gate.sh` passed 45 of its 47 on that run —
 the two it skips are the ones that assert a popup surface reached a screen, which a
-display with no output device cannot do (`docs/headless-ci.md` §5). What it cannot
+display with no output device cannot do (`docs/headless-ci.md` §5). That last row is
+not reproducible on this laptop as of 2026-10-22: the headless shell stopped answering
+the popup's `xdg_surface.configure`, so `gtk_popover_popup()` blocks the demo's main
+thread inside a Wayland roundtrip and the run dies on its timeout — measured the same
+at `HEAD` with the current changes taken back off, and clean on a real display, so it
+is the outer compositor, not this layer (`docs/headless-ci.md` §6.1). What it cannot
 prove is frame pacing: a display with no output device never runs a second GTK
 display cycle, which is exactly the failure mode `docs/frame-clock-pacing.md` §8
 documents, where a client left waiting on that cycle stopped animating and stopped
@@ -441,8 +464,8 @@ answer. `docs/headless-ci.md` is the write-up.
 `test/ci-all.sh` is the one command that runs the whole battery through it — proof,
 `meson test` and all nine gates, each in its own nested compositor, one verdict table
 with the skipped checks counted in a column of their own, non-zero exit if anything
-failed. Measured on this laptop: 370 s for the nine runs — 273 gate assertions plus
-`meson test` 14/14, with 2 checks skipped.
+failed. Measured on this laptop on 2026-10-21: 370 s for the nine runs — 273 gate
+assertions plus `meson test` 14/14, with 2 checks skipped.
 
 ```bash
 ./test/ci-all.sh                    # everything
@@ -561,14 +584,14 @@ They are the record of *why* the code is shaped like this:
 | `zoom-path.md` | CEF zoom levels, the half-level step, per-origin persistence, why `load-end` re-reports the level, and the demo's keyboard bindings |
 | `real-sites.md` | the five-site real-page inspection batch: one nested session per site, screenshots, JS readbacks, 3-second rAF counts, and the measured H.264/VP9 result |
 | `pdf-path.md` | the measured PDF-viewer result: thumbnails/page controls in the widget dump, and what was not tested (forms, annotations, printing) |
-| `multi-browser.md` | the single-helper browser registry, tab strip, standalone host windows, protocol ids, and the remaining per-window input/popup caveat |
+| `multi-browser.md` | the single-helper browser registry, tab strip, standalone host windows, protocol ids, the per-window input hand-back rule and its gate, and the remaining popup caveat |
 | `cnb-ci.md` | the cnb.cool entry point, the self-hosted runner it expects, and the one-time native/CEF prerequisites |
 | `structural-decisions.md` | the two items intentionally left for a product decision: browser routing for tabs/windows, and arm64/loong64 CEF supply |
 | `frame-metrics.md` | the compositor frame counter / script/env export and the software-path pool mmap + damage shadow copy |
 | `minimal-host.md` | the three-object host, the required order, and a map of which API/signal to add for navigation, JS, downloads, menus, primary selection and a11y |
 | `audio-path.md` | where the page's sound actually goes: an unsandboxed audio service, straight to the host's speakers, and what muting it measures |
 | `protocol-ceilings.md` | what real clients bind against the nested compositor, and the measured verdict on every protocol and version ceiling left un-advertised |
-| `download-path.md` | the parked `OnBeforeDownload` gate, who decides the path, and the three CEF download behaviours only a measurement can tell you |
+| `download-path.md` | the parked `OnBeforeDownload` gate, who decides the path, and the four CEF download behaviours only a measurement can tell you |
 | `find-path.md` | a command that answers nothing, the reply shape only a measurement gives (one identifier per request, one to three updates per request), and what actually scrolls the page |
 | `drag-loop.md` | the in-page drag choreography, the measured proof that a `wl_data_device.enter` reaches the page, what the destination actually accepts, why the fd relay is not what carries a same-page payload, how a drag that crosses the window edge is read off the page's source and handed to the host (image bytes become a temp file offered as a file list), and how the same crossing in reverse makes the compositor the source — including the measurement that says a page reads a host drag the moment it is entered, so only `finish` can decide the verdict |
 | `context-menu.md` | the one constraint that decided the whole design (Chromium holds a single unanswered menu request), what CEF's Alloy default model really contains, the helper-added link/image/media rows, and `Continue(id)` proven inside the page |
@@ -595,6 +618,19 @@ They are the record of *why* the code is shaped like this:
   out to an editor, text in from it).
 - **One seat, one pointer, no touch.** The embedding widget is the only device
   the compositor knows about.
+- **Independent host windows get the input, and a gate says so.** A view that
+  names itself with `nested_compositor_set_input_surface()` takes the pointer and
+  the keyboard, and the hand-back is explicit rather than self-healing: a view
+  whose GTK window closes or hides calls
+  `nested_compositor_clear_input_surface()`, which drops the override only when
+  that view is the one currently named — so a second window closing later cannot
+  strip routing from the window that has since taken it over — and retargets the
+  seat in the same call instead of on the next event. What the compositor believes
+  is then checked against what the client paints, by
+  `seat-selftest --second-window` (`docs/multi-browser.md`). One path is still
+  outside that guarantee: a drag **started** in an independent window. The
+  out-of-bounds handover creates its `GdkDrag` on the demo's main toplevel
+  (`docs/drag-loop.md` §6), so such a drag leaves from the wrong surface.
 - **H.264/MP4 is absent from this CEF distribution.** Real YouTube reports
   `videoReady=4` but `canPlayType('video/mp4; codecs="avc1.42E01E"')` is empty;
   VP9 WebM answers `probably`, and YouTube still plays through VP9. MP4/H.264-only
@@ -622,7 +658,11 @@ They are the record of *why* the code is shaped like this:
   `download-resume`; the terminal event is still CEF's `download-end`. Of the
   three end states, `interrupted` is the one `test/download-gate.sh` cannot
   reach: the local server keeps answering until Chromium gives up on its own
-  (`docs/download-path.md`).
+  (`docs/download-path.md`). And `complete` is not the moment the file appears:
+  when the bytes arrived while the gate was still parked, the file is on disk as
+  soon as the path is named but CEF's terminal event follows 3–6 s later, batched
+  with Chromium's download-database flush (measured 3.24 / 4.12 / 5.72 s, so the
+  gate waits 9 s — `docs/download-path.md` §4.4).
 - **Find walks matches one at a time.** CEF's `Find` has no "jump to match N",
   and a brand-new search selects nothing at all (the active ordinal is 0), so a
   host that wants the fifth match sends five steps. Measured once in three runs,

@@ -31,9 +31,19 @@
  * a raw client reads what it likes; a toolkit builds state out of the same
  * events and can die on that, so only a real client can prove a sequence is
  * survivable. The raw client does check one thing of its own, and stops the run
- * if the compositor gets it wrong: see client_exited(). */
+ * if the compositor gets it wrong: see client_exited().
+ *
+ * --second-window is two windows of one client at once, which is what two
+ * independent CEF browser windows are: one wl_client, two toplevels, and one
+ * pointer and keyboard the host has to route between them. The client paints
+ * whichever window holds the keyboard red and the other green, so the run can
+ * read the seat's decision off the frames the compositor imported — and off the
+ * focus the compositor itself records. A window closing is part of the same
+ * script: the client destroys the second toplevel when the key it is asked to
+ * press arrives, which only happens if the keyboard really was in it. */
 #define G_LOG_DOMAIN "seat-selftest"
 
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -41,9 +51,11 @@
 #include <cairo.h>
 
 #include "nested.h"
+#include "nested-internal.h"
 
 #define BTN_LEFT 0x110
 #define KEY_A    30 /* evdev, i.e. xkb keycode 38 */
+#define KEY_ESC  1  /* the one --second-window closes itself on */
 
 typedef enum {
   STEP_SETTLE,
@@ -76,6 +88,9 @@ typedef enum {
   STEP_DRAG_IN_DROP,
   STEP_DRAG_IN_CANCEL,
   STEP_DRAG_IN_CHECK,
+  STEP_SECOND_COUNT,
+  STEP_SECOND_ROUTE,
+  STEP_SECOND_EXPECT,
   N_STEP_KINDS
 } StepKind;
 
@@ -86,7 +101,7 @@ typedef struct {
   int delay;
 } Step;
 
-static const Step script[] = {
+static const Step default_script[] = {
   { STEP_SETTLE,          0,   0, 800 }, /* let the client map and draw */
   { STEP_STACK,           0,   0,   0 }, /* where the popups were placed */
   { STEP_DUMP_COMPOSITE,  1,   0,  60 },
@@ -161,6 +176,39 @@ static const Step script[] = {
   { STEP_GTK_CLIENT,      0,   0,   0 },
 };
 
+/* A --second-window run has its own script: the one above presses, drags and
+ * composes against a single window, and none of that belongs to a run about
+ * which of two windows the seat hands the keyboard to. */
+static const Step second_script[] = {
+  { STEP_SETTLE,         0,   0, 900 }, /* both windows map, configure, paint */
+  { STEP_SECOND_COUNT,   2,   0,   0 },
+  { STEP_POINTER_ENTER, 300, 200,  80 },
+  { STEP_KEYBOARD_ENTER,  0,   0,  80 },
+  /* The first window is not the compositor's primary — the second mapped last
+   * and took that — so this is the override being what puts the input there. */
+  { STEP_SECOND_ROUTE,    0,   0, 250 },
+  { STEP_SECOND_EXPECT,   0,   0,  80 },
+  /* A window closing that does not own the input must leave it alone. With the
+   * first window holding it and the second as primary, a clear that ignored the
+   * owner would drop input to the second one and fail the next check. */
+  { STEP_SECOND_ROUTE,    3,   0, 200 },
+  { STEP_SECOND_EXPECT,   0,   0,  80 },
+  /* The owner hands back: input goes where it goes when nothing overrides it,
+   * which is the primary — the second window. */
+  { STEP_SECOND_ROUTE,    2,   0, 250 },
+  { STEP_SECOND_EXPECT,   1,   0,  80 },
+  /* And naming the second window directly puts it there too. */
+  { STEP_SECOND_ROUTE,    1,   0, 250 },
+  { STEP_SECOND_EXPECT,   1,   0,  80 },
+  /* The key only reaches the window the seat has the keyboard in, and that one
+   * closes itself on it: the close is driven by the routing, not beside it. */
+  { STEP_KEY_DOWN,  KEY_ESC,   1,  80 },
+  { STEP_KEY_UP,    KEY_ESC,   0, 300 },
+  { STEP_SECOND_COUNT,   1,   0,   0 },
+  { STEP_SECOND_EXPECT,   2,   0, 120 },
+  { STEP_DUMP,            0,   0,   0 },
+};
+
 static const char *step_names[N_STEP_KINDS] = {
   "settle", "pointer-enter", "pointer-motion", "keyboard-enter", "keyboard-leave",
   "button-press", "button-release", "axis", "axis-stop", "key-down", "key-up",
@@ -168,7 +216,7 @@ static const char *step_names[N_STEP_KINDS] = {
   "dump", "dump-text-input", "dump-composite", "gtk-client", "drag-out",
   "drag-out-back", "drag-out-leave", "drag-out-check", "drag-in",
   "drag-in-motion", "drag-in-second", "drag-in-drop", "drag-in-cancel",
-  "drag-in-check",
+  "drag-in-check", "second-count", "second-route", "second-expect",
 };
 
 #define PREEDIT_TEXT "nihao"
@@ -179,6 +227,9 @@ static int fs_enter_seen, fs_exit_seen, fullscreen_gate;
 static GSubprocess *child;
 static GSubprocess *gtk_child;
 static size_t step_index;
+/* One of the two scripts below, picked by the flags in main(). */
+static const Step *script;
+static size_t script_count;
 static char *dump_path;
 static char *dump_ti_path;
 static char *dump_composite_path;
@@ -199,6 +250,13 @@ static gboolean drag_in_taken;
 static int drag_in_refused;
 static char drag_in_mime[128];
 static int fds_at_drag_in;
+static gboolean second_mode;
+static gboolean second_failed;
+/* The two toplevels the client maps, found by app-id rather than by position:
+ * which of them is the compositor's primary changes when one closes, and the
+ * run has to be able to say which window it is talking about either way. */
+static NestedSurface *main_surface;
+static NestedSurface *second_surface;
 
 static int  open_fds (void);
 static void check_drag_out (int expected);
@@ -400,6 +458,218 @@ save_composite (const char *path)
 
   cairo_surface_destroy (image);
   g_list_free_full (stack, g_object_unref);
+}
+
+/* ------------------------------------------------------- --second-window */
+
+#define MAIN_APP_ID   "nested-shm-test"
+#define SECOND_APP_ID "nested-shm-test-second"
+
+/* The two colours the client paints, and nothing else, in this mode. */
+#define PAINT_RED_R    0xc0
+#define PAINT_RED_G    0x40
+#define PAINT_RED_B    0x40
+#define PAINT_GREEN_R  0x40
+#define PAINT_GREEN_G  0xc0
+#define PAINT_GREEN_B  0x40
+
+static void
+second_fail (const char *format, ...)
+#if defined (__GNUC__)
+  __attribute__ ((format (printf, 1, 2)))
+#endif
+  ;
+
+static void
+second_fail (const char *format, ...)
+{
+  va_list args;
+  char *text;
+
+  va_start (args, format);
+  text = g_strdup_vprintf (format, args);
+  va_end (args);
+
+  second_failed = TRUE;
+  g_printerr ("selftest: second-window gate FAILED: %s\n", text);
+  g_free (text);
+}
+
+/* The app-ids are the only stable names two toplevels of one client have: the
+ * compositor's primary is whichever is at the head of its list, and that
+ * changes when one of them closes. */
+static const char *
+surface_name (NestedSurface *surface)
+{
+  const char *app_id;
+
+  if (!surface)
+    return "(none)";
+  if (surface == main_surface)
+    return "the first window";
+  if (surface == second_surface)
+    return "the second window";
+
+  app_id = nested_surface_get_app_id (surface);
+  return app_id ? app_id : "(other)";
+}
+
+/* The colour at the centre of what a surface last committed. The client paints
+ * nothing but the two focus colours here, so this is the client's own answer to
+ * "which window did wl_keyboard.enter name" — read off the frame the
+ * compositor imported, not off the state behind it. */
+static gboolean
+center_color (NestedSurface *surface, int *r, int *g, int *b)
+{
+  GdkTexture *texture = nested_surface_get_texture (surface);
+  int width, height, stride;
+  guchar *pixels;
+  size_t at;
+
+  if (!texture)
+    return FALSE;
+
+  width = gdk_texture_get_width (texture);
+  height = gdk_texture_get_height (texture);
+  stride = width * 4;
+  pixels = g_malloc ((size_t) stride * height);
+  gdk_texture_download (texture, pixels, stride);
+
+  /* gdk_texture_download hands back B8G8R8A8. */
+  at = (size_t) (height / 2) * stride + (size_t) (width / 2) * 4;
+  *b = pixels[at];
+  *g = pixels[at + 1];
+  *r = pixels[at + 2];
+  g_free (pixels);
+
+  return TRUE;
+}
+
+static void
+count_toplevels (int expected)
+{
+  GList *tops = nested_compositor_get_toplevels (compositor);
+  GList *l;
+  int n = g_list_length (tops);
+
+  g_clear_object (&main_surface);
+  g_clear_object (&second_surface);
+
+  for (l = tops; l; l = l->next)
+    {
+      NestedSurface *surface = l->data;
+      const char *app_id = nested_surface_get_app_id (surface);
+      int width = 0, height = 0;
+
+      nested_surface_get_size (surface, &width, &height);
+      g_print ("selftest: toplevel '%s' %dx%d\n",
+               app_id ? app_id : "(no app-id)", width, height);
+
+      if (!app_id)
+        continue;
+      if (!strcmp (app_id, MAIN_APP_ID))
+        main_surface = g_object_ref (surface);
+      else if (!strcmp (app_id, SECOND_APP_ID))
+        second_surface = g_object_ref (surface);
+    }
+
+  g_list_free_full (tops, g_object_unref);
+
+  if (n != expected)
+    second_fail ("%d toplevel(s) on screen, wanted %d", n, expected);
+  if (expected >= 1 && !main_surface)
+    second_fail ("no toplevel with app-id %s", MAIN_APP_ID);
+  if (expected >= 2 && !second_surface)
+    second_fail ("no toplevel with app-id %s", SECOND_APP_ID);
+}
+
+static void
+route_input (int what)
+{
+  switch (what)
+    {
+    case 0:
+      nested_compositor_set_input_surface (compositor, main_surface);
+      break;
+    case 1:
+      nested_compositor_set_input_surface (compositor, second_surface);
+      break;
+    case 2:
+      nested_compositor_clear_input_surface (compositor, main_surface);
+      break;
+    default:
+      /* A view unmaps when its window closes or hides. It has to take its own
+       * claim back, and nothing else's: a clear that did not check the owner
+       * would unroute the window that has since taken the input over. */
+      nested_compositor_clear_input_surface (compositor, second_surface);
+      break;
+    }
+}
+
+static void
+check_input (int expected)
+{
+  NestedSurface *want;
+  const char *what;
+  GList *tops, *l;
+
+  if (expected == 0)
+    {
+      want = main_surface;
+      what = "the first window";
+    }
+  else if (expected == 1)
+    {
+      want = second_surface;
+      what = "the second window";
+    }
+  else
+    {
+      want = nested_compositor_get_surface (compositor);
+      what = "the compositor's primary";
+    }
+
+  if (!want)
+    {
+      second_fail ("%s is not on screen to hold the input", what);
+      return;
+    }
+
+  if (compositor->keyboard_focus != want)
+    second_fail ("the keyboard focus is %s, wanted %s",
+                 surface_name (compositor->keyboard_focus), what);
+  if (compositor->pointer_focus != want)
+    second_fail ("the pointer focus is %s, wanted %s",
+                 surface_name (compositor->pointer_focus), what);
+
+  /* Both windows state in their own picture where they believe the keyboard
+   * went, and only the one named above may claim it. */
+  tops = nested_compositor_get_toplevels (compositor);
+  for (l = tops; l; l = l->next)
+    {
+      NestedSurface *surface = l->data;
+      int r, g, b;
+
+      if (!center_color (surface, &r, &g, &b))
+        {
+          second_fail ("%s has no frame to read", surface_name (surface));
+          continue;
+        }
+
+      if (surface == want)
+        {
+          if (r != PAINT_RED_R || g != PAINT_RED_G || b != PAINT_RED_B)
+            second_fail ("%s painted %02x%02x%02x while the input was said to "
+                         "be in it", surface_name (surface), r, g, b);
+        }
+      else if (r != PAINT_GREEN_R || g != PAINT_GREEN_G || b != PAINT_GREEN_B)
+        second_fail ("%s painted %02x%02x%02x while the input was in %s",
+                     surface_name (surface), r, g, b, what);
+    }
+  g_list_free_full (tops, g_object_unref);
+
+  if (!second_failed)
+    g_print ("selftest: input is in %s and every window painted that\n", what);
 }
 
 /* ---------------------------------------------------------- --gtk-client */
@@ -768,13 +1038,22 @@ run_step (gpointer data)
       step_index++;
       start_gtk_client (loop);
       return G_SOURCE_REMOVE;
+    case STEP_SECOND_COUNT:
+      count_toplevels (step->a);
+      break;
+    case STEP_SECOND_ROUTE:
+      route_input (step->a);
+      break;
+    case STEP_SECOND_EXPECT:
+      check_input (step->a);
+      break;
     default:
       break;
     }
 
   step_index++;
 
-  if (step_index >= G_N_ELEMENTS (script))
+  if (step_index >= script_count)
     {
       g_main_loop_quit (loop);
       return G_SOURCE_REMOVE;
@@ -1075,7 +1354,12 @@ main (int argc, char *argv[])
       dmabuf_mode = dmabuf_mode || !strcmp (argv[i], "--dmabuf");
       drag_out_mode = drag_out_mode || !strcmp (argv[i], "--drag-out");
       drag_in_mode = drag_in_mode || !strcmp (argv[i], "--drag-in");
+      second_mode = second_mode || !strcmp (argv[i], "--second-window");
     }
+
+  script = second_mode ? second_script : default_script;
+  script_count = second_mode ? G_N_ELEMENTS (second_script)
+                             : G_N_ELEMENTS (default_script);
 
   dump_path = argc > 1 ? argv[1] : (char *) "/tmp/seat-selftest.png";
 
@@ -1188,6 +1472,8 @@ main (int argc, char *argv[])
       g_object_unref (gtk_child);
     }
   g_object_unref (compositor);
+  g_clear_object (&main_surface);
+  g_clear_object (&second_surface);
   g_free (dump_ti_path);
   g_free (dump_composite_path);
 
@@ -1226,7 +1512,16 @@ main (int argc, char *argv[])
                     fs_enter_seen, fs_exit_seen);
     }
 
+  /* Two windows of one client, and the seat putting the pointer and the
+   * keyboard in the one the host named — including when the window it named
+   * stops existing. Each check prints its own complaint, so a run says which
+   * of the two disagree. */
+  if (second_mode && !second_failed)
+    g_print ("selftest: second-window gate ok, input followed the routing and "
+             "both windows painted it\n");
+
   return (gtk_client_failed || client_failed || drag_out_failed || drag_in_failed ||
+          second_failed ||
           dmabuf_refusals ||
           (fullscreen_gate && !(fs_enter_seen && fs_exit_seen)) ||
           (dmabuf_mode && dmabuf_advertised == 1 && !dmabuf_imports)) ? 1 : 0;

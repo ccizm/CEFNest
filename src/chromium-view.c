@@ -394,6 +394,12 @@ chromium_view_on_unmap (GtkWidget *widget, gpointer data)
 {
   ChromiumView *self = CHROMIUM_VIEW (data);
 
+  /* A window that closes or hides must not leave the seat pointing at its
+   * surface: routing would only fall back on the next event, and until then the
+   * pointer and keyboard belong to a window that is gone. */
+  if (self->target)
+    nested_compositor_clear_input_surface (self->compositor, self->target);
+
   if (self->shared)
     return;
 

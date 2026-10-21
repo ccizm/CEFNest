@@ -2539,6 +2539,19 @@ nested_compositor_set_input_surface (NestedCompositor *self,
   seat_retarget (self);
 }
 
+void
+nested_compositor_clear_input_surface (NestedCompositor *self,
+                                       NestedSurface *surface)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  if (!surface || self->input_surface != surface)
+    return;
+
+  g_clear_object (&self->input_surface);
+  seat_retarget (self);
+}
+
 GList *
 nested_compositor_get_toplevels (NestedCompositor *self)
 {

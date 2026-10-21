@@ -201,8 +201,42 @@ proof 模式那三条断言（`nested compositor on WAYLAND_DISPLAY=`、`HTTP 20
 `script [0-9]+ ok value="DND-PAGE`）证明的是这块显示器真的能用；那四跑"这一跑做不到它的
 脚本"（每跑钉两条：`rc=1`，以及转录里点出原因的那一行）证明的是这台机器上"跑不起来"能以
 失败出现、并且说清是哪一种失败，而不是只以超时出现，更不是以 0 出现；`unit` 里 selftest
-那 11 个模式本来就在进程内起嵌套 compositor、不依赖外层显示器，那一跑证明的是它们在
+那 13 个模式本来就在进程内起嵌套 compositor、不依赖外层显示器，那一跑证明的是它们在
 会话里也不受干扰。
+
+### 6.1 2026-10-22 复跑：`menu` 这一行不再结束
+
+上表之后工作树动过两处（按名寻址的下载、独立窗口输入的收口），整套重跑了一遍，两件事：
+
+- `unit` 14 → **15**（多了 `seat-selftest-second-window`），`download` 46 → **54** 条 ok
+  （`real-named` 那 8 条）。这两条是树的性质，跟显示器无关。
+- **`menu` 跑不完**：421 s 被 `ci-all` 的超时砍掉，0 条 ok。卡点是
+  `session_menu_show()` 里的 `gtk_popover_popup()`（`src/chromium-session.c:1390`）。
+  `WAYLAND_DEBUG=1` 的转录停在这两条之后：
+
+  ```
+   -> xdg_surface#55.get_popup(new id xdg_popup#56, xdg_surface#43, xdg_positioner#54)
+   -> xdg_positioner#54.destroy()
+   -> wl_surface#51.commit()
+  ```
+
+  再没有回包。gdb 看主线程：`poll()` ← `wl_display_dispatch_queue()` ← GTK 的
+  map/realize ← `gtk_widget_show()` ← `session_menu_show()`——GDK 在等外层那块 headless
+  mutter 给这个 popup 发 `xdg_surface.configure`，而它不发。`run_demo` 的 `timeout 90`
+  也救不了：进程正阻塞在 roundtrip 里，SIGTERM 没人处理，所以后面几个场景一条都没开始。
+
+  三条反向验证：把这一轮的 `src/nested.c` / `src/nested.h` / `src/chromium-view.c`
+  撤掉重编，同一条卡；连 `src/main.c` 一起撤到 HEAD 重编，同一条卡；把同一条脚本放到
+  **真桌面**上跑，`menu pick id=132` → `fake: context-menu-select id=132` 一路走完，
+  40 s 的看门狗没响。所以这不是这一轮带进来的回归，而是 §5.2 那条"popup 上不了屏"在
+  mutter 这边变硬了——以前它至少回一个 configure（否则 300 ms 的
+  `context menu mapped=0 size=0x0` 根本报不出来，那个定时器排在 `gtk_popover_popup()`
+  后面），现在它连回包都不给。
+
+  **这条没修，也没把门禁降级**。要记住的是它的形状：宿主的主线程阻塞在一次等外层合成器
+  的 Wayland roundtrip 上，而同一个进程里正开着嵌套 compositor——外层不回包时，进程内
+  没有任何东西还能动。上表 `menu` 那一格（45 + 2 skip / 71 s）在今天的这台机器上复现
+  不出来，读它的时候按 2026-10-21 那块显示器理解。
 
 ## 7. 换一台机器需要什么
 

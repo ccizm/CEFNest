@@ -135,6 +135,14 @@ GList            *nested_compositor_get_toplevels    (NestedCompositor *self);
  * compositor: each view names the CEF toplevel it displays when it takes focus. */
 void              nested_compositor_set_input_surface (NestedCompositor *self,
                                                        NestedSurface *surface);
+/* Hand the input back when the window that asked for it goes away: a view
+ * unmaps when its GTK window closes or hides. Nothing happens unless @surface
+ * is the one currently named, because a second window closing later must not
+ * take the routing away from the window that has since taken over. Clearing it
+ * is not the same as leaving a dead surface behind: the override is dropped and
+ * the seat retargets in this call rather than on the next event. */
+void              nested_compositor_clear_input_surface (NestedCompositor *self,
+                                                         NestedSurface *surface);
 /* Hit-test inside one toplevel's own paint stack. Used when input is routed to
  * a host window's surface rather than to the compositor's primary. */
 NestedSurface    *nested_compositor_surface_at_for     (NestedCompositor *self,

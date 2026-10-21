@@ -45,9 +45,57 @@ primary。`chromium_view_new_shared()` 的 view 在 motion/button/focus 时设�
 pointer 的 popup 命中也已用 target 自己的 paint stack 做 `surface_at`，所以独立窗口里的
 右键菜单/`<select>` 弹层能落到 target 的 popup 上，而不是主窗口。
 
-**仍待确认**：多窗口同时输入/焦点切换只有手工观察，没有像菜单那样的自动门禁；
-`linuxarm64` 也只有 fetch/install 路径，没有目标机实跑。文档把这两点列成验证缺口，不把
-它们说成已验证。
+窗口关闭时的交还也收口了：`nested_compositor_clear_input_surface(comp, owner)` 只在
+当前 target 确实是 `owner` 时才把它清掉并立刻 `seat_retarget()`。这两条限定都是有原因的：
+一个是**别人的窗口关掉不能抢走输入**（第二个窗口已经接手时，第一个窗口的 unmap 是空操作），
+另一个是**交还发生在这一调用里，而不是等下一个事件**——在那之前指针和键盘会悬着一拍，
+指向一个已经没有映射的 surface。`ChromiumView` 在 `unmap` 里为自己那一份调用它。
+
+IME 侧不需要对应的改动：`text_input_retarget()` 挂在键盘焦点上，焦点挪到第二个窗口时第一个
+的 text input 收 leave，`active_input` 自动换成新窗口的；第二个客户端在别人持有时发来的
+`enable` 会被忽略。
+
+## 自动门禁：`seat-selftest --second-window`
+
+`test/seat-selftest.c` 的一个模式，`test/meson.build` 的 mode 列表里叫
+`second-window`。它让**同一个 `shm-client` 进程**建两个 `xdg_toplevel`（app-id
+`nested-shm-test` 与 `nested-shm-test-second`）——真实场景里两个 CEF 窗口本来就是同一个
+helper 进程、同一条 `wl_client`。这个模式下两张图都不画测试花纹：
+
+- **键盘焦点在哪边，哪边涂红（`c0 40 40`），另一边绿（`40 c0 40`）**；
+- `wl_keyboard.enter/leave` 触发两张一起重绘；
+- 收到一个键 Press 的那个窗口**自己把第二个 toplevel 销毁**——键只会送到 seat 认为持有
+  键盘的那个 surface，所以"关闭"这一步是被路由驱动的，不是排在旁边。
+
+脚本 17 步，其中 5 个检查点各做三层断言：
+
+```
+settle → 数到两个 toplevel（app-id 认，尺寸打印）
+→ 指针+键盘进场 → set_input_surface(主)     → 断言键盘/指针焦点==主，主红副绿
+→ clear_input_surface(副)（副不是 owner）    → 断言没有任何变化（守卫）
+→ clear_input_surface(主)（主是 owner）      → 断言交还后落到 primary=副，副红主绿
+→ set_input_surface(副)                      → 断言直接命名同样落到副
+→ Esc → 副窗口自关 → 数到一个 toplevel      → 断言焦点==primary==主，主红
+```
+
+三层分别是：compositor 自己的 `keyboard_focus`/`pointer_focus`、`get_toplevels()` 的清单、
+以及 `gdk_texture_download` 读到的**客户端画出来的像素**。像素那层不是装饰：按这个项目的
+教训（`docs/empty-request-slot.md` 那种"状态对、线上错"），只断 state 不断 wire 的门禁不算
+门禁。任何一条不满足就 `second-window gate FAILED: …` 并以退出码 1 结束，和 drag-out /
+drag-in 同款。整套跑完约 3 秒，不需要浏览器，headless 可跑。
+
+两个方向的反向验证都做过：把 `clear_input_surface` 的 owner 守卫拆掉，第三条断言立刻红
+（键盘和指针都跑到 primary，两张图跟着翻转）；把里面的 `seat_retarget()` 拆掉，交还那一跳
+红。脚本里"非 owner 交还"这一步特意排在**主窗口持有输入、而 primary 是副窗口**的时刻——
+否则清空与不清空的结果都是副窗口，那条断言就什么也抓不到。
+
+## 仍然存在的边界
+
+- **在独立窗口里发起拖拽**：出界移交的 `GdkDrag` 起在 demo 主窗口的 native surface 上
+  （`docs/drag-loop.md` §6），从独立 host 窗口里发起的拖拽会挂错窗口。罕见路径，这一轮
+  不做，先记在这里。
+- `linuxarm64` 只有 fetch/install 路径，没有目标机实跑。
+
 
 ## 3. 协议
 

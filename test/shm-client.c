@@ -12,7 +12,10 @@
  * without a browser. With --drag-in it is the other half: the destination of a
  * drag the host carries in, which accepts a type, reads the payload twice the
  * way a page was measured to, and exits non-zero if the bytes are not the ones
- * it was handed. */
+ * it was handed. With --second-window it maps a second toplevel and drops the
+ * test pattern in both: whichever window the seat has the keyboard in paints
+ * red, the other green, so the routing of an input between two surfaces of one
+ * client is readable off the frames the compositor imported. */
 #define _GNU_SOURCE
 
 #include <errno.h>
@@ -77,6 +80,10 @@ static void buffer_create_all_deferred (void);
 static void imports_settled (void);
 static void popups_open (void);
 static void popup_reposition (void);
+static void second_create (void);
+static void second_draw (void);
+static void second_focus_changed (void);
+static void second_after_release (Buffer *buffer);
 
 static struct wl_display *display;
 static struct wl_compositor *compositor;
@@ -202,6 +209,7 @@ static int use_popup;
 static int use_refused;
 static int use_pool_budget;
 static int use_popup_reposition;
+static int use_second_window;
 static int popups_opened;
 static int popup_repositioned;
 
@@ -598,6 +606,23 @@ buffer_paint (Buffer *buffer, uint32_t step)
   uint32_t edge = button_mask ? 0x0020ff20u : 0x00ff2020u; /* green while held */
   int x, y;
 
+  /* --second-window: this picture is the evidence, not a test pattern. Red
+   * means the seat put the keyboard in this toplevel, green means it put it in
+   * the other one. */
+  if (use_second_window)
+    {
+      uint32_t solid = keyboard_surface == surface ? 0x00c04040u : 0x0040c040u;
+
+      for (y = 0; y < buffer->height; y++)
+        {
+          uint32_t *row = pixels + (size_t) y * (buffer->stride / 4);
+
+          for (x = 0; x < buffer->width; x++)
+            row[x] = solid;
+        }
+      return;
+    }
+
   for (y = 0; y < buffer->height; y++)
     {
       uint32_t *row = pixels + (size_t) y * (buffer->stride / 4);
@@ -696,7 +721,10 @@ buffer_release (void *data, struct wl_buffer *wl_buffer)
   Buffer *buffer = data;
 
   if (buffer->wl_buffer == wl_buffer)
-    buffer->mapped = 0;
+    {
+      buffer->mapped = 0;
+      second_after_release (buffer);
+    }
 }
 
 static const struct wl_buffer_listener buffer_listener = {
@@ -780,6 +808,233 @@ frame_done (void *data, struct wl_callback *callback, uint32_t time)
 static const struct wl_callback_listener frame_listener = {
   .done = frame_done,
 };
+
+/* ------------------------------------------------------------------ *
+ * --second-window                                                    *
+ *                                                                    *
+ * A second toplevel, made by this same client: two independent CEF   *
+ * windows are two surfaces of one wl_client, so the pair a host has  *
+ * to route input between has to come from one connection too. Both   *
+ * pictures say where the keyboard is — red in the focused window,    *
+ * green in the other — which is what lets a run read the             *
+ * compositor's routing decision off the buffers it imported instead  *
+ * of trusting the state behind it.                                   *
+ * ------------------------------------------------------------------ */
+
+#define SECOND_APP_ID "nested-shm-test-second"
+#define FOCUS_RED   0x00c04040u
+#define FOCUS_GREEN 0x0040c040u
+
+typedef struct {
+  struct wl_surface *surface;
+  struct xdg_surface *xdg_surface;
+  struct xdg_toplevel *toplevel;
+  struct wp_viewport *viewport;
+  Buffer buffers[2];
+  int width;
+  int height;
+  int device_width;
+  int device_height;
+  int configured;
+  int has_focus;
+  int repaint_wanted;
+} SecondWindow;
+
+static SecondWindow second = {
+  .width = DEFAULT_WIDTH,
+  .height = DEFAULT_HEIGHT,
+};
+
+static void
+second_size (void)
+{
+  second.device_width = (int) (second.width * client_scale + 0.5);
+  second.device_height = (int) (second.height * client_scale + 0.5);
+  if (second.device_width < 1)
+    second.device_width = 1;
+  if (second.device_height < 1)
+    second.device_height = 1;
+}
+
+static void
+second_buffers_create (void)
+{
+  int i;
+
+  for (i = 0; i < 2; i++)
+    {
+      buffer_destroy (&second.buffers[i]);
+      /* Shm always: like the popups, this window tests routing, and an shm
+       * buffer is one the compositor copies out — which is what releases it
+       * soon enough for a redraw asked for in a burst. */
+      buffer_create_shm (&second.buffers[i], second.device_width,
+                        second.device_height);
+    }
+}
+
+static void
+second_draw (void)
+{
+  Buffer *buffer = NULL;
+  uint32_t *pixels;
+  int x, y, i;
+
+  if (!second.surface || !second.configured)
+    return;
+
+  for (i = 0; i < 2; i++)
+    if (!second.buffers[i].mapped && second.buffers[i].wl_buffer)
+      {
+        buffer = &second.buffers[i];
+        break;
+      }
+
+  /* Both frames are still with the compositor. Its wl_buffer.release retries
+   * this, so a focus change that arrives mid-burst is not lost. */
+  if (!buffer)
+    {
+      second.repaint_wanted = 1;
+      return;
+    }
+
+  second.repaint_wanted = 0;
+  pixels = buffer->data;
+  for (y = 0; y < buffer->height; y++)
+    {
+      uint32_t *row = pixels + (size_t) y * (buffer->stride / 4);
+
+      for (x = 0; x < buffer->width; x++)
+        row[x] = second.has_focus ? FOCUS_RED : FOCUS_GREEN;
+    }
+
+  wl_surface_attach (second.surface, buffer->wl_buffer, 0, 0);
+  wl_surface_damage_buffer (second.surface, 0, 0, buffer->width, buffer->height);
+  if (second.viewport)
+    wp_viewport_set_destination (second.viewport, second.width, second.height);
+  wl_surface_commit (second.surface);
+  buffer->mapped = 1;
+}
+
+static void
+second_after_release (Buffer *buffer)
+{
+  if (buffer != &second.buffers[0] && buffer != &second.buffers[1])
+    return;
+
+  if (second.repaint_wanted)
+    second_draw ();
+}
+
+static void
+second_close (void)
+{
+  int i;
+
+  if (!second.surface)
+    return;
+
+  fprintf (stderr, "client: second window torn down\n");
+
+  xdg_toplevel_destroy (second.toplevel);
+  xdg_surface_destroy (second.xdg_surface);
+  wl_surface_destroy (second.surface);
+  if (second.viewport)
+    wp_viewport_destroy (second.viewport);
+  for (i = 0; i < 2; i++)
+    buffer_destroy (&second.buffers[i]);
+
+  memset (&second, 0, sizeof second);
+  second.width = DEFAULT_WIDTH;
+  second.height = DEFAULT_HEIGHT;
+
+  /* The other window repaints with whatever the seat says next; until then it
+   * has to stop claiming the keyboard this one no longer has. */
+  if (mapped)
+    draw ();
+}
+
+static void
+second_focus_changed (void)
+{
+  if (!use_second_window)
+    return;
+
+  second.has_focus = second.surface && keyboard_surface == second.surface;
+  second_draw ();
+
+  /* The first window paints through the ordinary path, which only runs on a
+   * frame; ask it for the new colour now. */
+  if (mapped)
+    draw ();
+}
+
+static void
+second_toplevel_configure (void *data, struct xdg_toplevel *obj, int32_t w,
+                           int32_t h, struct wl_array *states)
+{
+  if (w > 0 && h > 0 && (w != second.width || h != second.height))
+    {
+      second.width = w;
+      second.height = h;
+      second_size ();
+    }
+
+  fprintf (stderr, "client: second toplevel configure %dx%d\n", w, h);
+}
+
+static void
+second_toplevel_close (void *data, struct xdg_toplevel *obj)
+{
+  second_close ();
+}
+
+static const struct xdg_toplevel_listener second_toplevel_listener = {
+  .configure = second_toplevel_configure,
+  .close = second_toplevel_close,
+};
+
+static void
+second_xdg_configure (void *data, struct xdg_surface *obj, uint32_t serial)
+{
+  xdg_surface_ack_configure (obj, serial);
+
+  /* One rule for the first configure and for a resize: the buffers have to
+   * match the size this window is showing at. */
+  if (!second.configured ||
+      second.buffers[0].width != second.device_width ||
+      second.buffers[0].height != second.device_height)
+    {
+      second.configured = 1;
+      second_buffers_create ();
+    }
+
+  second_draw ();
+}
+
+static const struct xdg_surface_listener second_xdg_surface_listener = {
+  .configure = second_xdg_configure,
+};
+
+static void
+second_create (void)
+{
+  second.surface = wl_compositor_create_surface (compositor);
+  if (viewporter)
+    second.viewport = wp_viewporter_get_viewport (viewporter, second.surface);
+  second.xdg_surface = xdg_wm_base_get_xdg_surface (wm_base, second.surface);
+  xdg_surface_add_listener (second.xdg_surface, &second_xdg_surface_listener, NULL);
+  second.toplevel = xdg_surface_get_toplevel (second.xdg_surface);
+  xdg_toplevel_add_listener (second.toplevel, &second_toplevel_listener, NULL);
+  xdg_toplevel_set_title (second.toplevel, "shm test client second");
+  xdg_toplevel_set_app_id (second.toplevel, SECOND_APP_ID);
+
+  second_size ();
+  second.has_focus = keyboard_surface == second.surface;
+
+  fprintf (stderr, "client: second window created, app-id %s\n", SECOND_APP_ID);
+
+  wl_surface_commit (second.surface);
+}
 
 static void
 toplevel_configure (void *data, struct xdg_toplevel *toplevel,
@@ -1566,8 +1821,10 @@ keyboard_enter (void *data, struct wl_keyboard *wl_keyboard, uint32_t serial,
   keyboard_surface = wl_surface;
 
   fprintf (stderr, "client: keyboard enter on %s, serial=%u, %zu keys held\n",
-           popup ? popup->name : "the toplevel",
+           popup ? popup->name : (wl_surface == second.surface ? "the second window" : "the toplevel"),
            serial, keys->size / sizeof (uint32_t));
+
+  second_focus_changed ();
 }
 
 static void
@@ -1580,6 +1837,8 @@ keyboard_leave (void *data, struct wl_keyboard *wl_keyboard, uint32_t serial,
 
   if (wl_surface == keyboard_surface)
     keyboard_surface = NULL;
+
+  second_focus_changed ();
 }
 
 static void
@@ -1604,8 +1863,20 @@ keyboard_key (void *data, struct wl_keyboard *wl_keyboard, uint32_t serial,
 
   fprintf (stderr, "client: key %s evdev=%u keysym=%s on %s mods=0x%x\n",
            state == WL_KEYBOARD_KEY_STATE_PRESSED ? "down" : "up", key, name,
-           focus ? focus->name : "the toplevel",
+           focus ? focus->name :
+             (keyboard_surface == second.surface ? "the second window" : "the toplevel"),
            xkb_state ? xkb_state_serialize_mods (xkb_state, XKB_STATE_MODS_DEPRESSED) : 0u);
+
+  /* --second-window: the key is the trigger and the proof. Only the window the
+   * seat sent it to can act on it, so a press that closes the second toplevel
+   * also says which surface held the keyboard at that moment. */
+  if (use_second_window && state == WL_KEYBOARD_KEY_STATE_PRESSED &&
+      second.surface && keyboard_surface == second.surface)
+    {
+      fprintf (stderr, "client: the second window holds the keyboard, closing it\n");
+      second_close ();
+      return;
+    }
 
   if (mapped)
     draw ();
@@ -2948,6 +3219,8 @@ main (int argc, char *argv[])
         use_refused = 1;
       else if (!strcmp (argv[i], "--pool-budget"))
         use_pool_budget = 1;
+      else if (!strcmp (argv[i], "--second-window"))
+        use_second_window = 1;
       else
         fprintf (stderr, "client: ignoring unknown argument '%s'\n", argv[i]);
     }
@@ -3089,6 +3362,11 @@ main (int argc, char *argv[])
   xdg_toplevel_set_app_id (toplevel, "nested-shm-test");
 
   wl_surface_commit (surface);
+
+  /* After the first toplevel commits: this way the window the run starts from
+   * is the one the compositor already knows about when the second arrives. */
+  if (use_second_window)
+    second_create ();
 
   while (wl_display_dispatch (display) >= 0)
     {
