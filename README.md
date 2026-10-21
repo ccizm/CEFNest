@@ -329,18 +329,21 @@ other one reads a scroll position, a find count, a menu model — those say the 
 alive, none of them say a pixel of it arrived. `test/pixel-page.html` fills the
 viewport with four flat fills, the demo dumps the view once, and the gate compares the
 middle of each quadrant against the rgb the CSS asked for, byte for byte, on both the
-composited widget and the client texture it was composited from. Inside
-`./test/ci-session.sh` the buffer comes back exactly `18,52,86 / 200,50,60 /
-43,138,62 / 232,232,232` (12 assertions, 14 s). On this laptop's real display a demo
-window that is behind other windows has no pixels to assert: its own
-`requestAnimationFrame` counter stops at 3 callbacks in 4.4 s and every dump is the
-buffer Chromium cleared and never painted (`#101828`, with the GPU on or with
-`CHROMIUM_HELPER_DISABLE_GPU=1`, GL or cairo renderer). A `js` step still answers that
-the page is visible and its background is red there, because CSS needs no frame — so
-the gate reports that as a skip next to the page's own answer rather than a regression,
-and asserts in full wherever the buffer does have content in it
-(`docs/headless-ci.md` §5). What this gate would have caught is the whole-page freeze of
-`docs/frame-clock-pacing.md` §8, which passed every log-based gate.
+composited widget and the client texture it was composited from. The buffer comes back
+exactly `18,52,86 / 200,50,60 / 43,138,62 / 232,232,232`, and it does so on both
+displays: inside `./test/ci-session.sh` and on this laptop's real desktop, 12
+assertions and no skips either way.
+That is also what makes the gate worth having. When it was first written it read
+`#101828` — the buffer Chromium cleared and never painted — on the real display, with
+the page's own `requestAnimationFrame` counter stopped at 4 callbacks across 4.5 s, and
+the difference was filed as a property of a window nobody is looking at, with a skip to
+match. It was a regression in the component: `bcbebc8` had taken the frame callbacks off
+the clock path, so any display whose clock answered stopped answering its clients.
+Putting the call back took the same run from 4 to 252 animation frames and the dump from
+`#101828` to the page's own green, and the skip came out of the gate because a flat
+buffer is a statement about the component, not about who is watching.
+`docs/frame-clock-pacing.md` §8 and §9 keep the whole round trip, including the freeze
+this gate would have caught and the one it nearly caught by accident of being skipped.
 
 `test/ci-session.sh` is the one gate runner that does not open a window on the
 desktop of whoever is sitting here. It starts a nested compositor — GNOME Shell 48
@@ -369,12 +372,13 @@ display with no output device cannot do (`docs/headless-ci.md` §5). What it can
 prove is frame pacing: a display with no output device never runs a second GTK
 display cycle, which is exactly the failure mode `docs/frame-clock-pacing.md` §8
 documents, where a client left waiting on that cycle stopped animating and stopped
-painting. `docs/headless-ci.md` is the write-up.
+painting — and §9, where the fix for it silently froze the displays whose clock did
+answer. `docs/headless-ci.md` is the write-up.
 
 `test/ci-all.sh` is the one command that runs the whole battery through it — proof,
 `meson test` and all seven gates, each in its own nested compositor, one verdict table
 with the skipped checks counted in a column of their own, non-zero exit if anything
-failed. Measured on this laptop: 381 s for the nine runs — 269 gate assertions plus
+failed. Measured on this laptop: 367 s for the nine runs — 269 gate assertions plus
 `meson test` 13/13, with 2 checks skipped.
 
 ```bash
@@ -465,7 +469,7 @@ They are the record of *why* the code is shaped like this:
 | Document | About |
 | --- | --- |
 | `nested-split.md` | how `nested.c` became per-protocol modules |
-| `frame-clock-pacing.md` | painting on the GTK frame clock instead of a timer, and the watchdog for the display cycles that never come |
+| `frame-clock-pacing.md` | painting on the GTK frame clock instead of a timer, the watchdog for the display cycles that never come, and the round that found the watchdog had quietly taken the clock path off the frames |
 | `popup-compositing.md` | the surface stack, placement and dismissal of page popups |
 | `clipboard-bridge.md` | `wl_data_device` ↔ `GdkClipboard` in both directions |
 | `session-lifecycle.md` | starting, stopping and dying with the helper |

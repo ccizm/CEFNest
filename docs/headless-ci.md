@@ -8,7 +8,9 @@
 `meson test` 和七条门禁串成一条命令的发布闸门。不装包、不用 sudo、跑完不留进程；
 七条门禁全绿，唯一要改的是 `menu-gate.sh` 里那两条"弹层上了屏"的断言——那块显示器
 没有屏可上，于是它们报成 skip（§5）。新加的 `test/pixel-gate.sh` 是第一条不看日志、
-只看像素的门禁，它量得到的恰恰是这块显示器比真桌面多出来的东西（§5 有对照）。
+只看像素的门禁，它在两块显示器上量到同一串颜色；把它第一次在真桌面上读到的纯色当成
+"显示器的性质"是这次记录里的一个错，真相是组件自己的一条回归，§5.1 与
+`docs/frame-clock-pacing.md` §9 记的全套过程。
 
 ## 1. 底座：这台机器上现成有什么
 
@@ -99,27 +101,33 @@ KEEP_LOGS=1 ./test/ci-all.sh        # 保留每个 run 的完整 transcript
 
 证明：真窗口能在一块真 Wayland 显示器上映射；真 Chromium 会话（`sandbox=on`）能起、
 能加载、能回答 JS；`test/*.sh` 那套门禁不需要为 headless 加分支就能跑——除了断言
-"某块 surface 上了屏"的那两条（下一条）。还证明**页面的像素真的到了组件里**：
-`test/pixel-gate.sh` 在这块显示器上量到的是逐字节相符的颜色（见下）。
+"某块 surface 上了屏"的那两条（下面「上屏」那条）。还证明**页面的像素真的到了组件里**：
+`test/pixel-gate.sh` 在这块显示器上量到的是逐字节相符的颜色，而且**在真桌面上量到
+的是同一串数字**（下一条）。
 
-不证明：
+### 5.1 像素两侧一致——以及一条差点把回归读成显示器性质的 skip
 
-- **像素在真桌面上**。这条是反向的：会话里 `dump` 出来的 PNG 就是页面要的颜色
-  （`test/pixel-page.html` 四块纯色 → 缓冲里 18,52,86 / 200,50,60 / 43,138,62 /
-  232,232,232，合成后的 widget 和原封不动的 client texture 两份都一样），而**同一个
-  二进制在同一块真桌面上量不到**。本机（i915、1.25 缩放）demo 窗口压在别的窗口后面时
-  读回恒为 `#101828` 一整块纯色，而那正是"清了却没画过"的缓冲：判据不是猜的——页面
-  自己的 `requestAnimationFrame` 计数 4.4s 里停在 3 次，同一个页面在会话里是 62/秒。
-  同一次运行里 `js` 那步照旧回答 `visibilityState=visible`、`hasFocus()=true`、
-  `backgroundColor=rgb(255, 0, 0)`、`innerWidth=1000`，但 CSS 不需要一帧，所以这条
-  **不能**当"画对了"的证据。变量拧过一遍都不变：dmabuf（默认）还是
-  `CHROMIUM_HELPER_DISABLE_GPU=1` 逼出来的 shm、gl 还是 `GSK_RENDERER=cairo`。
-  结论：**真桌面上一块没人看的窗口没有像素可断言**，`test/pixel-gate.sh` 读到纯色就报
-  skip 并把页面自己的回答留在日志旁边；缓冲里有内容就照常逐字节比对，换一台窗口在屏幕
-  上的机器，这条门禁一行不改就是全量执行。这里留一个待查：
-  `docs/frame-clock-pacing.md` §8 说遮挡的窗口现在只停 100ms，之后由兜底定时器接着画
-  ——这次量到的是 rAF 停在 3 次，要么看门狗没覆盖这条路径，要么是 Chromium 自己按可见
-  性把帧掐了。两种都值得知道。
+`test/pixel-page.html` 四块纯色 → 缓冲里 18,52,86 / 200,50,60 / 43,138,62 /
+232,232,232，合成后的 widget 和原封不动的 client texture 两份都一样；headless 与
+真桌面各跑一次，逐字节相同，所以这条门禁两侧都是全量断言、一条 skip 都没有。
+
+这里要记一段**当时读错了**。这份门禁提交那天，真桌面侧的 `dump` 恒为 `#101828`
+一整块纯色（"清了却没画过"的缓冲），页面自己的 `requestAnimationFrame` 计数 4.4s
+里停在 3～4 次，同一次运行 `js` 那步照旧回答 `visibilityState=visible`、
+`backgroundColor=rgb(255, 0, 0)`、`innerWidth=1000`——但 CSS 不需要一帧，所以那条
+回答不能当"画对了"的证据。当时把纯色读成"这块显示器没有屏可上，所以没人看的窗口
+没有像素"，还为此给真桌面写了一条 skip。那个 skip 差一点把真凶盖住：
+**`#101828` 是组件自己的回归**——`bcbebc8`（`docs/frame-clock-pacing.md` §8 那轮
+改动）把 `fire_pending_frame_callbacks()` 从 after-paint 里删掉了，于是时钟只要还
+回答，客户端的帧请求就永远没人答，真桌面整页冻住。把那一行加回去，同一台机器同一个
+页面：rAF 从 4/4.5s 变成 252/4.5s，`dump` 从 `#101828` 变成页面自己的绿色，
+`test/pixel-gate.sh` 两侧 12 条断言全过。
+顺带把 §8 那句"遮挡的窗口只停 100ms"也量实了：把 demo 最大化再用一个全屏窗口整个
+盖住，被盖住的那一侧 rAF 仍是 61.5/秒，缓冲 1829x982 照样出图、读回是画过的红。
+两条教训都写在 `docs/frame-clock-pacing.md` §9。
+
+### 5.2 不证明
+
 - **帧节拍**。headless mutter 没有输出设备，宿主 GDK 不再产生显示周期，客户端的帧
   由 `docs/frame-clock-pacing.md` §8 的兜底定时器驱动。时序类断言（回调延迟、
   p50/p99）在这里量的不是真实节奏。
@@ -136,22 +144,23 @@ KEEP_LOGS=1 ./test/ci-all.sh        # 保留每个 run 的完整 transcript
 
 ## 6. 实测
 
-`./test/ci-all.sh` 整套跑完 381 秒（T490，一次一条命令）。"断言"只数门禁自己的 ok
+`./test/ci-all.sh` 整套跑完 367 秒（T490，九条跑动的和，一次一条命令）。"断言"只数门禁自己的 ok
 行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 没有残留）：
 
 | run | 结果 | 断言 | 用时 |
 |---|---|---|---|
-| `proof`（无参数自检） | 通过 | 3 | 12s |
+| `proof`（无参数自检） | 通过 | 3 | 10s |
 | `unit`（`meson test -C builddir`） | 通过 | 13 OK | 16s |
-| `pixel` | 通过 | 12 | 14s |
+| `pixel` | 通过 | 12 | 12s |
 | `find` | 通过 | 34 | 32s |
-| `permission` | 通过 | 58 | 62s |
-| `download` | 通过 | 46 | 53s |
-| `dnd` | 通过 | 59 | 69s |
-| `menu` | 通过\* | 45（+2 skip） | 73s |
-| `soak` | 通过 | 12 | 50s |
+| `permission` | 通过 | 58 | 60s |
+| `download` | 通过 | 46 | 51s |
+| `dnd` | 通过 | 59 | 68s |
+| `menu` | 通过\* | 45（+2 skip） | 70s |
+| `soak` | 通过 | 12 | 48s |
 
-\* 那 2 条是"弹层上了屏"，这块显示器没有屏可上（§5）。
+\* 那 2 条是"弹层上了屏"，这块显示器没有屏可上（§5）。`pixel` 在会话里与在真桌面上
+都是 12 条全过、0 skip——它是 `docs/frame-clock-pacing.md` §9 那条回归的判据，两侧都得红得起来。
 
 两条补充测量：
 
@@ -159,8 +168,11 @@ KEEP_LOGS=1 ./test/ci-all.sh        # 保留每个 run 的完整 transcript
   `bash -c './test/find-gate.sh real && ./test/menu-gate.sh fake'` 同一块显示器 =
   45 断言 + 1 skip / 53s——共享会话这条路径是可用的，只是 `ci-all` 故意不这么跑。
 - 在 §8 那个看门狗之前，`find-gate.sh` 这一跑是 4/6，失败的全是 `real-scroll` 的
-  `scrollTop was 0 after the step`——不是门禁脆弱，是页面真的冻住了。
-  `./test/find-gate.sh real`（真桌面）10 行照旧全过，看门狗没有把能用的一侧改坏。
+  `scrollTop was 0 after the step`——不是门禁脆弱，是页面真的冻住了。同一条在真桌面
+  上 10 行也照旧全过，而**那不是"看门狗没把能用的一侧改坏"**：§9 之后回看，那一侧
+  恰恰已经被改坏了，find 的判据全是日志（命中数、`js` 读回来的滚动值），页面冻在
+  空白上时它们一条都不会红。当天能报出来的只有 `pixel-gate`，而它当时被一条 skip
+  按住了。
 
 proof 模式那三条断言（`nested compositor on WAYLAND_DISPLAY=`、`HTTP 200`、
 `script [0-9]+ ok value="DND-PAGE`）证明的是这块显示器真的能用；`unit` 里 selftest

@@ -18,21 +18,22 @@
 # to. A flat buffer is exactly what this gate refuses to accept.
 #
 #   ./test/ci-session.sh ./test/pixel-gate.sh   # the run this gate is for
-#   ./test/pixel-gate.sh                        # on a real display, see below
+#   ./test/pixel-gate.sh                        # on a real display, same assertions
 #
-# On a real display the dump can come back one single flat colour, and that says
-# nothing about the component. Measured on this laptop (Intel i915, 1.25 scale) with
-# the demo window behind whatever is on screen: the page's own requestAnimationFrame
-# loop stopped at 3 callbacks across 4.4 s and every dump stayed #101828 - the buffer
-# Chromium cleared and never painted. The same page from the same binary inside
-# test/ci-session.sh runs rAF and reaches the widget byte for byte. A `js` step still
-# answers that the page is visible and its background is red, because CSS needs no
-# frame; that is why the skip below prints the page's own answer next to its reason.
-# A flat dump on a host display is therefore a statement about whether anyone is
-# looking at the window, not about whether a page reaches the widget: it is reported
-# as a skip, and anywhere the buffer does hold content the assertions run in full, so
-# a machine whose window is on screen gets the whole check unchanged.
-# docs/headless-ci.md §5 keeps the numbers.
+# It asserts on both displays, and the first version of this file did not: it skipped
+# the pixel checks whenever a host run came back flat, on the reading that a window
+# nobody is looking at paints nothing. That reading was wrong and the skip was close
+# to costly. The flat #101828 was a regression in the component — bcbebc8 moved the
+# frame callbacks off the clock path, so any display whose clock answered never got a
+# client painted again, on this laptop and in CI alike. Measured the same day: the
+# page's own requestAnimationFrame counter stopped at 4 callbacks across 4.5 s, then
+# reached 252 with the callbacks fired from after-paint again, and the dump went from
+# #101828 to the page's own green. docs/headless-ci.md §5 keeps the numbers.
+#
+# The lesson is the reason there is no skip left here: a flat buffer is a statement
+# about the component, never about who is looking at it. If a future display really
+# does pause an off-screen window, this gate fails on that machine and says so with
+# the page's own readback in the log above the failure.
 #
 # Needs ImageMagick (identify/convert); without it every pixel check is a skip.
 
@@ -116,21 +117,16 @@ else
     "$WORK/pixel.out" "the page itself"
 
   client=$WORK/pixel.png.client.png
-  flat=$(n_colors "$client")
-  if [ "${CEFNEST_HEADLESS:-0}" != 1 ] && [ "${flat:-0}" = 1 ]; then
-    skip "the client buffer came back one flat colour: a host window nobody is looking at stops producing frames (measured: rAF froze at 3 callbacks across 4.4 s), so the pixel checks below would measure whether the window is on screen, not whether the page arrives — the page's own answer is in the log above"
+  if [ -f "$client" ]; then
+    expect_quads "$client" client-texture
   else
-    if [ -f "$client" ]; then
-      expect_quads "$client" client-texture
-    else
-      skip "no $client — this build dumps only the composited widget"
-    fi
-    expect_quads "$WORK/pixel.png" widget
-    if [ "$(n_colors "$WORK/pixel.png")" -gt 3 ]; then
-      ok "widget: $(n_colors "$WORK/pixel.png") distinct colours, not a flat buffer"
-    else
-      bad "widget: $(n_colors "$WORK/pixel.png") distinct colours — the four fills did not arrive"
-    fi
+    skip "no $client — this build dumps only the composited widget"
+  fi
+  expect_quads "$WORK/pixel.png" widget
+  if [ "$(n_colors "$WORK/pixel.png")" -gt 3 ]; then
+    ok "widget: $(n_colors "$WORK/pixel.png") distinct colours, not a flat buffer"
+  else
+    bad "widget: $(n_colors "$WORK/pixel.png") distinct colours — the four fills did not arrive"
   fi
 fi
 

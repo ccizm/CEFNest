@@ -1600,6 +1600,11 @@ frame_clock_after_paint (GdkFrameClock *clock, gpointer data)
       self->frame_timer_id = 0;
     }
 
+  fire_pending_frame_callbacks (self);
+
+  /* Whoever is still waiting after that gets the next cycle and a fresh
+   * watchdog; with nobody waiting the clock idles until a commit or a frame
+   * request speaks up again. */
   nested_start_frame_clock (self);
 }
 
