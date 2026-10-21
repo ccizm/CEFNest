@@ -224,6 +224,7 @@ static void
 nested_surface_init (NestedSurface *self)
 {
   self->scale = 1;
+  self->pending_scale = 1;
   wl_list_init (&self->nested_link);
   wl_list_init (&self->frame_callbacks);
   wl_list_init (&self->pending_user.link);
@@ -842,28 +843,38 @@ surface_attach (struct wl_client *client, struct wl_resource *resource,
   (void) y;
 }
 
+/* Damage arrives in two units and neither is the one the shadow is measured in:
+ * wl_surface.damage is surface-local, wl_surface.damage_buffer is buffer pixels,
+ * and what turns one into the other is the buffer scale of the commit they both
+ * travel with. So each request fills its own pending rectangle and nothing is
+ * converted here — see surface_apply_pending_damage. */
+#define DAMAGE_COORD_LIMIT (G_MAXINT32 / 2)
+
+/* Clamped on the way in, because the products below are chosen by a client: 2^30
+ * at scale 4 is signed overflow, and in C that is not a wrong number but
+ * permission to read wherever the compiler liked. A rectangle past half of int32
+ * could not describe any buffer that exists, so clamping it costs nothing. */
 static void
-surface_add_damage (NestedSurface *self, int32_t x, int32_t y,
-                    int32_t width, int32_t height)
+damage_union (GdkRectangle *into, gboolean *valid, int32_t x, int32_t y,
+              int32_t width, int32_t height)
 {
   GdkRectangle rect;
 
   if (width <= 0 || height <= 0)
     return;
 
-  rect.x = x;
-  rect.y = y;
-  rect.width = width;
-  rect.height = height;
+  rect.x = CLAMP (x, -DAMAGE_COORD_LIMIT, DAMAGE_COORD_LIMIT);
+  rect.y = CLAMP (y, -DAMAGE_COORD_LIMIT, DAMAGE_COORD_LIMIT);
+  rect.width = CLAMP (width, 0, DAMAGE_COORD_LIMIT);
+  rect.height = CLAMP (height, 0, DAMAGE_COORD_LIMIT);
 
-  if (!self->shm_damage_valid)
+  if (*valid)
+    gdk_rectangle_union (into, &rect, into);
+  else
     {
-      self->shm_damage = rect;
-      self->shm_damage_valid = TRUE;
-      return;
+      *into = rect;
+      *valid = TRUE;
     }
-
-  gdk_rectangle_union (&self->shm_damage, &rect, &self->shm_damage);
 }
 
 static void
@@ -871,11 +882,9 @@ surface_damage (struct wl_client *client, struct wl_resource *resource,
                 int32_t x, int32_t y, int32_t width, int32_t height)
 {
   NestedSurface *self = wl_resource_get_user_data (resource);
-  int32_t scale = self->scale > 0 ? self->scale : 1;
 
-  /* wl_surface.damage is in surface-local coordinates; the shm shadow is in
-   * buffer pixels. */
-  surface_add_damage (self, x * scale, y * scale, width * scale, height * scale);
+  damage_union (&self->pending_damage_surface,
+                &self->pending_damage_surface_valid, x, y, width, height);
 }
 
 static void
@@ -884,7 +893,49 @@ surface_damage_buffer (struct wl_client *client, struct wl_resource *resource,
 {
   NestedSurface *self = wl_resource_get_user_data (resource);
 
-  surface_add_damage (self, x, y, width, height);
+  damage_union (&self->pending_damage_buffer,
+                &self->pending_damage_buffer_valid, x, y, width, height);
+}
+
+/* The one rectangle in buffer pixels this commit's shadow copy reads, made out of
+ * whatever the client named in either unit, with the scale that has just become
+ * current doing the conversion of the surface-local half. Called at the top of
+ * wl_surface.commit, before a buffer is looked at. */
+static void
+surface_apply_pending_damage (NestedSurface *self)
+{
+  int32_t scale = self->scale > 0 ? self->scale : 1;
+
+  self->shm_damage_valid = FALSE;
+  self->shm_damage.x = 0;
+  self->shm_damage.y = 0;
+  self->shm_damage.width = 0;
+  self->shm_damage.height = 0;
+
+  if (self->pending_damage_surface_valid)
+    {
+      const GdkRectangle *from = &self->pending_damage_surface;
+
+      /* The origin and the extent each scale on their own, which is the same
+       * thing the surface-to-buffer mapping is: a rectangle that starts above the
+       * surface still covers, after the scale, the pixels it covered before. */
+      damage_union (&self->shm_damage, &self->shm_damage_valid,
+                    CLAMP ((gint64) from->x * scale,
+                           -DAMAGE_COORD_LIMIT, DAMAGE_COORD_LIMIT),
+                    CLAMP ((gint64) from->y * scale,
+                           -DAMAGE_COORD_LIMIT, DAMAGE_COORD_LIMIT),
+                    CLAMP ((gint64) from->width * scale, 0, DAMAGE_COORD_LIMIT),
+                    CLAMP ((gint64) from->height * scale, 0, DAMAGE_COORD_LIMIT));
+    }
+
+  if (self->pending_damage_buffer_valid)
+    damage_union (&self->shm_damage, &self->shm_damage_valid,
+                  self->pending_damage_buffer.x, self->pending_damage_buffer.y,
+                  self->pending_damage_buffer.width,
+                  self->pending_damage_buffer.height);
+
+  self->pending_damage_surface_valid = FALSE;
+  self->pending_damage_buffer_valid = FALSE;
 }
 
 static void
@@ -915,7 +966,7 @@ surface_set_buffer_scale (struct wl_client *client, struct wl_resource *resource
       return;
     }
 
-  self->scale = scale;
+  self->pending_scale = scale;
 }
 
 static void
@@ -947,6 +998,13 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
   self->offset_y = self->pending_offset_y;
   if (self->is_drag_icon && nested)
     nested_compositor_drag_move_icon (nested);
+
+  /* The scale becomes current before anything is measured with it — the natural
+   * size below, and the damage the client named in surface coordinates — because
+   * a client may set it in the same round it attaches and damages, and then the
+   * commit decides which of the two states those requests meant. */
+  self->scale = self->pending_scale;
+  surface_apply_pending_damage (self);
 
   /* Buffer scale is applied before crop and scale, so the source rectangle the
    * client named refers to the buffer that is about to become current. */
@@ -1007,15 +1065,16 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
           self->natural_height = natural_height;
 
           wl_buffer_send_release (buffer->resource);
-          self->shm_damage_valid = FALSE;
           repaint = TRUE;
         }
       else
         surface_clear_content (self);
     }
 
-  /* Damage is consumed by the commit that carried it, even when it produced a
-   * full read (first frame / resized buffer). */
+  /* Damage is consumed by the commit that carried it — the shadow copy above has
+   * already read it — even when it produced a full read (first frame or resized
+   * buffer). The pending halves went with it, which is why the next commit starts
+   * from nothing. */
   self->shm_damage_valid = FALSE;
 
   surface_update_local_size (self);

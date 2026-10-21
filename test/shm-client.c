@@ -244,6 +244,18 @@ static int popup_repositioned;
 static int use_pool_shrink;
 static int pool_shrink_done;
 
+/* --damage-scale commits a buffer whose damage was named before the scale that
+ * measures it, which is the one ordering of wl_surface.damage and
+ * wl_surface.set_buffer_scale a compositor can get wrong in silence. See the
+ * probe for the rectangle and the three sample points. */
+static int use_damage_scale;
+
+/* Raised before the probe's first commit and never lowered: the ordinary drawing
+ * must not slip a frame in between the two, or the stale quarter the gate reads
+ * gets painted over. Frame callbacks still arrive, so the loop has to be stopped
+ * by a flag rather than by not asking for one. */
+static int damage_scale_holding;
+
 /* --empty-copy answers a read of its own selection with nothing at all, on both
  * the clipboard and the primary selection. Copying the empty string is legal, so
  * a compositor that turns the payload into text has to cope with a zero-byte
@@ -299,6 +311,20 @@ static int drag_fake_cancelled;
 /* Every wl_data_device.enter this client has been sent, which is how the run
  * tells a refused request from a drag that quietly started. */
 static int drag_enters;
+
+/* --drag-no-source drags with no source at all, which is the shape wayland.xml
+ * sanctions for a page that starts a drag and hands nothing over: the enter
+ * arrives with no wl_data_offer, and the destination therefore has no
+ * wl_data_offer.finish with which to retire the drag. See the probe for what that
+ * costs — a surface that was the drag's icon stays an icon, and an icon that no
+ * drag is carrying is not drawn at all. */
+static int use_drag_no_source;
+static int drag_ns_sent;
+static int drag_ns_enters;
+static int drag_ns_offers;
+static int drag_ns_drops;
+static int drag_ns_configured;
+static int drag_ns_checked;
 
 /* What zwp_linux_dmabuf_feedback_v1 told us: the device the compositor wants
  * buffers on, and its (format, modifier) pairs in preference order. */
@@ -363,6 +389,9 @@ static void wrong_object_probe (void);
 static void pool_shrink_probe (void);
 static void empty_copy_probe (void);
 static void popup_depth_probe (void);
+static void damage_scale_probe (void);
+static void ns_drag_start (uint32_t serial);
+static void ns_check (void);
 static void drag_fake_probe (void);
 static void ensure_data_device (void);
 static void ensure_text_input (void);
@@ -773,6 +802,12 @@ draw (void)
   Buffer *buffer = NULL;
   int i;
 
+  /* The damage-scale probe leaves its picture standing on purpose: a frame from
+   * the ordinary loop after it would overwrite the half the compositor is
+   * supposed not to have read. */
+  if (damage_scale_holding)
+    return;
+
   for (i = 0; i < 2; i++)
     {
       if (!buffers[i].mapped && buffers[i].wl_buffer)
@@ -894,6 +929,23 @@ frame_done (void *data, struct wl_callback *callback, uint32_t time)
     {
       pool_shrink_done = 1;
       pool_shrink_probe ();
+    }
+
+  /* The same rule as the probes above: the window has to be mapped and the seat
+   * and the globals have to have arrived before a commit of a new geometry is
+   * worth anything. Nothing is graded here — the compositor's own frame is what
+   * the selftest reads back. */
+  if (use_damage_scale && !damage_scale_holding && frames > 3)
+    damage_scale_probe ();
+
+  /* The drop is what makes this worth checking: before it the drag has not yet
+   * failed to be retired, and after it the icon surface is free to become a
+   * window. One frame later, because this runs from inside the dispatch that
+   * delivered the drop and the answer has to go out as its own round. */
+  if (use_drag_no_source && drag_ns_drops && !drag_ns_checked)
+    {
+      drag_ns_checked = 1;
+      ns_check ();
     }
 
   /* Both halves of --empty-copy wait for the same thing: the compositor reads a
@@ -1835,6 +1887,24 @@ pointer_button (void *data, struct wl_pointer *wl_pointer, uint32_t serial,
       drag_out_sent = 0;
     }
 
+  /* A page that drags without preparing a payload cites the same press, so this
+   * is the same moment as the drag above — and the same serial, which is what
+   * lets the compositor see a real grab behind a drag that owns nothing. */
+  if (state == WL_POINTER_BUTTON_STATE_PRESSED && use_drag_no_source && !drag_ns_sent)
+    {
+      ensure_data_device ();
+      if (!data_device || !compositor || !shm || !wm_base)
+        {
+          fprintf (stderr, "client: %d: drag-no-source gate FAILED: no data device, "
+                           "compositor, shm or xdg wm base, so the sourceless drag "
+                           "could not be asked for\n", __LINE__);
+          exit (1);
+        }
+
+      drag_ns_sent = 1;
+      ns_drag_start (serial);
+    }
+
   /* Every surface shows the held button, so a screenshot keeps the evidence of
    * which one the press went to. */
   popup_draw_all ();
@@ -2384,6 +2454,13 @@ data_device_enter (void *data, struct wl_data_device *device, uint32_t serial,
 {
   drag_enters++;
 
+  if (use_drag_no_source)
+    {
+      drag_ns_enters++;
+      if (offer)
+        drag_ns_offers++;
+    }
+
   fprintf (stderr, "client: %d: dragged onto a surface at %.1f,%.1f serial=%u\n",
            getpid(), wl_fixed_to_double (x), wl_fixed_to_double (y), serial);
 
@@ -2468,6 +2545,9 @@ static void
 data_device_drop (void *data, struct wl_data_device *device)
 {
   fprintf (stderr, "client: %d: the drag was dropped here\n", getpid());
+
+  if (use_drag_no_source)
+    drag_ns_drops++;
 
   if (!use_drag_in)
     return;
@@ -3494,6 +3574,128 @@ pool_shrink_probe (void)
   exit (0);
 }
 
+/* ---------------------------------------------------------- --damage-scale */
+
+/* wl_surface.damage is measured in surface coordinates and
+ * wl_surface.set_buffer_scale is what says how big those coordinates are — but
+ * both are double-buffered, so the scale a damage request was written under is
+ * not necessarily the one the next commit applies. weston keeps the rectangle
+ * verbatim and multiplies it at commit by the scale that has just become
+ * current; mutter does the same. A compositor that converts on arrival instead
+ * reads only part of the new buffer and keeps showing the previous frame where
+ * its shadow copy never reached.
+ *
+ * The two commits below are chosen so all three ways of getting this wrong give
+ * a different picture. The buffer is 200x200 twice, so the shadow is reused and
+ * the partial copy is really taken; the first frame is solid red with the whole
+ * surface damaged. The second is solid green with 50x50 *surface* pixels
+ * damaged and the scale set to 2 in the same round:
+ *
+ *   - converted at commit (correct): buffer (0,0,100,100) turns green, so
+ *     (25,25) and (75,75) are green and (150,150) is still red;
+ *   - converted on arrival with the old scale 1: only buffer (0,0,50,50) turns
+ *     green, so (75,75) is red;
+ *   - no partial copy at all, every frame read whole: (150,150) is green.
+ *
+ * That last point is why the gate samples outside the damaged rectangle as well
+ * as inside it: a full re-read would pass a gate that only looked inside. */
+#define PROBE_DS_SIZE   200
+#define PROBE_DS_DAMAGE  50  /* surface pixels: 100 buffer pixels once scale 2 lands */
+#define PROBE_DS_RED   0x00ff0000u
+#define PROBE_DS_GREEN 0x0000ff00u
+
+static void
+damage_scale_fill (unsigned char *map, size_t offset, uint32_t color)
+{
+  int stride = PROBE_DS_SIZE * 4;
+  int x, y;
+
+  for (y = 0; y < PROBE_DS_SIZE; y++)
+    {
+      uint32_t *row = (uint32_t *) (map + offset + (size_t) y * stride);
+
+      for (x = 0; x < PROBE_DS_SIZE; x++)
+        row[x] = color;
+    }
+}
+
+static void
+damage_scale_probe (void)
+{
+  struct wl_shm_pool *pool;
+  struct wl_buffer *red, *green;
+  size_t bytes;
+  int fd, stride;
+  void *map;
+
+  damage_scale_holding = 1;
+
+  stride = PROBE_DS_SIZE * 4;
+  bytes = (size_t) stride * PROBE_DS_SIZE * 2;
+
+  fd = memfd_create ("shm-client-damage-scale", MFD_CLOEXEC);
+  if (fd < 0 || ftruncate (fd, (off_t) bytes) < 0)
+    {
+      fprintf (stderr, "client: cannot make a pool to damage: %s\n", strerror (errno));
+      if (fd >= 0)
+        close (fd);
+      exit (1);
+    }
+
+  map = mmap (NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (map == MAP_FAILED)
+    {
+      fprintf (stderr, "client: cannot map the pool to damage: %s\n", strerror (errno));
+      close (fd);
+      exit (1);
+    }
+
+  damage_scale_fill (map, 0, PROBE_DS_RED);
+  damage_scale_fill (map, (size_t) stride * PROBE_DS_SIZE, PROBE_DS_GREEN);
+
+  pool = wl_shm_create_pool (shm, fd, (int32_t) bytes);
+  red = wl_shm_pool_create_buffer (pool, 0, PROBE_DS_SIZE, PROBE_DS_SIZE, stride,
+                                   WL_SHM_FORMAT_XRGB8888);
+  green = wl_shm_pool_create_buffer (pool, (int32_t) stride * PROBE_DS_SIZE,
+                                     PROBE_DS_SIZE, PROBE_DS_SIZE, stride,
+                                     WL_SHM_FORMAT_XRGB8888);
+  wl_shm_pool_destroy (pool);
+  close (fd);
+
+  /* Frame one: whole surface damaged at scale 1, so the shadow the next commit
+   * partly overwrites is red from edge to edge. */
+  wl_surface_set_buffer_scale (surface, 1);
+  wl_surface_attach (surface, red, 0, 0);
+  wl_surface_damage (surface, 0, 0, PROBE_DS_SIZE, PROBE_DS_SIZE);
+  wl_surface_commit (surface);
+
+  if (wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: %d: damage-scale gate FAILED: the compositor hung "
+                       "up on a plain scaled commit\n", __LINE__);
+      exit (1);
+    }
+
+  /* Frame two, and the order is the whole test: the rectangle is named while the
+   * surface still thinks it is 200 units wide, then the scale says it was 100. */
+  wl_surface_damage (surface, 0, 0, PROBE_DS_DAMAGE, PROBE_DS_DAMAGE);
+  wl_surface_set_buffer_scale (surface, 2);
+  wl_surface_attach (surface, green, 0, 0);
+  wl_surface_commit (surface);
+
+  if (wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: %d: damage-scale gate FAILED: the compositor hung "
+                       "up on damage followed by set_buffer_scale in one commit\n",
+               __LINE__);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: damage-scale probe: 200x200 red, then 50x50 surface "
+                   "pixels of a 200x200 green buffer at scale 2 — holding that "
+                   "picture for the compositor to be read against\n");
+}
+
 /* -------------------------------------------------------- --wrong-object */
 
 /* A request that names an object hands the compositor whatever struct sits
@@ -4067,6 +4269,157 @@ drag_fake_probe (void)
                    "and no surface was entered\n", __LINE__);
 }
 
+/* ------------------------------------------------------ --drag-no-source */
+
+/* A page can start a drag and hand nothing over: wayland.xml spells out the
+ * shape — "If source is NULL, enter, leave and motion events are sent only to
+ * the client that initiated the drag" — and the compositor sends
+ * wl_data_device.enter with no offer at all. That is legal, but it costs the
+ * drag its ending: the request that normally retires a drop is
+ * wl_data_offer.finish, and there is no offer to make it on. Everything else
+ * that keeps a drag alive goes through the offer too, so if the drop does not
+ * retire it, nothing ever will.
+ *
+ * The consequence is a picture, not a leak. The surface the client named as the
+ * drag's icon is marked as one, and only the death of the drag unmarks it — and
+ * an icon is painted while a drag carries it and never again afterwards. So a
+ * client that drags once with no payload and then puts a window on that same
+ * surface has a window that is mapped, configured and full of pixels and is
+ * never drawn.
+ *
+ * The half graded here is the wire: the enter has to arrive with no offer (a
+ * sourceless drag that got one is a different bug), a drop has to arrive (a drag
+ * cancelled on the way leaves nothing to conclude, and the gate would be grading
+ * a run that never happened), and the connection has to survive both. The half
+ * graded by seat-selftest is that the ex-icon surface, once it is a toplevel, is
+ * in the stack the host is told to draw. */
+#define NS_SIZE      120
+#define NS_MAGENTA 0x00ff00ffu
+#define NS_APP_ID    "cefnest-drag-no-source"
+
+static struct wl_surface *ns_surface;
+static struct wl_buffer *ns_buffer;
+static struct xdg_surface *ns_xdg;
+static struct xdg_toplevel *ns_toplevel;
+
+static void
+ns_xdg_configure (void *data, struct xdg_surface *xdg_surface, uint32_t serial)
+{
+  xdg_surface_ack_configure (xdg_surface, serial);
+
+  /* A toplevel is only shown once it has content under the new role, so the
+   * buffer the surface carried as an icon goes on being attached. */
+  wl_surface_attach (ns_surface, ns_buffer, 0, 0);
+  wl_surface_damage_buffer (ns_surface, 0, 0, NS_SIZE, NS_SIZE);
+  wl_surface_commit (ns_surface);
+  drag_ns_configured++;
+}
+
+static const struct xdg_surface_listener ns_xdg_listener = {
+  .configure = ns_xdg_configure,
+};
+
+static void
+ns_drag_start (uint32_t serial)
+{
+  struct wl_shm_pool *pool;
+  uint32_t *pixels;
+  int fd, i;
+
+  ns_surface = wl_compositor_create_surface (compositor);
+
+  pixels = map_pool (NS_SIZE * NS_SIZE * 4, &fd);
+  pool = wl_shm_create_pool (shm, fd, NS_SIZE * NS_SIZE * 4);
+  ns_buffer = wl_shm_pool_create_buffer (pool, 0, NS_SIZE, NS_SIZE, NS_SIZE * 4,
+                                         WL_SHM_FORMAT_XRGB8888);
+  wl_shm_pool_destroy (pool);
+  close (fd);
+
+  for (i = 0; i < NS_SIZE * NS_SIZE; i++)
+    pixels[i] = NS_MAGENTA;
+
+  wl_surface_attach (ns_surface, ns_buffer, 0, 0);
+  wl_surface_damage_buffer (ns_surface, 0, 0, NS_SIZE, NS_SIZE);
+  wl_surface_commit (ns_surface);
+
+  /* No source, and this new surface as the icon: the shape the protocol says
+   * needs no offer, asked for with the serial of the press this handler is
+   * running in, so the seat's grab rule is satisfied and the drag is real. */
+  wl_data_device_start_drag (data_device, NULL, surface, ns_surface, serial);
+
+  if (wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: %d: drag-no-source gate FAILED: the compositor hung "
+                       "up on a sourceless start_drag\n", __LINE__);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: %d: started a drag with no source, icon is a surface of "
+                   "our own, serial %u\n", __LINE__, serial);
+}
+
+static void
+ns_check (void)
+{
+  if (!drag_ns_enters)
+    {
+      fprintf (stderr, "client: %d: drag-no-source gate FAILED: nothing ever entered "
+                       "the surface this drag started on, so the drop that was "
+                       "supposed to conclude it was never offered to anybody\n",
+               __LINE__);
+      exit (1);
+    }
+
+  if (drag_ns_offers)
+    {
+      fprintf (stderr, "client: %d: drag-no-source gate FAILED: the compositor "
+                       "introduced a wl_data_offer for a drag that had no source, so "
+                       "this run graded a payload that does not exist\n", __LINE__);
+      exit (1);
+    }
+
+  if (!drag_ns_drops)
+    {
+      fprintf (stderr, "client: %d: drag-no-source gate FAILED: the pointer let go "
+                       "over this client's own surface and no wl_data_device.drop "
+                       "arrived\n", __LINE__);
+      exit (1);
+    }
+
+  /* The drop is done with. Make the icon into a window: a surface that was only
+   * ever an icon has no role, so this is the first xdg object it gets. */
+  ns_xdg = xdg_wm_base_get_xdg_surface (wm_base, ns_surface);
+  xdg_surface_add_listener (ns_xdg, &ns_xdg_listener, NULL);
+  ns_toplevel = xdg_surface_get_toplevel (ns_xdg);
+  xdg_toplevel_set_title (ns_toplevel, "drag icon become a window");
+  xdg_toplevel_set_app_id (ns_toplevel, NS_APP_ID);
+  wl_surface_commit (ns_surface);
+
+  /* Twice: the first roundtrip brings the configure, whose listener answers with
+   * a commit; the second lets that commit become a frame the compositor has
+   * imported. */
+  if (wl_display_roundtrip (display) < 0 ||
+      wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: %d: drag-no-source gate FAILED: the compositor hung "
+                       "up on the ex-icon surface being given a toplevel role after "
+                       "the drop\n", __LINE__);
+      exit (1);
+    }
+
+  if (!drag_ns_configured)
+    {
+      fprintf (stderr, "client: %d: drag-no-source gate FAILED: the toplevel built on "
+                       "the drag's icon was never configured, so the selftest has no "
+                       "window to look for\n", __LINE__);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: %d: the sourceless drag entered with no offer, dropped, "
+                   "and its icon became a configured toplevel (%d)\n",
+           __LINE__, drag_ns_configured);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -4121,6 +4474,10 @@ main (int argc, char *argv[])
         use_empty_copy = 1;
       else if (!strcmp (argv[i], "--popup-depth"))
         use_popup_depth = 1;
+      else if (!strcmp (argv[i], "--damage-scale"))
+        use_damage_scale = 1;
+      else if (!strcmp (argv[i], "--drag-no-source"))
+        use_drag_no_source = 1;
       else if (!strcmp (argv[i], "--drag-fake-serial"))
         use_drag_fake_serial = 1;
       else if (!strcmp (argv[i], "--second-window"))

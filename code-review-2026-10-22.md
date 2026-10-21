@@ -171,6 +171,60 @@ helper 侧对称缺陷：`helper/src/main.cpp:279-291` 的 `Send()` 靠 SO_SNDTI
 4. **测试可信度**：M19、M20、L23（skip 语义）、M21（sha256）。
 5. **其余中等/轻微按需跟进**。
 
+## 复核与处置（同一份报告，逐条回到当前树核实）
+
+处置基线：`meson test` 22 项全绿（19 个 seat-selftest 模式 + 3 个静态/单元）。每条收录的判定都按
+项目规矩在线上或像素上评分，新增门禁都做过双向变异。
+
+### 已闭环（修复 + 门禁）
+
+| 条目 | 处置 | 门禁 |
+| --- | --- | --- |
+| S1 | 补 `wl_resource_instance_of` 校验 | `--wrong-object`（裸 frame 绕过 libwayland 客户端的类型检查，见 shm-client.c:3746-3753 的实测记录） |
+| S2 | dispose 补清 `primary_replay_id` | `test/audit-loop-sources.py`（静态：每个 idle/timeout 要么持引用要么被 dispose 取消） |
+| S3 | 事后缩小的 pool 直接拒绝读取 | `--pool-shrink`（两种 pool 生命周期各一遍） |
+| S4 | 宿主与 helper 两侧都补写循环 | `test/framing-gate.sh` |
+| S5 | `CloseEveryBrowser()` + 信号处理 | `test/sandbox-soak.sh`、`test/multi-browser-gate.sh` |
+| S6 | `assigned_surfaces` 生命周期 | `test/multi-browser-gate.sh` |
+| M2 | popup 深度上限 `NESTED_POPUP_MAX_DEPTH` | `--popup-depth`（第 33 层被拒） |
+| M8 | `start_drag` 必须引一次还按着的按下 | `--drag-fake-serial`（`docs/drag-loop.md` §6.7 附两次变异） |
+| M3 / L1 | scale 与 damage 都改 commit 时生效，换算走 gint64 并 CLAMP | `--damage-scale`（三个采样点，`docs/frame-metrics.md` §2.1-2.2 附两次变异） |
+| M7 | `drag_drop` 里给「永远等不到 finish 的那条 drag」就地退休 | `--drag-no-source`（`docs/drag-loop.md` §6.8 附变异） |
+| 其余 S/M 严重度相邻项 | 空 selection payload、dnd v3 请求、每连接 pool 预算 | `--empty-copy`、`--dnd-requests`、`--pool-budget` |
+
+### 复核后对报告的订正
+
+- **M3 的方向说反了**：`set_buffer_scale` 与 damage 同为双缓冲，真正的分歧只有「同一轮里 damage
+  先写、scale 后写」，错法是**少覆盖**（新 buffer 只读一角，其余继续显示上一帧），不是报告说的花屏
+  或尺寸错乱。weston 与 mutter 都在 commit 时用刚生效的 scale 换算。已由 `--damage-scale` 钉住。
+- **S1 的可达性**：经 libwayland-client 包装的调用到不了合成器（库自己报 `invalid object (8),
+  type (zwp_primary_selection_source_v1), message set_selection(?ou)`），只有裸 socket 写帧能
+  触发。结论不变（合成器必须自己能说不），威胁模型从「任何客户端」收窄为「任何写得出帧的客户端」。
+- **M1 是有界延迟持有**，不是无界泄漏：`cursor_pending` 的强引用在下一次 `set_cursor` 或 surface
+  销毁时释放。已补销毁分支。
+- **M4 只在 ENOMEM 路径**：`fds_transferred` 之后二次 close 需要分配失败才会走到。已加判据。
+- **M6 的 fd 泄漏不可达**：`g_unix_fd_add_full` 失败要求主循环本身拒绝挂载。
+- **M7 的 NULL offer 本身合法**（wayland.xml 明说 source 为 NULL 时只给发起者发 enter/leave/motion），
+  但那条 drag 因此永远无法被 `finish` 终结 — 这一半是真问题，另半（offer 创建失败）只在 OOM 时发生。
+  后果也不是报告说的「停在 dropped-unconcluded」而是画不出来：图标 surface 的 `is_drag_icon` 只在
+  `drag_destroy` 清，之后同一块 surface 被客户端拿来当 toplevel 会永远不进绘制栈。
+- **L8 不成立**：`wl_keyboard_interface` 只有 `release` 一个槽，`grab_keyboard` 是合成器→客户端事件；
+  报告还把后果方向也写反了（空请求槽打死的是整个合成器，不是客户端）。
+- **L10 不成立**：光标 surface 销毁后保留旧图是正常客户端流程（换图标时先销毁上一张），
+  wayland.xml 对 `set_cursor` 的 surface 死掉没有额外要求；pending 那一半已单独修好。
+- **L19 不成立**：`libcefnest.so` 的 `NEEDED` 已有 `libm`，`gtk4 → glib-2.0` 已带 `-pthread`。
+- **L20 不成立**：CEF 版本串里只有 `+` 需要 URL 编码。
+- **M17 不成立**：socket 路径含随机 uuid，位于 0700 的 `$XDG_RUNTIME_DIR`， inode 权限 0600；
+  `SO_PEERCRED` 在这个前提下只能证明同 uid，而同 uid 的攻击者与合法 peer 逐字节相同。
+- **M15 已修**：`Shutdown()` 在锁内 swap `fd_`、`shutdown()` 唤醒阻塞的 `read`、`join` 读线程，
+  之后才 `close`，没有描述符复用的窗口（残留的只是无同步的 `fd_` 读，最坏 `EBADF`）。
+
+### 仍在处理
+
+M9-M14、M18、M21、L2-L7、L9、L11-L17、L25 与存疑项：逐条核实中，
+结论按上面的格式补进本节。
+
+
 ---
 
 ## 附录：模块审查明细

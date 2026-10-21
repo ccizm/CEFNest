@@ -1638,6 +1638,18 @@ drag_drop (Drag *drag)
       WL_DATA_SOURCE_DND_DROP_PERFORMED_SINCE_VERSION)
     wl_data_source_send_dnd_drop_performed (drag->source->resource);
 
+  /* A destination that was never given an offer has no way to say it is done:
+   * the finish that normally closes a drop is a wl_data_offer request, and there
+   * is no offer to make it on. This is the shape the protocol sanctions for a
+   * drag that hands nothing over — "If source is NULL, enter, leave and motion
+   * events are sent only to the client that initiated the drag" — so the drop
+   * above is the last word that will ever be said about this drag and it has to
+   * be retired here. Left alive it keeps the icon surface marked is_drag_icon,
+   * and an icon is not composited as a window: a page that drags once without a
+   * payload and then puts a toplevel on that same surface never appears. */
+  if (!drag->dest_offer)
+    drag_destroy (drag, TRUE);
+
   nested_surfaces_changed (self);
 }
 

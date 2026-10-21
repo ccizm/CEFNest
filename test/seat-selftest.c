@@ -91,6 +91,8 @@ typedef enum {
   STEP_SECOND_COUNT,
   STEP_SECOND_ROUTE,
   STEP_SECOND_EXPECT,
+  STEP_DAMAGE_SCALE,
+  STEP_DRAG_NO_SOURCE,
   N_STEP_KINDS
 } StepKind;
 
@@ -103,6 +105,9 @@ typedef struct {
 
 static const Step default_script[] = {
   { STEP_SETTLE,          0,   0, 800 }, /* let the client map and draw */
+  /* The probe commits two frames of its own and then stops drawing, so this is
+   * as late as the picture it leaves can still be found untouched. */
+  { STEP_DAMAGE_SCALE,    0,   0, 300 },
   { STEP_STACK,           0,   0,   0 }, /* where the popups were placed */
   { STEP_DUMP_COMPOSITE,  1,   0,  60 },
   { STEP_POINTER_ENTER, 300, 200,  60 },
@@ -158,6 +163,10 @@ static const Step default_script[] = {
   { STEP_KEYBOARD_LEAVE,  0,   0,  80 },
   { STEP_SETTLE,          0,   0, 120 },
   { STEP_BUTTON_RELEASE, BTN_LEFT, 0, 60 },
+  /* In a --drag-no-source run the release above is the drop of a drag that owns
+   * no payload, and the client turns the drag's icon into a toplevel the moment
+   * the drop lands. This is where the window it made has to be on the screen. */
+  { STEP_DRAG_NO_SOURCE,   0,   0, 500 },
   /* Off the menu, and a press there: xdg_popup.grab means the compositor owns
    * the dismissal, so the client should report popup_done for the menu. */
   { STEP_POINTER_MOTION,   60,  60, 80 },
@@ -217,6 +226,7 @@ static const char *step_names[N_STEP_KINDS] = {
   "drag-out-back", "drag-out-leave", "drag-out-check", "drag-in",
   "drag-in-motion", "drag-in-second", "drag-in-drop", "drag-in-cancel",
   "drag-in-check", "second-count", "second-route", "second-expect",
+  "damage-scale", "drag-no-source",
 };
 
 #define PREEDIT_TEXT "nihao"
@@ -252,6 +262,15 @@ static char drag_in_mime[128];
 static int fds_at_drag_in;
 static gboolean second_mode;
 static gboolean second_failed;
+/* --damage-scale is graded on the pixels the compositor imported, so the only
+ * state it needs is whether the run has complained yet. */
+static gboolean damage_scale_mode;
+static gboolean damage_scale_failed;
+/* --drag-no-source is graded twice: the client says what the wire carried (an
+ * enter with no offer, then a drop), and this process says whether the surface
+ * that carried the drag's icon ever reaches the screen again. */
+static gboolean drag_no_source_mode;
+static gboolean drag_no_source_failed;
 /* Whether the compositor ever held a client frame to draw: a run that ends with
  * none has shown that nothing it was sent reached the screen, and that is not a
  * pass however tidily the client left. Three modes end their own connection on
@@ -567,12 +586,13 @@ surface_name (NestedSurface *surface)
   return app_id ? app_id : "(other)";
 }
 
-/* The colour at the centre of what a surface last committed. The client paints
- * nothing but the two focus colours here, so this is the client's own answer to
- * "which window did wl_keyboard.enter name" — read off the frame the
- * compositor imported, not off the state behind it. */
+/* The colour at one pixel of what a surface last committed, counted in the
+ * buffer's own units: the texture the compositor keeps *is* the client's buffer,
+ * so a rectangle it chose to read out of the new frame shows here, and one it
+ * chose to skip shows the frame before it. That is what makes a partial copy
+ * something a run can be made to answer for instead of a claim about state. */
 static gboolean
-center_color (NestedSurface *surface, int *r, int *g, int *b)
+surface_pixel (NestedSurface *surface, int x, int y, int *r, int *g, int *b)
 {
   GdkTexture *texture = nested_surface_get_texture (surface);
   int width, height, stride;
@@ -584,18 +604,237 @@ center_color (NestedSurface *surface, int *r, int *g, int *b)
 
   width = gdk_texture_get_width (texture);
   height = gdk_texture_get_height (texture);
+  if (x < 0 || y < 0 || x >= width || y >= height)
+    return FALSE;
+
   stride = width * 4;
   pixels = g_malloc ((size_t) stride * height);
   gdk_texture_download (texture, pixels, stride);
 
   /* gdk_texture_download hands back B8G8R8A8. */
-  at = (size_t) (height / 2) * stride + (size_t) (width / 2) * 4;
+  at = (size_t) y * stride + (size_t) x * 4;
   *b = pixels[at];
   *g = pixels[at + 1];
   *r = pixels[at + 2];
   g_free (pixels);
 
   return TRUE;
+}
+
+/* The colour at the centre of what a surface last committed. The client paints
+ * nothing but the two focus colours here, so this is the client's own answer to
+ * "which window did wl_keyboard.enter name" — read off the frame the
+ * compositor imported, not off the state behind it. */
+static gboolean
+center_color (NestedSurface *surface, int *r, int *g, int *b)
+{
+  GdkTexture *texture;
+
+  if (!(texture = nested_surface_get_texture (surface)))
+    return FALSE;
+
+  return surface_pixel (surface, (int) gdk_texture_get_width (texture) / 2,
+                        (int) gdk_texture_get_height (texture) / 2, r, g, b);
+}
+
+/* ---------------------------------------------------------- --damage-scale */
+
+/* The probe in shm-client commits a 200x200 solid red buffer whole, then commits
+ * a 200x200 solid green one having damaged 50x50 *surface* pixels and set
+ * wl_surface.set_buffer_scale to 2 in that same round. Both requests are
+ * double-buffered, so the commit is what decides which scale the damage was
+ * written under: the rectangle that has to come out of the new buffer is
+ * (0,0,100,100), not the (0,0,50,50) the surface was measured in when the client
+ * named it and not the whole buffer either. */
+#define PROBE_DS_SIZE    200
+#define PROBE_DS_GREEN_R   0
+#define PROBE_DS_GREEN_G 255
+#define PROBE_DS_GREEN_B   0
+#define PROBE_DS_RED_R   255
+#define PROBE_DS_RED_G     0
+#define PROBE_DS_RED_B     0
+
+static void
+damage_scale_fail (const char *format, ...)
+{
+  va_list args;
+  char *text;
+
+  va_start (args, format);
+  text = g_strdup_vprintf (format, args);
+  va_end (args);
+
+  damage_scale_failed = TRUE;
+  g_printerr ("selftest: damage-scale gate FAILED: %s\n", text);
+  g_free (text);
+}
+
+static void
+check_damage_scale (void)
+{
+  static const struct {
+    int x, y;
+    int r, g, b;
+    const char *where;
+    const char *diagnosis;
+  } points[] = {
+    {  25,  25, PROBE_DS_GREEN_R, PROBE_DS_GREEN_G, PROBE_DS_GREEN_B,
+      "inside the rectangle as the client named it",
+      "the second commit never reached the screen" },
+    {  75,  75, PROBE_DS_GREEN_R, PROBE_DS_GREEN_G, PROBE_DS_GREEN_B,
+      "inside it only once the scale this commit applied is used",
+      "the damage was multiplied by the scale the surface still had when the "
+      "request arrived, so a quarter of the new buffer was read out of it" },
+    { 150, 150, PROBE_DS_RED_R, PROBE_DS_RED_G, PROBE_DS_RED_B,
+      "outside it, where the frame before has to still be showing",
+      "the whole buffer was re-read, so this run exercised no partial copy at "
+      "all and cannot tell either scale was wrong" },
+  };
+  NestedSurface *surface = nested_compositor_get_surface (compositor);
+  GdkTexture *texture;
+  size_t i;
+
+  if (!surface)
+    {
+      damage_scale_fail ("there is no window to read a picture off");
+      return;
+    }
+
+  texture = nested_surface_get_texture (surface);
+  if (!texture)
+    {
+      damage_scale_fail ("the compositor imported no frame from this client");
+      return;
+    }
+
+  if (gdk_texture_get_width (texture) != PROBE_DS_SIZE ||
+      gdk_texture_get_height (texture) != PROBE_DS_SIZE)
+    {
+      damage_scale_fail ("the frame on screen is %dx%d, not the probe's %dx%d, so "
+                         "the ordinary drawing overwrote the picture this gate "
+                         "reads",
+                         gdk_texture_get_width (texture),
+                         gdk_texture_get_height (texture),
+                         PROBE_DS_SIZE, PROBE_DS_SIZE);
+      return;
+    }
+
+  for (i = 0; i < G_N_ELEMENTS (points); i++)
+    {
+      int r, g, b;
+
+      if (!surface_pixel (surface, points[i].x, points[i].y, &r, &g, &b))
+        {
+          damage_scale_fail ("pixel (%d,%d) is not in the frame the compositor has",
+                             points[i].x, points[i].y);
+          continue;
+        }
+
+      if (r == points[i].r && g == points[i].g && b == points[i].b)
+        continue;
+
+      damage_scale_fail ("pixel (%d,%d), %s, is %02x%02x%02x, wanted "
+                         "%02x%02x%02x: %s",
+                         points[i].x, points[i].y, points[i].where,
+                         r, g, b, points[i].r, points[i].g, points[i].b,
+                         points[i].diagnosis);
+    }
+
+  if (!damage_scale_failed)
+    g_print ("selftest: damage-scale ok: the 50x50 surface rectangle became the "
+             "100x100 buffer one, and the other 30000 pixels stayed the frame "
+             "before\n");
+}
+
+/* ------------------------------------------------------- --drag-no-source */
+
+/* The app-id the client puts on the toplevel it builds out of the drag's icon,
+ * and the colour its buffer is filled with. Same numbers as NS_APP_ID and
+ * NS_MAGENTA in shm-client.c. */
+#define NS_APP_ID      "cefnest-drag-no-source"
+#define NS_MAGENTA_R     0xff
+#define NS_MAGENTA_G     0x00
+#define NS_MAGENTA_B     0xff
+
+static void
+drag_no_source_fail (const char *format, ...)
+{
+  va_list args;
+  char *text;
+
+  va_start (args, format);
+  text = g_strdup_vprintf (format, args);
+  va_end (args);
+
+  drag_no_source_failed = TRUE;
+  g_printerr ("selftest: drag-no-source gate FAILED: %s\n", text);
+  g_free (text);
+}
+
+static void
+check_drag_no_source (void)
+{
+  GList *tops, *l, *stack, *s;
+  NestedSurface *icon_window = NULL;
+  gboolean painted = FALSE;
+  int r, g, b;
+
+  tops = nested_compositor_get_toplevels (compositor);
+  for (l = tops; l; l = l->next)
+    {
+      NestedSurface *surface = l->data;
+      const char *app_id = nested_surface_get_app_id (surface);
+
+      if (app_id && !strcmp (app_id, NS_APP_ID))
+        {
+          icon_window = g_object_ref (surface);
+          break;
+        }
+    }
+  g_list_free_full (tops, g_object_unref);
+
+  if (!icon_window)
+    {
+      drag_no_source_fail ("no toplevel with app-id %s, although the client said "
+                           "the drop arrived and its icon got a role and a "
+                           "configure, so the compositor lost one of those",
+                           NS_APP_ID);
+      return;
+    }
+
+  if (nested_compositor_drag_active (compositor))
+    drag_no_source_fail ("a drag still holds the pointer after the release that "
+                         "dropped it, so every window underneath has stopped "
+                         "taking clicks");
+
+  /* Asked for this window on its own: a second toplevel of one client is not the
+   * compositor's primary, and which one is primary has nothing to do with the
+   * drag. What is being graded is whether the host is told to draw this surface. */
+  stack = nested_compositor_get_paint_stack_for (compositor, icon_window);
+  for (s = stack; s; s = s->next)
+    if (s->data == icon_window)
+      painted = TRUE;
+  g_list_free_full (stack, g_object_unref);
+
+  if (!painted)
+    {
+      drag_no_source_fail ("the window built on a drag's icon is mapped, configured "
+                           "and full of pixels and is not in the stack the host is "
+                           "told to draw: the drop left the drag alive, and a "
+                           "surface marked as an icon is only drawn while a drag is "
+                           "carrying it");
+    }
+  else if (!surface_pixel (icon_window, 60, 60, &r, &g, &b))
+    drag_no_source_fail ("the window built on the drag's icon has no frame to read");
+  else if (r != NS_MAGENTA_R || g != NS_MAGENTA_G || b != NS_MAGENTA_B)
+    drag_no_source_fail ("the window built on the drag's icon paints %02x%02x%02x "
+                         "where the magenta it committed should be", r, g, b);
+  else if (!drag_no_source_failed)
+    g_print ("selftest: drag-no-source ok: the sourceless drag was retired by its "
+             "own drop and the surface that carried its icon is a window on screen "
+             "again\n");
+
+  g_clear_object (&icon_window);
 }
 
 static void
@@ -892,6 +1131,10 @@ step_is_ours (StepKind kind)
     case STEP_DRAG_IN_CANCEL:
     case STEP_DRAG_IN_CHECK:
       return drag_in_mode;
+    case STEP_DAMAGE_SCALE:
+      return damage_scale_mode;
+    case STEP_DRAG_NO_SOURCE:
+      return drag_no_source_mode;
     default:
       return TRUE;
     }
@@ -1099,6 +1342,18 @@ run_step (gpointer data)
       break;
     case STEP_SECOND_EXPECT:
       check_input (step->a);
+      break;
+    case STEP_DAMAGE_SCALE:
+      if (!damage_scale_mode)
+        break;
+
+      check_damage_scale ();
+      break;
+    case STEP_DRAG_NO_SOURCE:
+      if (!drag_no_source_mode)
+        break;
+
+      check_drag_no_source ();
       break;
     default:
       break;
@@ -1408,6 +1663,8 @@ main (int argc, char *argv[])
       drag_out_mode = drag_out_mode || !strcmp (argv[i], "--drag-out");
       drag_in_mode = drag_in_mode || !strcmp (argv[i], "--drag-in");
       second_mode = second_mode || !strcmp (argv[i], "--second-window");
+      damage_scale_mode = damage_scale_mode || !strcmp (argv[i], "--damage-scale");
+      drag_no_source_mode = drag_no_source_mode || !strcmp (argv[i], "--drag-no-source");
     }
 
   script = second_mode ? second_script : default_script;
@@ -1597,7 +1854,8 @@ main (int argc, char *argv[])
     g_printerr ("selftest: the compositor never had a client frame to paint\n");
 
   return (gtk_client_failed || client_failed || drag_out_failed || drag_in_failed ||
-          second_failed || glib_criticals ||
+          second_failed || damage_scale_failed || drag_no_source_failed ||
+          glib_criticals ||
           (!client_frame_seen && !paint_exempt) ||
           dmabuf_refusals ||
           (fullscreen_gate && !(fs_enter_seen && fs_exit_seen)) ||

@@ -156,8 +156,16 @@ struct _NestedSurface {
   int shm_shadow_height;
   int shm_shadow_stride;
   uint32_t shm_shadow_format;
+  /* Damage as the shadow consumes it: one rectangle in buffer pixels, worked out
+   * by the commit that carries it. */
   GdkRectangle shm_damage;
   gboolean shm_damage_valid;
+  /* Damage as the client states it, which is twice over and never in the units
+   * the shadow wants: wl_surface.damage is surface-local, wl_surface.damage_buffer
+   * is buffer pixels, and the factor between them is the buffer scale of the
+   * commit — so both wait here until the commit converts the first. */
+  GdkRectangle pending_damage_surface, pending_damage_buffer;
+  gboolean pending_damage_surface_valid, pending_damage_buffer_valid;
   int width;                 /* surface-local size, after crop and scale */
   int height;
   int natural_width;         /* buffer size divided by scale */
@@ -166,7 +174,8 @@ struct _NestedSurface {
   int32_t geom_y;
   int32_t geom_width;
   int32_t geom_height;
-  int32_t scale;             /* wl_surface.set_buffer_scale */
+  int32_t scale;             /* wl_surface.set_buffer_scale, current */
+  int32_t pending_scale;     /* ... and the copy that commit makes current */
 
   char *app_id;
   char *title;

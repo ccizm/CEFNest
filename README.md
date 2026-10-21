@@ -174,8 +174,8 @@ menus/primary/a11y are in `docs/minimal-host.md`.
 ## Test
 
 ```bash
-meson test -C builddir                       # 15 tests
-meson test -C builddir --suite selftest      # the thirteen seat selftests
+meson test -C builddir                       # 23 tests
+meson test -C builddir --suite selftest      # the twenty seat selftests
 meson test -C builddir --suite protocol      # the implementation-slot audit
 meson test -C builddir --suite unit          # the helper-path resolution rule
 ```
@@ -189,7 +189,9 @@ client saw. Each mode asks for a different set of protocol objects:
 ```
 
 with `--dmabuf`, `--text-input`, `--cursor-shape`, `--popup`, `--refused`,
-`--pool-budget`, `--dnd-requests`, `--drag-out`, `--drag-in`, `--fullscreen`,
+`--pool-budget`, `--wrong-object`, `--pool-shrink`, `--empty-copy`,
+`--popup-depth`, `--damage-scale`, `--drag-fake-serial`, `--drag-no-source`,
+`--dnd-requests`, `--drag-out`, `--drag-in`, `--fullscreen`,
 `--second-window`, `--gtk-client`. On a machine with no display they report
 `skipping` and exit 0.
 

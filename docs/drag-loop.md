@@ -313,6 +313,59 @@ surface」；反过来把记下 grab 的那行改成 `if (0 && pressed)`，红�
 顺带一条：伪造的 serial 和「按过又抬起了」的 serial 在 compositor 的记录里长得一模一样（grab 槽已经
 是 0），所以一个数字就同时测了两种。CEF 页面走的仍是 `--drag-out` 那条真序列，没有被这套改动碰过。
 
+### 6.8 没有 source 的拖拽只能由 drop 自己收场
+
+`start_drag` 的 source 是可以为空的，而这一形状协议明文允许：「If source is NULL, enter, leave and
+motion events are sent only to the client that initiated the drag」。页面上「按下就走、什么都不交」
+的拖拽正是它。代价藏在下半句：平时把一次拖拽说完的是 `wl_data_offer.finish`，而 source 为空时
+compositor 根本没有 `wl_data_offer` 可介绍，目的地于是没有任何办法宣布结束。我们的 `drag_drop`
+只发 `dnd_drop_performed`（还要求 source 存在、版本够），然后就把这个 `Drag` 留在原地。
+
+留着的后果不是记账不干净，是画不出来。`is_drag_icon` 只在 `drag_destroy` 里清，而
+`surface_is_painted`（`src/nested.c:2033`）对图标走的是另一条支路：`nested_compositor_drag_icon`
+在 `owns_pointer` 还回去之后返回 NULL，于是那个 surface「是图标、但没有拖拽在带它」，任何绘制路径都
+不再认它。同一个 surface 后来被客户端拿来当 toplevel——页面里 drag 一次再把弹窗/新窗口放到这块
+surface 上是完全合法的用法——它 mapped、configured、有 buffer，就是不进绘制栈，屏幕上永远是一块空的。
+§6.7 那条门禁测的是 serial；这里测的是「拖拽怎么结束」。
+
+修法是让 drop 成为这句话的最后一个词：`drag_drop` 里在发完 `dnd_drop_performed` 之后补
+`if (!drag->dest_offer) drag_destroy (drag, TRUE);`。有 offer 的情形一切照旧，仍由 `finish`/`destroy`
+收尾；只有那条永远等不到 finish 的拖拽在这里就地退休。`drag_destroy` 会把图标 surface 的
+`is_drag_icon` 清掉并 `nested_surfaces_changed`，所以同一轮 flush 里它就又回到了栈上。
+
+门禁是 `shm-client --drag-no-source`（`seat-selftest-drag-no-source`）。客户端先按 §6.7 记下的真
+serial 起一次 `source == NULL` 的拖拽，图标是它自己新建的一块 120×120 纯成品红（magenta）surface；
+然后把自己那块的 xdg toplevel 用 `cefnest-drag-no-source` 这个 app-id 立起来。它当场四条，缺一即红：
+`enter` 到过（拖拽真起来了）、`wl_data_offer` 一次都没出现（测的确实是「没有载荷」而不是别的）、
+`drop` 到过（抬起确实落在这块 surface 上）、icon 拿到过 configure。自测那端再钉三条，用的是公开接口：
+`nested_compositor_drag_active` 必须已经放手，否则指针底下的窗口全都点不动；用
+`nested_compositor_get_paint_stack_for (compositor, icon_window)` 单独问这个窗口在不在栈上——不掺
+primary 的账；最后 `surface_pixel (icon_window, 60, 60)` 读回那管 magenta，证明它不只是被列进名单，
+是真的有一帧被 import 了。绿色长这样：
+
+```
+client: 4358: started a drag with no source, icon is a surface of our own, serial 5
+client: 567674: the drag was dropped here
+client: 4420: the sourceless drag entered with no offer, dropped, and its icon became a configured toplevel (1)
+selftest: drag-no-source ok: the sourceless drag was retired by its own drop and the surface that carried its icon is a window on screen again
+selftest: stack[0] cefnest-drag-no-source at 300,200 size 120x120
+```
+
+变异只把那句守卫改成 `if (FALSE)`，红的正是栈那一条，而且红在「画不出来」而不是「没退休」：
+
+```
+selftest: drag-no-source gate FAILED: the window built on a drag's icon is mapped, configured and full
+of pixels and is not in the stack the host is told to draw: the drop left the drag alive, and a surface
+marked as an icon is only drawn while a drag is carrying it
+rc=1
+```
+
+顺带解释了 §7.4 里一个看起来可疑的分支：`nested_compositor_surface_at` 会跳过图标
+（`src/nested.c:2096`，因为协议说图标的输入区域被忽略）。所以当 origin、目的地、图标是同一块
+surface 时，命中测试返回的是它自己而不是 NULL，走的是「按下时目的地不在自己窗口里 → 取消拖拽」那条
+支路，bug 会自愈。要让这条门禁咬得住，图标必须是另一块 surface——这也是 `--drag-no-source` 里
+`ns_surface` 是新的一块、而不是拿主 toplevel 凑数的原因。
+
 ## 7. 第三段：宿主把拖拽带进来（`drag_from_host` + `::drag-in-end`）
 
 ### 7.1 方向反过来了：这一趟 compositor 是源
