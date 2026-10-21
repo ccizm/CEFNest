@@ -12,6 +12,13 @@ delimited JSON object per line back, which is all this script speaks:
                           fake reports its render process gone (and then keeps
                           the socket open, because that is what the real helper
                           does — the page stops answering, nothing else changes)
+  FAKE_HELPER_DIE_BEFORE_READY
+                          if set, the fake connects and exits with status 1
+                          without ever sending an event. That is the shape of a
+                          helper that never got a browser: CefInitialize returns
+                          false — the profile is already held by another
+                          instance — and the process is gone before the host
+                          hears anything.
 
 A URL containing "download" also starts a download, which is how the host's
 download layer can be driven without a browser:
@@ -90,6 +97,7 @@ if not path:
 
 quit_after = float(os.environ.get("FAKE_HELPER_QUIT_AFTER", "0")) / 1000.0
 crash_after = float(os.environ.get("FAKE_HELPER_CRASH_AFTER", "0")) / 1000.0
+dies = bool(os.environ.get("FAKE_HELPER_DIE_BEFORE_READY"))
 
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 for _ in range(200):
@@ -102,6 +110,11 @@ else:
     sys.exit("fake helper: no compositor is listening at " + path)
 
 channel = sock.makefile("rw")
+
+if dies:
+    # Connected, then gone, with nothing said: what the host gets is a child that
+    # exited and a socket that never opened.
+    sys.exit(1)
 
 
 def send(payload):

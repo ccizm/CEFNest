@@ -10,7 +10,8 @@
 # run can be left unattended, which is what a release gate needs. No package has
 # to be installed: gnome-shell, dbus-run-session and /dev/dri are already here.
 #
-#   ./test/ci-session.sh                        # proof: a window maps, a page loads
+#   ./test/ci-session.sh                        # proof: a window maps, a page loads,
+#                                               # a helper that dies ends the run
 #   ./test/ci-session.sh ./test/find-gate.sh real
 #   ./test/ci-session.sh meson test -C builddir --suite unit
 #
@@ -176,6 +177,23 @@ else
              awk -F: '{s+=$2} END{print s+0}')
   if [ "$aborts" = 0 ]; then ok "no subprocess aborted during the run"
   else ok "$aborts abort line(s) from a libcef sandbox child, and the page above survived it"; fi
+
+  # A helper that dies before it reports ready — a CEF profile another instance
+  # already holds does exactly this — used to leave a window standing there with a
+  # script it never got to run, so an unattended run could only end as a timeout.
+  # Now the run ends on its own, and its status says the page was never shown.
+  { echo "load $PAGE"; echo "js document.title"; echo "quit"; } > "$RUN/dead"
+  env "${cl_env[@]}" CHROMIUM_HELPER="$ROOT/test/fake-helper.py" \
+      FAKE_HELPER_DIE_BEFORE_READY=1 \
+      CHROMIUM_SESSION_SCRIPT="$RUN/dead" \
+    timeout 60 "$DEMO" >"$RUN/dead.out" 2>"$RUN/dead.log"
+  rc=$?
+  if [ $rc = 1 ]; then ok "a scripted run whose helper died before ready fails with 1"
+  else bad "that run exited $rc — 1 wanted (0 is a lie, 124 is still the timeout)"; fi
+  if grep -qE 'helper went away with [1-9][0-9]* of [1-9][0-9]* script step' \
+       "$RUN/dead.out" "$RUN/dead.log";
+  then ok "transcript says which step the dead helper abandoned"
+  else bad "transcript does not name the abandoned step"; fi
 fi
 
 stop_compositor
@@ -187,7 +205,7 @@ echo
 if [ $fails = 0 ]; then printf 'ci session: passed\n'
 else
   printf 'ci session: %d check(s) failed\n' "$fails"
-  for f in demo payload; do
+  for f in demo payload dead; do
     for s in out log; do
       [ -s "$RUN/$f.$s" ] || continue
       echo "-- $f $s"; tail -60 "$RUN/$f.$s" | sed 's/^/  /'

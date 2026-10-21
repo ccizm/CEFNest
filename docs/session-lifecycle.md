@@ -1,7 +1,7 @@
 # 退出路径：关窗口要停 helper，::closed 只发一次
 
-日期：2026-10-20
-问题：任务 #27。demo 里 `chromium_session_stop` 只有 header bar 上那颗「停止」按钮
+日期：2026-10-20，§4 补于 2026-10-21
+问题：任务 #27、#84。demo 里 `chromium_session_stop` 只有 header bar 上那颗「停止」按钮
 能调到，窗口关掉它就当没发生；`demo.session` 又是个从来不 unref 的 static。于是每
 跑一次，`$XDG_RUNTIME_DIR` 里多一个 `cefnest-helper-<uuid>.sock`——名字每次都是新
 的 uuid，所以谁也不会回来收旧的。脚本化验证一晚上攒了 20 个。
@@ -87,7 +87,91 @@ builddir/src/cefnest-demo
 
 `test/seat-selftest` 六档回归照旧全过，24 步跑完，fd 计数不变。
 
-## 4. 还没做的
+## 4. helper 在 ready 之前就死了：脚本化运行要立刻失败
+
+`XDG_CACHE_HOME` 给两个实例共用时，第二个拿不到那份 profile：helper 自己先说一句
+「正在现有的浏览器会话中打开。」，然后是
+
+```
+helper: CefInitialize failed
+session: helper exited with status 1
+session: helper stopped (process exited)
+```
+
+先否证一条旧记录。早前记的是"共享 cache 目录会让**第一个**实例的 helper 跟着
+signal 11 死掉"——在当前 build 上复现不了：B 失败的那段时间里 A 一直在出帧
+（`js` 读回 `requestAnimationFrame` 计数，见本节末），退出也干净。那次崩溃是
+b93be96 帧时钟回归的连带，不是 profile 共享的后果。库这一侧的语义本来就是对的：
+`::closed` 发了一次，socket 也收了。
+
+真正的缺陷在宿主。B 的转录里一条 `demo: script` 都没有：demo 把脚本读了进来，一个
+步骤都没派出去，然后把窗口一直开着——最后是 harness 杀掉 compositor 才结束的。对人
+来说那是"窗口在那儿但什么也没发生"，对无人值守的一跑来说那是把一次两秒的失败放大成
+`PAYLOAD_TIMEOUT`（默认 900 秒）。
+
+原因在两条时间线的接缝上：`start_session_script()` 只在**没有** session 的时候自己上
+表（`if (!demo.session) g_timeout_add (800, script_wait_done, NULL)`），有 session 时
+第一步等的是 `::ready`；helper 没起来就永远没有 ready，而 `session_closed()` 当时只
+把 toolbar 的敏感度和标题收拾了一下。脚本停在 index 0，没有第二个人会往前走它。
+
+修法是把"这条运行还有步骤没派出去"当成失败来报告：
+
+```c
+static void
+session_closed (ChromiumSession *session, gpointer data)
+{ /* 敏感度、标题 …… */
+  script_note_helper_gone ();
+}
+```
+
+`script_helper_gone()` 挂在 idle 上而不是当场做完，这一条是 `close` 逼出来的：它发的
+`::closed` 就在**同一次 main loop 迭代**里到（`gtk_window_close` → `close-request` →
+`stop_everything` → 停会话），而那一步的 `script_finish()` 要到循环末尾才执行——当场
+判断就会把一次按脚本结束的正常运行读成失败。挂到 idle 上等它被看时，脚本已经清空。
+`dump` 是 `dump_view()` 里直接 quit，idle 排不进去；`quit` 本来就先把脚本收干净再退。
+一次已经在退出的运行（信号、shutdown）也不会再有一个活着的 main loop 去跑那个 idle，
+这个答案同样对：已经在结束的运行不是被 helper 抛弃的运行。实测 `close` 与 `dump` 末行
+的脚本修复前后都是 0，两条都没被误伤。
+
+判据用 `index < steps->len` 而不是 `steps != NULL`：末行是 `wait`/`dump` 时索引已经
+走到末尾，那种运行剩下的是一个定时器，它照常会以 0 收尾，不该算成失败。
+
+`main()` 交出的也不再是写死的 0，而是 `demo.exit_status`——任何内部判定要传到
+harness，先得有人把它带出去。
+
+实测（nested 会话里；helper 换成带 `FAKE_HELPER_DIE_BEFORE_READY=1` 的
+`test/fake-helper.py`——连上 socket、一个字不发就 `exit(1)`，正是 `CefInitialize`
+失败那个形状；脚本 `load` → `js` → `quit`）：
+
+| 脚本末行 | helper | 修复前 | 修复后 |
+| --- | --- | --- | --- |
+| `quit` | 假 helper，死在 ready 前 | `timeout 20` 那一跑 rc=124：窗口开着，一步没走 | 整跑约 2 s，状态 1 |
+| `quit` | 真 Chromium，profile 被另一实例占着 | 挂到 5 分钟，靠 harness 杀 compositor 才结束 | 状态 1，且报告与 `helper exited` 打在**同一毫秒** |
+| `close` | 假 helper（活着） | 0 | 0 |
+| `dump` | 假 helper（活着） | 0 | 0 |
+| `quit` | 真 Chromium（独占 profile，proof 那一跑） | 0 | 0 |
+
+转录里多出来的那一行：
+
+```
+demo: the helper went away with 3 of 3 script step(s) still to run, so the run ends here
+```
+
+它现在有门禁：proof 模式的第二跑就是这道题，钉的是退出码 1 和这行转录，见
+`docs/headless-ci.md` §4。
+
+共用 profile 那一跑里 A 侧的读数——这是"第一个实例会被带死"那条旧记录被否证的地方：
+helper ready 之后 `js` 三次读回页面里的 `requestAnimationFrame` 计数，**1 → 242 →
+722**；B 在第二个读数之后才 `CefInitialize failed`，而 A 在其后那 8 秒里照常
+**60 帧/秒**（480 帧 / 8.0 s），最后自己退出、状态 0，转录里没有 signal 11。
+
+另外两条 `::closed` 的来路这一跑没测出东西：`FAKE_HELPER_QUIT_AFTER=1000` 那两个脚本
+实测都在 helper 自己关之前就跑到了头——转录里只有 `helper stopped (stopped by the host)`，
+报告那行没出现，`rc=0`。它们与 `process exited` 进的是同一个入口，行为应当相同；
+要说清楚的是 `::closed` 不带原因，"宿主自己停的"、"helper 自己关的"、"进程没了"
+这三种，报告出来都是同一句话。
+
+## 5. 还没做的
 
 * **compositor 自己的 `wayland-N` + `wayland-N.lock` 仍然留在** `$XDG_RUNTIME_DIR`。
   这个不补：只有 `nested_compositor_dispose` 跑到才会 `wl_display_destroy` → unlink，
@@ -98,3 +182,6 @@ builddir/src/cefnest-demo
   `child_waited` 有机会把「Operation cancelled」当真错误打出来；目前所有退出路径
   都没复现，先不动。
 * 崩在 `kill -9` 下仍会留一个 helper socket——没机会执行任何清理。
+* `::closed` 没有参数，宿主收不到 `mark_closed()` 那个 `why`。§4 的报告因此只能说
+  "helper 走了、还有几步没跑"，不能说它是自己死的还是被谁停的；真要把这一层给出去，
+  是加信号参数，不是让宿主去 grep 自己的日志。

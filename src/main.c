@@ -15,6 +15,9 @@ typedef struct {
   ChromiumView *view;
   GSubprocess *child;
   char **client_argv;
+  /* What the process hands back once the run is over. Only a scripted run that
+   * was cut short gives it anything but 0; see script_helper_gone(). */
+  int exit_status;
 
   /* Set when the page comes from a Chromium helper process rather than from a
    * plain Wayland client: then the header bar is a browser toolbar and the
@@ -42,6 +45,7 @@ static Demo demo;
 #endif
 
 static void session_ready (ChromiumSession *session, gpointer data);
+static void script_note_helper_gone (void);
 
 static void
 update_title (void)
@@ -1002,6 +1006,10 @@ session_closed (ChromiumSession *session, gpointer data)
   if (demo.forward)
     gtk_widget_set_sensitive (demo.forward, FALSE);
   update_title ();
+
+  /* A scripted run has no hand on the close button, so a helper that goes away
+   * on its own has to be reported rather than waited for. */
+  script_note_helper_gone ();
 }
 
 static void
@@ -1504,6 +1512,48 @@ script_finish (void)
 {
   g_clear_pointer (&session_script.steps, g_ptr_array_unref);
   session_script.index = 0;
+}
+
+/* The helper is gone and this run still has steps to dispatch. Every callback
+ * the remaining steps wait for — load-end, ::script-result, a download row, a
+ * frame to dump — belongs to the process that just died, so the run cannot end
+ * any way a harness would read as success: without this it keeps its window
+ * open until whatever is watching it gives up, which turns a one-second failure
+ * into the payload timeout. */
+static gboolean
+script_helper_gone (gpointer data)
+{
+  guint left;
+
+  if (!session_script.steps)
+    return G_SOURCE_REMOVE;
+
+  /* Nothing left to dispatch: the last step was a wait or a dump, and the timer
+   * or the quit it left behind still ends the run the way it always did. */
+  if (session_script.index >= session_script.steps->len)
+    return G_SOURCE_REMOVE;
+
+  left = session_script.steps->len - session_script.index;
+  g_printerr ("demo: the helper went away with %u of %u script step(s) still to "
+              "run, so the run ends here\n",
+              left, session_script.steps->len);
+  script_finish ();
+  demo.exit_status = 1;
+  g_application_quit (G_APPLICATION (demo.app));
+
+  return G_SOURCE_REMOVE;
+}
+
+/* Run on an idle rather than straight from ::closed, because the steps that end
+ * a run stop this session too — `close` closes the window, `dump` quits — and
+ * by the time the idle is looked at they have finished their script. A quit
+ * already in progress has no loop left to run it either, which is the right
+ * answer: a run on its way out is not a run the helper abandoned. */
+static void
+script_note_helper_gone (void)
+{
+  if (session_script.steps)
+    g_idle_add (script_helper_gone, NULL);
 }
 
 static void
@@ -2342,5 +2392,7 @@ main (int argc, char *argv[])
 
   g_object_unref (app);
   g_strfreev (demo.client_argv);
-  return 0;
+  /* Not a fixed 0: a scripted run cut short by its helper dying sets
+   * demo.exit_status, and a harness only sees the difference if it is handed out. */
+  return demo.exit_status;
 }

@@ -368,7 +368,9 @@ autofit, so an unattended run moved the desktop of the person using the machine.
 The compositor is a session leader of its own, so one signal to its process group
 takes the bus, the portal and gvfsd with it, and the run asserts that nothing is
 left behind. What it proves is that a real window maps, that a real Chromium
-session with the sandbox on loads a page and answers JavaScript, and that the
+session with the sandbox on loads a page and answers JavaScript, that a scripted
+run whose helper dies before it reports ready fails in seconds instead of standing
+there until the payload timeout (`docs/session-lifecycle.md` §4), and that the
 existing gates run inside it: `find-gate.sh` (34 assertions), `permission-gate.sh`
 (58), `download-gate.sh` (46), `dnd-gate.sh` (59), `pixel-gate.sh` (12),
 `sandbox-soak.sh` (12) and `meson test` (14/14) all pass unchanged, and
@@ -384,7 +386,7 @@ answer. `docs/headless-ci.md` is the write-up.
 `test/ci-all.sh` is the one command that runs the whole battery through it — proof,
 `meson test` and all seven gates, each in its own nested compositor, one verdict table
 with the skipped checks counted in a column of their own, non-zero exit if anything
-failed. Measured on this laptop: 368 s for the nine runs — 269 gate assertions plus
+failed. Measured on this laptop: 375 s for the nine runs — 271 gate assertions plus
 `meson test` 14/14, with 2 checks skipped.
 
 ```bash

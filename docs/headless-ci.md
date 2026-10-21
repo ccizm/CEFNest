@@ -65,6 +65,12 @@ namespace 里 `tgkill(1, 1, SIGABRT)`，而我们自己的缓冲区都有边界�
 前面三条，于是**报告而不失败**——这里没有崩溃处理器可以修或关，见
 `docs/sandbox-policy.md` §8。
 
+最后是第二跑：同一个脚本，helper 换成带 `FAKE_HELPER_DIE_BEFORE_READY=1` 的
+`test/fake-helper.py`（连上 socket 就 `exit(1)`，什么都不发——`CefInitialize` 失败
+就是这个形状），钉两条：退出码必须是 **1**，转录必须点出还剩几步没派出去。无人值守
+的一跑只有两种结局——退出码与超时——所以一个真失败如果只能以超时出现，它等于把自己
+伪装成"这一跑有点慢"：2 秒的事会被读成 900 秒。修它的那条见 `docs/session-lifecycle.md` §4。
+
 **payload**：`"$@"` 原样在会话里跑。注入的是 `WAYLAND_DISPLAY`、
 `GDK_BACKEND=wayland`、`CEFNEST_HEADLESS=1`、隔离的 HOME/XDG/runtime 目录，以及从
 compositor 自己的 `/proc/<pid>/environ` 里取出的 bus 地址（这样门户走会话内那条 bus，
@@ -144,20 +150,20 @@ KEEP_LOGS=1 ./test/ci-all.sh        # 保留每个 run 的完整 transcript
 
 ## 6. 实测
 
-`./test/ci-all.sh` 整套跑完 368 秒（T490，九条跑动的和，一次一条命令；2026-10-21
-加进 `seat-selftest-pool-budget` 之后重测的整表）。"断言"只数门禁自己的 ok
-行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 没有残留）：
+`./test/ci-all.sh` 整套跑完 375 秒（T490，九条跑动的和，一次一条命令；2026-10-21
+往 proof 里加进"helper 死在 ready 之前"那一跑之后重测的整表）。"断言"只数门禁自己的
+ok 行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 没有残留）：
 
 | run | 结果 | 断言 | 用时 |
 |---|---|---|---|
-| `proof`（无参数自检） | 通过 | 3 | 10s |
+| `proof`（无参数自检） | 通过 | 5 | 11s |
 | `unit`（`meson test -C builddir`） | 通过 | 14 OK | 17s |
-| `pixel` | 通过 | 12 | 12s |
+| `pixel` | 通过 | 12 | 13s |
 | `find` | 通过 | 34 | 31s |
-| `permission` | 通过 | 58 | 61s |
-| `download` | 通过 | 46 | 51s |
+| `permission` | 通过 | 58 | 62s |
+| `download` | 通过 | 46 | 52s |
 | `dnd` | 通过 | 59 | 68s |
-| `menu` | 通过\* | 45（+2 skip） | 70s |
+| `menu` | 通过\* | 45（+2 skip） | 71s |
 | `soak` | 通过 | 12 | 48s |
 
 \* 那 2 条是"弹层上了屏"，这块显示器没有屏可上（§5）。`pixel` 在会话里与在真桌面上
@@ -176,9 +182,10 @@ KEEP_LOGS=1 ./test/ci-all.sh        # 保留每个 run 的完整 transcript
   按住了。
 
 proof 模式那三条断言（`nested compositor on WAYLAND_DISPLAY=`、`HTTP 200`、
-`script [0-9]+ ok value="DND-PAGE`）证明的是这块显示器真的能用；`unit` 里 selftest
-那 11 个模式本来就在进程内起嵌套 compositor、不依赖外层显示器，那一跑证明的是它们在
-会话里也不受干扰。
+`script [0-9]+ ok value="DND-PAGE`）证明的是这块显示器真的能用；那第二跑的两条
+（`rc=1` 与点出剩余步数的那行转录）证明的是这台机器上"跑不起来"能以失败出现，而不是
+以超时出现；`unit` 里 selftest 那 11 个模式本来就在进程内起嵌套 compositor、不依赖
+外层显示器，那一跑证明的是它们在会话里也不受干扰。
 
 ## 7. 换一台机器需要什么
 
