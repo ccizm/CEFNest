@@ -248,3 +248,18 @@ demo: script 3 ok value="DND-PAGE|true"
 - 没有 soname/ABI 门禁：`soversion: '0'` 是手写的，导出清单没有生成（没有 `.symbols` 文件），
   `version:` 直接跟 `project` 的 0.0.1。
 - 没有 deb/tar 的打包脚本，没有 desktop 文件；`third_party/cef/dist` 那份分发仍假定与可执行文件并排。
+
+
+## 架构：linux64 / linuxarm64
+
+`scripts/fetch-cef.sh` 现在按 `CEF_ARCH`（缺省 `uname -m`）选择：
+
+| 机器 | CEF archive |
+| --- | --- |
+| `x86_64` / `amd64` | `cef_binary_<version>_linux64_minimal.tar.bz2` |
+| `aarch64` / `arm64` | `cef_binary_<version>_linuxarm64_minimal.tar.bz2` |
+
+其他架构直接失败，不会悄悄下 x86_64 包。helper 的安装目录仍由
+`host_machine.cpu_family()` 决定，因此 arm64 上落在 `libexec/cefnest/aarch64/`。
+**本机只有 x86_64**：arm64 URL 与二进制尚未在 arm64 目标机上实际构建/运行，
+不能把“URL 能拼出来”当成“已验证支持”。

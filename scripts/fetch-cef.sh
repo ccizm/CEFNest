@@ -10,11 +10,27 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION='154.0.34+g14c5a08+chromium-154.0.8037.98'
-FLAVOR='linux64_minimal'
 DEST="$ROOT/third_party/cef"
 
+# CEF's build service names the archive by target architecture, not by the
+# build machine. Keep the two supported names explicit; anything else must fail
+# instead of silently downloading the wrong libcef.so.
+case "${CEF_ARCH:-$(uname -m)}" in
+  x86_64|amd64) ARCH='linux64' ;;
+  aarch64|arm64) ARCH='linuxarm64' ;;
+  *)
+    echo "fetch: unsupported architecture '${CEF_ARCH:-$(uname -m)}'; use CEF_ARCH=x86_64 or aarch64" >&2
+    exit 1
+    ;;
+esac
+
 ENC="${VERSION//+/%2B}"
-URL="https://cef-builds.spotifycdn.com/cef_binary_${ENC}_linux64_${FLAVOR}.tar.bz2"
+URL="https://cef-builds.spotifycdn.com/cef_binary_${ENC}_${ARCH}_minimal.tar.bz2"
+
+if [ "${1:-}" = '--print-url' ]; then
+  echo "$URL"
+  exit 0
+fi
 
 mkdir -p "$DEST"
 echo "fetch: $URL"
