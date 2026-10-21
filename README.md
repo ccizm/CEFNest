@@ -141,7 +141,7 @@ of it is reproducible runs:
 | `CHROMIUM_HELPER` | set (to anything) to force session mode; a path here must contain `/`, and it is used as written even when it does not exist |
 | `CEFNEST_HELPER` | the same rule one step earlier: a path with `/` in it wins over `CHROMIUM_HELPER`. With neither set, the library resolves the helper itself — compiled-in install path, then the cmake tree it was built next to (`docs/packaging.md`) |
 | `CHROMIUM_URL` | page to open |
-| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `drop-in <x0> <y0> <x1> <y1> [text] [mimes]`, `drop-in-hold`, `drop-in-move <x> <y>`, `drop-in-drop`, `drop-in-cancel`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `perm-accept <id>`, `perm-deny <id>`, `perm-dismiss <id>`, `close`, `quit` — see `test/*.session` |
+| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `drop-in <x0> <y0> <x1> <y1> [text] [mimes]`, `drop-in-hold`, `drop-in-move <x> <y>`, `drop-in-drop`, `drop-in-cancel`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `perm-accept <id>`, `perm-deny <id>`, `perm-dismiss <id>`, `close`, `quit` — see `test/*.session`. Navigation, JS, mute, download, find, menu and permission steps need a helper session — any of them in a run that has none ends it with status 1 instead of being skipped, while `wait`, `shot`, `dump`, `surfaces`, `hover`, `click`, `drag`, `wheel`, `drop-in*` and `close` drive the nested compositor alone |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_WINDOW` | `fullscreen` or `maximize`, for deterministic geometry |
 | `CHROMIUM_CLIPSET` / `CHROMIUM_CLIPWATCH` | seed the host clipboard, and bridge it into the page |
@@ -369,9 +369,11 @@ The compositor is a session leader of its own, so one signal to its process grou
 takes the bus, the portal and gvfsd with it, and the run asserts that nothing is
 left behind. What it proves is that a real window maps, that a real Chromium
 session with the sandbox on loads a page and answers JavaScript, that a scripted
-run whose helper dies — before it is ready, without ever connecting, or of its own
-accord — fails in seconds and names the reason `::closed` reported
-(`docs/session-lifecycle.md` §4, §5), and that the
+run which cannot show its page fails in seconds and names the cause — the helper
+dying before it is ready, dying without ever connecting, closing the browser of
+its own accord, or no helper to start at all, in which case there is no `::closed`
+to report and the script engine says it itself (`docs/session-lifecycle.md` §4–§6),
+and that the
 existing gates run inside it: `find-gate.sh` (34 assertions), `permission-gate.sh`
 (58), `download-gate.sh` (46), `dnd-gate.sh` (59), `pixel-gate.sh` (12),
 `sandbox-soak.sh` (12) and `meson test` (14/14) all pass unchanged, and
@@ -387,7 +389,7 @@ answer. `docs/headless-ci.md` is the write-up.
 `test/ci-all.sh` is the one command that runs the whole battery through it — proof,
 `meson test` and all seven gates, each in its own nested compositor, one verdict table
 with the skipped checks counted in a column of their own, non-zero exit if anything
-failed. Measured on this laptop: 373 s for the nine runs — 272 gate assertions plus
+failed. Measured on this laptop: 370 s for the nine runs — 273 gate assertions plus
 `meson test` 14/14, with 2 checks skipped.
 
 ```bash

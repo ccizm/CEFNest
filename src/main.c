@@ -1343,7 +1343,10 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
  * The page steps need a helper session; "hover", "click", "drag", "wheel",
  * "shot", "dump", "surfaces", "drop-in", "drop-in-hold", "drop-in-move",
  * "drop-in-drop" and "close" work against any client, so the same script drives
- * the nested compositor without Chromium. */
+ * the nested compositor without Chromium. A page step in a run that has no
+ * session ends it with status 1: the run cannot do the one thing it was written
+ * to do, and walking off the end of the script to exit 0 would report that as a
+ * pass. */
 typedef struct {
   GPtrArray *steps;
   guint index;
@@ -1579,10 +1582,20 @@ script_run_next (void)
                             !strcmp (line, "unmute") ||
                             !strncmp (line, "download-", 9) ||
                             !strncmp (line, "find", 4) ||
-                            !strncmp (line, "menu-", 5)))
+                            !strncmp (line, "menu-", 5) ||
+                            !strncmp (line, "perm-", 5)))
         {
-          g_warning ("demo: '%s' needs a Chromium helper session", line);
-          continue;
+          /* Not a step that was skipped: without a session no later line of this
+           * script can show a page either, so the run has already failed. Print
+           * before script_finish() — `line` points into the array it frees.
+           * Ending on an idle would be wrong here too: this is not a callback
+           * some self-ending step is still unwinding. */
+          g_printerr ("demo: '%s' needs a Chromium helper session, so the run ends "
+                      "here\n", line);
+          script_finish ();
+          demo.exit_status = 1;
+          g_application_quit (G_APPLICATION (demo.app));
+          return;
         }
 
       if (!strncmp (line, "wait ", 5))

@@ -1,7 +1,7 @@
 # 退出路径：关窗口要停 helper，::closed 只发一次、且带上原因
 
-日期：2026-10-20，§4、§5 补于 2026-10-21
-问题：任务 #27、#84、#85。demo 里 `chromium_session_stop` 只有 header bar 上那颗「停止」按钮
+日期：2026-10-20，§4–§6 补于 2026-10-21
+问题：任务 #27、#84、#85、#86。demo 里 `chromium_session_stop` 只有 header bar 上那颗「停止」按钮
 能调到，窗口关掉它就当没发生；`demo.session` 又是个从来不 unref 的 static。于是每
 跑一次，`$XDG_RUNTIME_DIR` 里多一个 `cefnest-helper-<uuid>.sock`——名字每次都是新
 的 uuid，所以谁也不会回来收旧的。脚本化验证一晚上攒了 20 个。
@@ -211,9 +211,51 @@ channel closed)` 后面**紧跟**`helper killed by signal 9`/`15`——两条回
 那两行日志才是地方。门禁因此钉的是"死亡报告不说谎"（前两个二选一，且 `rc=1`），
 不是钉死其中一个。
 
-proof 模式现在用一条 `dead_run` 函数跑这三种死亡，各自断言退出码 1 与原因字符串。
+proof 模式现在用一条 `broken_run` 函数把这几形状各跑一遍，钉退出码 1 与转录里的原因；
+它还有第四跑，就是下一节。
 
-## 6. 还没做的
+## 6. 没有会话的脚本化运行也以 1 结束（任务 #86）
+
+§5 那张表里"会话从没活过"这一格是空的，不是漏了：`CHROMIUM_HELPER=/no/such/helper`
+时 `chromium_session_start` 直接失败（`demo: no helper binary at …`），会话被清空，
+于是**没有 `::closed` 可发**——它从没开始过。当时量到的是更难看的一种：脚本里每条
+页面命令只回一句 `demo: 'load …' needs a Chromium helper session` 就 `continue`，
+索引照往前走，`quit` 一到就以 **0** 结束（实测 `rc=0`、两条警告、零条 `script ok`）。
+
+比 §4 那个挂住更糟：**它看着像过了**。挂住的至少会红。
+
+修法是把那句警告从"跳过这一步"改成"这一跑不可能做到它被要求做的事"：
+
+```c
+      if (!demo.session && (… || !strncmp (line, "perm-", 5)))
+        {
+          g_printerr ("demo: '%s' needs a Chromium helper session, so the run ends here\n", line);
+          script_finish ();
+          demo.exit_status = 1;
+          g_application_quit (G_APPLICATION (demo.app));
+          return;
+        }
+```
+
+三个细节都是读代码时盯出来的：
+
+* **先打印再 `script_finish()`**。`line` 指的是 `steps` 那块 `GPtrArray` 里的字符串，
+  而 `script_finish()` 就是来 `g_ptr_array_unref` 它的——顺序反过来打印的是已经自由了的内存。
+* **这里不能挂 idle**。§4 那处非挂不可，因为 `close` 那一步自己就是发出 `::closed` 的人；
+  这一处是脚本引擎在派发步骤的当下，没有谁在 unwind，直接退出就行。
+* **`perm-` 原来不在这张名单里**。按代码读出来的路径，它过去会一路走到
+  `chromium_session_permission_respond` 的 `g_return_if_fail (CHROMIUM_IS_SESSION (self))`，
+  也就是一条 CRITICAL 之后直接返回、脚本照旧走到 0 收尾——这一句是读出来的，没有单独复现
+  （改完之后那条旧路径就不存在了）。补进名单后实测同一条脚本 `perm-deny 1` → `rc=1`。
+
+客户端那一侧没被波及：`hover`/`click`/`drag`/`wheel`/`shot`/`dump`/`surfaces`/`drop-in*`/
+`close` 仍然不需要会话，`pixel-gate.sh` 与 `dnd-gate.sh` 两条纯客户端门禁在同一块
+headless 显示器上重跑，全过、断言数不变。
+
+`proof` 的第四跑钉的就是这条：helper 换成一个不存在的路径，脚本 `load` → `js` → `quit`，
+断言 `rc=1` 与那句 `needs a Chromium helper session, so the run ends here`。
+
+## 7. 还没做的
 
 * **compositor 自己的 `wayland-N` + `wayland-N.lock` 仍然留在** `$XDG_RUNTIME_DIR`。
   这个不补：只有 `nested_compositor_dispose` 跑到才会 `wl_display_destroy` → unlink，
@@ -224,11 +266,9 @@ proof 模式现在用一条 `dead_run` 函数跑这三种死亡，各自断言�
   `child_waited` 有机会把「Operation cancelled」当真错误打出来；目前所有退出路径
   都没复现，先不动。
 * 崩在 `kill -9` 下仍会留一个 helper socket——没机会执行任何清理。
-* **脚本化运行碰不到"helper 根本起不来"这条路**。`CHROMIUM_HELPER=/no/such/helper`
-  时 `chromium_session_start` 直接失败（`demo: no helper binary at …`），会话被清空，
-  于是脚本里每条页面命令只回一句 `'load …' needs a Chromium helper session` 就继续往下，
-  `quit` 一到**以 0 结束**（实测：`rc=0`，两条警告，零条 `script ok`）。这比 §4 那个挂住
-  更糟——它看着像过了。它不是 `::closed` 的事：会话从没活过，就没有结束可报；要修的是
-  脚本引擎那侧，没有会话时页面命令不该被当成执行过。
+* `demo.exit_status` 管的是**这一跑做完没有**，不是**画对没有**。一条 `load` → `quit`
+  的脚本，页面是白是红都是 0；看像素永远是 `test/pixel-gate.sh` 那条路的事
+  （`docs/frame-clock-pacing.md` §2 那条"CSS 不需要一帧"的教训）。别把 rc=0 读成"页面
+  看着对"。
 * `::closed` 带的是话术而不是枚举，宿主只能整串比。真出现要按位判断的宿主，再包一层
   `chromium_session_get_close_reason()` 或者换 enum，现在不猜需求。
