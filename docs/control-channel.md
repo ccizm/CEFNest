@@ -334,3 +334,19 @@ host → helper → 页面
 **验证**：`/tmp/msg.html` 按钮调 `cefnestPostMessage`，
 `demo: page-message {"type":"ping","n":1,"text":"hello from the page"}`
 出现在宿主日志（2026-10-21，真 CEF）。
+
+## 弹窗策略：target=_blank 与 window.open
+
+Alloy 下页面开新窗口（target=_blank、window.open、中键）会触发
+`OnBeforePopup`。单视图组件无法显示第二个 toplevel，策略是**原地导航**：
+
+- 前台类请求（FOREGROUND_TAB/NEW_POPUP/NEW_WINDOW/SINGLETON_TAB）→ 当前视图
+  直接 `LoadURL(target_url)`（kiosk 式就地打开，历史条目正常生成）；
+- **后台标签（NEW_BACKGROUND_TAB）只上报不导航**——它明确表示不想抢视图，
+  宿主可通过 `popup-requested` 事件自行收集；
+- 每个请求都发 `{"event":"popup-requested","url":…,"disposition":N,"gesture":…}`
+  事件，宿主可观察或将来接管。
+
+**验证**：`/tmp/popup.html`（target=_blank 链接）点击后 demo 原地导航到
+`https://example.com/popup-target`，`popup-requested` 事件与 `back=1` 历史
+条目齐备（2026-10-21，真 CEF）。

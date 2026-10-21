@@ -32,6 +32,7 @@ enum {
   SIG_LOAD_ERROR,
   SIG_RENDERER_EXITED,
   SIG_SCRIPT_RESULT,
+  SIG_POPUP_REQUESTED,
   SIG_PAGE_MESSAGE,
   SIG_DOWNLOAD_BEGIN,
   SIG_DOWNLOAD_PROGRESS,
@@ -305,6 +306,15 @@ handle_event (ChromiumSession *self, const char *line)
        * 64 KiB cap the js result relay uses). */
       g_signal_emit (self, signals[SIG_PAGE_MESSAGE], 0,
                      json_object_get_string_member (object, "json"));
+      return;
+    }
+
+  if (!strcmp (event, "popup-requested"))
+    {
+      /* The helper navigates its single view in place for every foreground
+       * request; background tabs are reported and left to the host. */
+      g_signal_emit (self, signals[SIG_POPUP_REQUESTED], 0,
+                     json_object_get_string_member (object, "url"));
       return;
     }
 
@@ -1671,6 +1681,9 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
   signals[SIG_PAGE_MESSAGE] =
     g_signal_new ("page-message", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_POPUP_REQUESTED] =
+    g_signal_new ("popup-requested", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 }
 

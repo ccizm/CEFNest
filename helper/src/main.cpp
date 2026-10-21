@@ -1351,6 +1351,39 @@ class HelperClient : public CefClient,
     }
   }
 
+  // A single-view component cannot show a second toplevel: a popup the page
+  // opens (target=_blank, window.open, middle click) navigates this view to
+  // the target instead — the kiosk-style in-place answer. Background tabs are
+  // the one exception: they asked not to take over the view, so they are only
+  // reported. The host hears about every request either way.
+  bool OnBeforePopup(CefRefPtr<CefBrowser> browser,
+                     CefRefPtr<CefFrame> frame,
+                     int popup_id,
+                     const CefString& target_url,
+                     const CefString& target_frame_name,
+                     cef_window_open_disposition_t target_disposition,
+                     bool user_gesture,
+                     const CefPopupFeatures& popupFeatures,
+                     CefWindowInfo& windowInfo,
+                     CefRefPtr<CefClient>& client,
+                     CefBrowserSettings& settings,
+                     CefRefPtr<CefDictionaryValue>& extra_info,
+                     bool* no_javascript_access) override {
+    fprintf(stderr, "helper: popup requested -> %s (disposition %d)\n",
+            target_url.ToString().c_str(), (int) target_disposition);
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("popup-requested");
+    dict->SetString("url", target_url);
+    dict->SetInt("disposition", (int) target_disposition);
+    dict->SetBool("gesture", user_gesture ? true : false);
+    Emit(dict);
+
+    if (target_disposition != CEF_WOD_NEW_BACKGROUND_TAB)
+      g_browser->GetMainFrame()->LoadURL(target_url);
+
+    return true;
+  }
+
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     fprintf(stderr, "helper: browser closing\n");
