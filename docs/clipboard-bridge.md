@@ -114,7 +114,8 @@ client: selection cleared
   避免客户端粘到一份过期文本。
 * `zwp_primary_selection_device_manager_v1` 已在 2026-10-21 接上：`nested-data-device.c` 里
   有独立的 primary source/device/offer，host→page 实测把 274 字节的 host primary 粘进
-  textarea。page→host 的 source/offer 路径也已实现，但本轮 CEF 只创建 primary device，
-  页面选中文本**没有创建 primary source**；这是 CEF/Chromium 的写 primary 行为，不是协议
-  桥缺失。验证用 `CHROMIUM_PRIMARYSET` / `CHROMIUM_PRIMARYWATCH`，fixture 是
-  `test/primary-page.html`。
+  textarea。CEF 本身只创建 primary device、不为页面选区创建 source，所以 page→host 走
+  helper 注入的 `selectionchange`/`mouseup`/`keyup` listener：选中的文本经
+  `cefnestPrimarySelection`（renderer V8 扩展）推给 session，session 写成 Gtk primary，
+  再由 compositor 的 primary bridge 提供。`test/primary-gate.sh` 在 headless 里钉住
+  “页面选中 primary → host primary=primary”。fixture 是 `test/primary-page.html`。

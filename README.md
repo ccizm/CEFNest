@@ -317,6 +317,12 @@ The host→page direction was measured with 274 bytes; the page→host direction
 needs Chromium to create a primary source, which this CEF build did not do in the
 same run (`docs/clipboard-bridge.md` §5).
 
+`test/primary-gate.sh` is the page-selection half of the primary clipboard:
+the helper injects a selection listener, the session writes the selected word to
+Gtk's primary clipboard, and the gate reads it back with
+`CHROMIUM_PRIMARYWATCH=1`. It runs in the headless ci session and is now one of
+the default `ci-all` gates.
+
 `test/real-sites.sh` is the real-page inspection batch. It runs one
 `test/ci-session.sh` per site from `test/real-sites.tsv` (Bing, MDN, YouTube,
 Google Maps, Excalidraw), then keeps the session, transcript, screenshot,
@@ -405,6 +411,7 @@ to report and the script engine says it itself (`docs/session-lifecycle.md` §4�
 and that the
 existing gates run inside it: `find-gate.sh` (34 assertions), `permission-gate.sh`
 (58), `download-gate.sh` (46), `dnd-gate.sh` (59), `pixel-gate.sh` (12),
+`primary-gate.sh` (2),
 `sandbox-soak.sh` (12) and `meson test` (14/14) all pass unchanged, and
 `menu-gate.sh` passes 45 of its 47 —
 the two it skips are the ones that assert a popup surface reached a screen, which a
@@ -416,7 +423,7 @@ painting — and §9, where the fix for it silently froze the displays whose clo
 answer. `docs/headless-ci.md` is the write-up.
 
 `test/ci-all.sh` is the one command that runs the whole battery through it — proof,
-`meson test` and all seven gates, each in its own nested compositor, one verdict table
+`meson test` and all eight gates, each in its own nested compositor, one verdict table
 with the skipped checks counted in a column of their own, non-zero exit if anything
 failed. Measured on this laptop: 370 s for the nine runs — 273 gate assertions plus
 `meson test` 14/14, with 2 checks skipped.
@@ -466,7 +473,8 @@ origin, a `GList` of permission names and the raw mask — returning TRUE means 
 host answers it), `::permission-dismissed` (id, result: the request Chromium took
 back from under the host), `::zoom-changed` (the CEF zoom level the helper read
 back after a zoom command or a main-frame load; 0.0 is 100 %, 0.5 is one Chrome UI
-step), `::copy-text` (a URL chosen from a link/image/media menu row — the host
+step), `::primary-selection` (the selected page text pushed to the host, which
+writes it to Gtk's primary clipboard), `::copy-text` (a URL chosen from a link/image/media menu row — the host
 owns the clipboard), `::open-url` (a URL chosen from a new-window menu row; the
 demo starts a second window with its own CEF profile, a library host can open it
 however it likes), `::closed`

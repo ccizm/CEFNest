@@ -75,6 +75,9 @@ constexpr char kJsResultMessage[] = "cefnest-helper-js-result";
 constexpr char kPageMessageEvent[] = "page-message";
 constexpr char kPageMessageProcess[] = "cefnest-page-message";
 constexpr char kPostMessageFunction[] = "cefnestPostMessage";
+constexpr char kPrimarySelectionFunction[] = "cefnestPrimarySelection";
+constexpr char kPrimarySelectionProcess[] = "cefnest-primary-selection";
+constexpr char kPrimarySelectionEvent[] = "primary-selection";
 
 /* Events are written on the UI thread with a 200 ms send timeout, so a script
  * that returns the whole DOM would stall Chromium and then be dropped anyway.
@@ -91,6 +94,13 @@ constexpr int64_t kProgressByteStep = 256 * 1024;
  * covered. CHROMIUM_SPELLCHECK=1 restores the old behavior. */
 constexpr char kDisableSpellcheckScript[] =
     R"JS((function(){var fix=function(){var nodes=document.querySelectorAll("input,textarea,[contenteditable]");for(var i=0;i<nodes.length;i++){try{nodes[i].spellcheck=false;}catch(e){}}};fix();if(!window.__cefnestNoSpellcheck){window.__cefnestNoSpellcheck=1;new MutationObserver(fix).observe(document.documentElement,{childList:true,subtree:true});}})();)JS";
+
+/* The page owns the selection; CEF on Wayland binds the primary-selection
+ * device but does not create a primary source for a page selection. Push the
+ * selected text to the host instead, and let the host own the primary selection
+ * that the compositor mirrors back. This is the renderer-side half. */
+constexpr char kPrimarySelectionScript[] =
+    R"JS((function(){if(window.__cefnestPrimaryHooked)return;window.__cefnestPrimaryHooked=1;var sent=false,last=null;function read(){var a=document.activeElement;if(a&&typeof a.selectionStart==="number"&&typeof a.selectionEnd==="number"&&a.selectionEnd>a.selectionStart){return String(a.value||"").slice(a.selectionStart,a.selectionEnd);}var s=window.getSelection();return s?String(s):"";}function send(){var t=read();if(!sent&&!t)return;if(t===last)return;last=t;sent=true;if(t.length>65536)t=t.slice(0,65536);try{cefnestPrimarySelection(t);}catch(e){}}document.addEventListener("selectionchange",send,true);document.addEventListener("mouseup",send,true);document.addEventListener("keyup",send,true);send();})();)JS";
 
 const char kDefaultUrl[] =
     "data:text/html;charset=utf-8,"
@@ -1459,6 +1469,34 @@ class PostMessageHandler : public CefV8Handler {
   IMPLEMENT_REFCOUNTING(PostMessageHandler);
 };
 
+class PrimarySelectionHandler : public CefV8Handler {
+ public:
+  bool Execute(const CefString& name, CefRefPtr<CefV8Value> object,
+               const CefV8ValueList& arguments, CefRefPtr<CefV8Value>& retval,
+               CefString& exception) override {
+    if (arguments.size() != 1 || !arguments[0]->IsString()) {
+      exception = "expected the selected text as one string";
+      return true;
+    }
+
+    CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+    CefRefPtr<CefFrame> frame = context ? context->GetFrame() : nullptr;
+    if (!frame) {
+      exception = "no frame to send the selection from";
+      return true;
+    }
+
+    CefRefPtr<CefProcessMessage> message =
+        CefProcessMessage::Create(kPrimarySelectionProcess);
+    message->GetArgumentList()->SetString(0, arguments[0]->GetStringValue());
+    frame->SendProcessMessage(PID_BROWSER, message);
+    retval = CefV8Value::CreateUndefined();
+    return true;
+  }
+
+  IMPLEMENT_REFCOUNTING(PrimarySelectionHandler);
+};
+
 class HelperRenderProcessHandler : public CefRenderProcessHandler {
  public:
   void OnContextCreated(CefRefPtr<CefBrowser> browser,
@@ -1481,11 +1519,18 @@ class HelperRenderProcessHandler : public CefRenderProcessHandler {
         static_cast<cef_v8_propertyattribute_t>(
             V8_PROPERTY_ATTRIBUTE_READONLY | V8_PROPERTY_ATTRIBUTE_DONTENUM |
             V8_PROPERTY_ATTRIBUTE_DONTDELETE));
+    context->GetGlobal()->SetValue(
+        kPrimarySelectionFunction,
+        CefV8Value::CreateFunction(kPrimarySelectionFunction, primary_handler_),
+        static_cast<cef_v8_propertyattribute_t>(
+            V8_PROPERTY_ATTRIBUTE_READONLY | V8_PROPERTY_ATTRIBUTE_DONTENUM |
+            V8_PROPERTY_ATTRIBUTE_DONTDELETE));
   }
 
  private:
   CefRefPtr<CefV8Handler> handler_{new ReportHandler};
   CefRefPtr<CefV8Handler> post_handler_{new PostMessageHandler};
+  CefRefPtr<CefV8Handler> primary_handler_{new PrimarySelectionHandler};
 
   IMPLEMENT_REFCOUNTING(HelperRenderProcessHandler);
 };
@@ -1575,6 +1620,15 @@ class HelperClient : public CefClient,
       {
         CefRefPtr<CefDictionaryValue> dict = NewEvent(kPageMessageEvent);
         dict->SetString("json", message->GetArgumentList()->GetString(0));
+        Emit(dict);
+        return true;
+      }
+
+    if (source_process == PID_RENDERER &&
+        message->GetName() == kPrimarySelectionProcess)
+      {
+        CefRefPtr<CefDictionaryValue> dict = NewEvent(kPrimarySelectionEvent);
+        dict->SetString("text", message->GetArgumentList()->GetString(0));
         Emit(dict);
         return true;
       }
@@ -1717,6 +1771,8 @@ class HelperClient : public CefClient,
       frame->ExecuteJavaScript(kDisableSpellcheckScript, "cefnest-helper", 0);
       fprintf(stderr, "helper: spellcheck disabled in the page\n");
     }
+
+    frame->ExecuteJavaScript(kPrimarySelectionScript, "cefnest-helper", 0);
   }
 
   void OnLoadError(CefRefPtr<CefBrowser> browser,

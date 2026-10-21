@@ -34,6 +34,7 @@ enum {
   SIG_SCRIPT_RESULT,
   SIG_POPUP_REQUESTED,
   SIG_PAGE_MESSAGE,
+  SIG_PRIMARY_SELECTION,
   SIG_DOWNLOAD_BEGIN,
   SIG_DOWNLOAD_PROGRESS,
   SIG_DOWNLOAD_END,
@@ -318,6 +319,25 @@ handle_event (ChromiumSession *self, const char *line)
        * 64 KiB cap the js result relay uses). */
       g_signal_emit (self, signals[SIG_PAGE_MESSAGE], 0,
                      json_object_get_string_member (object, "json"));
+      return;
+    }
+
+  if (!strcmp (event, "primary-selection"))
+    {
+      /* CEF on Wayland reads primary selection but does not create a source
+       * for a page selection. The injected renderer listener pushes the text,
+       * and the host owns the Gtk primary selection instead; the compositor's
+       * primary bridge then offers it to other clients. */
+      const char *text = json_object_get_string_member (object, "text");
+      if (self->view)
+        {
+          GdkClipboard *primary =
+            gtk_widget_get_primary_clipboard (GTK_WIDGET (self->view));
+          if (primary)
+            gdk_clipboard_set_text (primary, text ? text : "");
+        }
+      g_signal_emit (self, signals[SIG_PRIMARY_SELECTION], 0,
+                     text ? text : "");
       return;
     }
 
@@ -2102,6 +2122,9 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
   signals[SIG_PAGE_MESSAGE] =
     g_signal_new ("page-message", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_PRIMARY_SELECTION] =
+    g_signal_new ("primary-selection", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
   signals[SIG_POPUP_REQUESTED] =
     g_signal_new ("popup-requested", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,

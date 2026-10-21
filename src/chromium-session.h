@@ -55,6 +55,13 @@ void               chromium_session_run_javascript_expression (ChromiumSession *
                                                                const char *code,
                                                                int id);
 
+/* ::primary-selection (text) — the renderer half of CEF's missing primary
+ * source. CEF on Wayland binds the primary-selection device but does not create a
+ * source for a page selection, so the helper injects a selection listener and
+ * pushes the selected text here. The session writes it to the view's GTK primary
+ * clipboard, which the compositor's own primary bridge offers to clients. An
+ * empty @text is the page clearing its selection. */
+
 /* The page's sound leaves the helper through its own audio process and lands on
  * the host's speakers (docs/audio-path.md), so this is the only switch the
  * embedding app has. chromium_session_get_muted () reports what the helper read

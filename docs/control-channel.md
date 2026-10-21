@@ -78,7 +78,7 @@ demo: renderer exited status=1 error=9 9
 
 ## 3. 现在通道上有的东西
 
-命令 19 条，事件 22 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
+命令 19 条，事件 23 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
 
 | 方向 | 名字 | 载荷 |
 | --- | --- | --- |
@@ -106,6 +106,8 @@ demo: renderer exited status=1 error=9 9
 | helper → host | `zoom` | `level`（`SetZoomLevel` 之后的 `GetZoomLevel()` 回读；每次 zoom 命令都发，主 frame `load-end` 后也发一次，因为 Chromium 按 origin 持久化；0.0 = 100 %） |
 | helper → host | `copy-text` | `text`（菜单里的“复制链接地址/复制图片地址/复制媒体地址”；宿主写系统剪贴板） |
 | helper → host | `open-url` | `url`、`disposition`（菜单里的“在新窗口打开…”；demo 起第二个窗口，库宿主自己决定） |
+| helper → host | `page-message` | `json`（页面 `cefnestPostMessage` 的原始字符串；schema 归宿主） |
+| helper → host | `primary-selection` | `text`（页面选区经注入的 listener 推给宿主；宿主写 Gtk primary，空串表示撤销选区） |
 | helper → host | `js-result` | `id`、`ok`、`value`、`message` |
 | helper → host | `download-begin` | `id`、`url`、`suggested_name`、`mime_type`、`total_bytes` |
 | helper → host | `download-progress` | `id`、`received_bytes`、`total_bytes`、`percent`、`speed` |
