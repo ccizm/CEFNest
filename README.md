@@ -524,23 +524,21 @@ They are the record of *why* the code is shaped like this:
 
 ## Known limitations
 
-- **Drag out works; drag in still lacks a `GtkDropTarget`.** A drag that starts
-  and ends inside one page works: the compositor runs the whole
-  `wl_data_device` negotiation, the page's own drag image is composited on top,
-  and the drop lands where the pointer says. Going out, the compositor reads the
-  payload off the page's own source, calls that drag off and hands mime, bytes
-  and the full type list to the host, which starts a `GdkDrag` on the toplevel
-  native surface (`docs/drag-loop.md` §6). Text is carried as text; Chromium's
-  image drag arrives as `application/octet-stream;name="download.png"`, so the
-  demo writes a temp file and offers a `GdkFileList`, which is what a file
-  manager can copy. Coming in, the compositor is the source:
-  `nested_compositor_drag_from_host()` introduces the host's bytes as a
-  `wl_data_offer`, the page negotiates and reads them, and the verdict comes back
-  on `::drag-in-end` (`docs/drag-loop.md` §7) — but that direction is still
-  driven by the `drop-in` script steps, not by an application dropping on the
-  window. The outbound GTK leg can only be finished by hand: `gdk_drag_begin()`
-  needs a press GDK saw itself, while a scripted press is on the inner seat. The
-  inbound outer `GdkDrop` is likewise manual.
+- **Drag out and drag in both work end to end, verified by hand.** A drag
+  that starts and ends inside one page runs the whole `wl_data_device`
+  negotiation with the page's own drag image composited on top. Going out,
+  the compositor reads the payload off the page's own source, retires that
+  drag and hands mime, bytes and the type list to the host, which starts a
+  `GdkDrag` on the toplevel native surface (`docs/drag-loop.md` §6). Text is
+  carried as text; Chromium's image drag arrives as
+  `application/octet-stream;name="download.png"`, so the demo writes a temp
+  file and offers a `GdkFileList`, which is what a file manager can copy.
+  Coming in, a `GtkDropTarget` on the view accepts file lists and strings:
+  the enter prefetches the payload bytes over the `GdkDrop` (capped at
+  32 MiB), the compositor introduces them as a `wl_data_offer`, the page
+  negotiates and reads them, and the verdict comes back on the synthetic
+  drop (`docs/drag-loop.md` §7). Both directions passed a hand drag (text
+  out to an editor, text in from it).
 - **One seat, one pointer, no touch.** The embedding widget is the only device
   the compositor knows about.
 - **No pinch zoom, no tablet input, no middle-click paste.** Chromium binds
