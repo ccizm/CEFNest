@@ -55,6 +55,17 @@ void               chromium_session_run_javascript (ChromiumSession *self,
  * A new helper always starts unmuted. */
 void               chromium_session_set_muted     (ChromiumSession *self,
                                                    gboolean muted);
+
+/* Page zoom. @action is "in", "out" or "reset"; "in"/"out" step one CEF zoom
+ * level (0.5, which is one Chrome UI step), and "reset" returns to 100 %.
+ * Chromium persists zoom per origin, so a navigation to an origin with a stored
+ * level is what the page gets, not necessarily 0. The helper answers with
+ * ::zoom-changed (level) after a zoom command and after each main-frame load,
+ * and chromium_session_get_zoom_level () returns the last level it reported.
+ * 0.0 is 100 %. */
+void               chromium_session_zoom             (ChromiumSession *self,
+                                                      const char *action);
+double             chromium_session_get_zoom_level   (ChromiumSession *self);
 /* Downloads. Nothing lands on disk until the host says where: ::download-begin
  * (id, url, suggested_name, mime_type, total_bytes) is the question, and exactly
  * one of the two calls below has to answer it. A download that is never answered
@@ -113,19 +124,24 @@ void               chromium_session_stop_finding   (ChromiumSession *self,
  * exactly one of the two calls below has to follow. The answer is the handler's
  * own return value — a gboolean signal keeps the last handler's — not a parameter
  * it is handed. Returning FALSE — or connecting nothing at all — lets the session
- * pop up its own GtkPopoverMenu over the view, which is what a host that only
- * wants a working right-click menu gets for free. Either way the answer is the
- * same two calls, and they are also how a host that drew the menu hands the
- * choice back.
+ * pop up its own popover over the view, which is what a host that only wants a
+ * working right-click menu gets for free. Either way the answer is the same two
+ * calls, and they are also how a host that drew the menu hands the choice back.
  *
  * The helper holds one menu request at a time and Chromium will not open a second
  * until the first is answered, so a menu that is neither selected nor dismissed
  * costs every later right click as well.
  *
- * Item ids are CEF's own (100 back, 117 select all, 132 view source, …); @type is
- * "command", "check", "radio", "separator", "submenu" or "none", and a separator
- * carries no label. The labels keep CEF's "(&B)" mnemonic spelling, which the
- * session's menu turns into a GTK mnemonic. */
+ * Item ids are CEF's own (100 back, 117 select all, 132 view source, …) plus the
+ * helper's link/image/media rows (26501–26507). @type is "command", "check",
+ * "radio", "separator", "submenu" or "none", and a separator carries no label.
+ * The labels keep CEF's "(&B)" mnemonic spelling, which the session's menu turns
+ * into a GTK mnemonic.
+ *
+ * Two actions are not answers to the menu itself: ::copy-text (text) asks the
+ * host to put a copied link/image address on the system clipboard, and
+ * ::open-url (url) asks it for a new window. The helper executes everything that
+ * stays inside Chromium; these two are host policy. */
 typedef struct {
   int          id;
   const char  *label;

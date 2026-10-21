@@ -163,4 +163,4 @@ demo: downloads: dir=/tmp/dlprobe/refuse ask=1
 download left to reject」的。
 
 它开真窗口、跑真浏览器，所以和 `test/*.session` 同一档：手跑门禁，不进 `meson test`。
-`meson test -C builddir` 10/10 与 `python3 test/audit-impl-slots.py builddir` 不受影响。
+`meson test -C builddir` 14/14 与 `python3 test/audit-impl-slots.py builddir` 不受影响。

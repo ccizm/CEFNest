@@ -213,10 +213,32 @@ demo: drag out: taken, not carried
 
 ### 6.4 宿主那条 GTK 腿只能人工测
 
-demo 收到信号后做 `gdk_content_provider_new_for_bytes()` + `gdk_drag_begin()`，一次只挂一条（新的
-移交先把旧的清掉），在 `drop`/`failed`/`ended` 里收尾。但 `gdk_drag_begin` 要的是**外层** compositor
+demo 收到信号后做 `gdk_content_provider_new_for_bytes()`（图片则先写临时文件）+ `gdk_drag_begin()`，
+一次只挂一条（新的移交先把旧的清掉），在 `drop-performed`/`dnd-finished`/`cancel` 里收尾。但
+`gdk_drag_begin` 要的是**外层** compositor
 上一次真实按下的 grab serial，脚本按下的是内层座位，GDK 拿不到那个 serial。所以自动跑一律
 `CEFNEST_DRAG_OUT=take`：只预取，不把出去的那条 drag 真的举起来——举起来会落在人用的桌面上。
+
+**2026-10-21 修正**：这条 GTK 腿此前把 `GTK_NATIVE(demo.view)` 当成了 surface，但 `ChromiumView` 只是
+普通 `GtkWidget`，不是 `GtkNative`，`gdk_drag_begin()` 拿到的不是窗口 surface，真实拖出因此不会启动。
+现在取 `demo.window` 的 native surface（toplevel），指针/display 也从同一个窗口来。自动门禁仍然走
+`take`；真实拖出还是只能人工量。
+
+**图片文件这条也补了**：Chromium 的图片 drag 实际提供的是
+
+```
+application/octet-stream;name="download.png"   74 bytes (the 8x8 test PNG)
+```
+
+而不是 `image/png`。`pick_drag_mime()` 现在优先选 `image/*` / `application/octet-stream`，文本 drag
+仍优先选 `text/plain`。宿主把这份字节写进临时目录，用 `GdkFileList` 启动 `GdkDrag`，文件管理器
+拿到的是真正的 `download.png` 文件（fixture：`test/image-dnd-page.html`）。临时文件在 `dnd-finished` 之后**不立即删**：实测文件管理器会在
+`dnd-finished` 之后再打开 URI，太早删除就是“没有那个文件或目录”。它留到下一次 handover 或窗口关闭
+时再清理。图片 path 不再走 `GdkContentProvider` 的 union（那个 file-list value 在 GTK 4.18 的 union
+路径上会触发 `GDK_IS_CONTENT_PROVIDER` 断言），只提供文件列表。
+
+GTK 4.18 的 `GdkDrag` 信号名也顺手修正了：旧代码连的是 `drop`/`failed`/`ended`，实际是
+`drop-performed`/`dnd-finished`/`cancel`，旧名字连不上，拖拽收尾和临时文件清理都不会发生。
 出界变成一次真 GTK 拖拽，得把手放到鼠标上量。`CEFNEST_DRAG_OUT=off` 干脆不连 handler，用来对照
 「没有宿主」时页面的拖拽是什么样。
 
@@ -229,7 +251,7 @@ demo 收到信号后做 `gdk_content_provider_new_for_bytes()` + `gdk_drag_begin
    左上角热区和左侧 dock，这条量的每一步都可能失手；
 3. 真实鼠标从页面上的图按住、拖出 demo 窗口边界、进到目标窗口再松手；
 4. 读三样：demo 的 trace 里那次预取的 mime 与字节数、目标窗口是否把内容落下来、
-   `drop`/`failed`/`ended` 哪一个收尾。三条都对上，§6.4 才算测完，`test/dnd-gate.sh`
+   `dnd-finished`/`cancel` 哪一个收尾。三条都对上，§6.4 才算测完，`test/dnd-gate.sh`
    的 `out` 那一段也才允许从 `take` 换成默认值。
 
 同一次还能顺手量对面的腿（拖入）：从目标窗口往页面里拖，看 `drop-in` 那段的
@@ -356,5 +378,7 @@ given back、退休后再进来一条仍然 taken。每趟 check 里还断言 `n
   脚本步骤驱动。装上一个 `GtkDropTarget`（`gdk_drop_prepare_async` 里预取字节，`drop` 里
   `drag_from_host`）就是把它接到真实来源上，协议侧不用再动。
 - 拖动图标目前是客户端给的 surface，宿主没有替换成 GTK 的拖拽图像。
-- 越过窗口边界之后**两条** GTK 腿都只有人工测量：出界的 `gdk_drag_begin`（§6.4）和拖入这条对面的
-  外层 `GdkDrop`。两个都要 GDK 手里有一次真实的、它自己见过的按下，脚本给不了。
+- 越过窗口边界之后**两条** GTK 腿仍然只能人工测量，但出界那条已经接上：`gdk_drag_begin` 用
+  toplevel 的 native surface，文本走 `text/plain`，图片走临时文件 + `GdkFileList`（§6.4）。拖入那条
+  对面的外层 `GdkDrop` 还没有 `GtkDropTarget`。两个都要 GDK 手里有一次真实的、它自己见过的按下，
+  脚本给不了。

@@ -78,12 +78,13 @@ demo: renderer exited status=1 error=9 9
 
 ## 3. 现在通道上有的东西
 
-命令 15 条，事件 19 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
+命令 18 条，事件 22 条（`helper/src/main.cpp` 的 `HandleCommand` / `NewEvent`）：
 
 | 方向 | 名字 | 载荷 |
 | --- | --- | --- |
 | host → helper | `load` | `url` |
 | host → helper | `back` `forward` `reload` `stop` `quit` | `reload` 多一个 `hard` |
+| host → helper | `zoom-in` `zoom-out` `zoom-reset` | 无（CEF zoom level 步进 0.5；reset 回 0.0） |
 | host → helper | `js` | `code`、`id` |
 | host → helper | `mute` | `on`（缺省 = 翻转） |
 | host → helper | `download-accept` | `id`、`path`（绝对路径，父目录得宿主自己建） |
@@ -101,6 +102,9 @@ demo: renderer exited status=1 error=9 9
 | helper → host | `load-error` | `error_code`、`url`、`message` |
 | helper → host | `renderer-exited` | `status`、`error_code`、`message` |
 | helper → host | `muted` | `muted`（`SetAudioMuted` 之后的 `IsAudioMuted()` 回读） |
+| helper → host | `zoom` | `level`（`SetZoomLevel` 之后的 `GetZoomLevel()` 回读；每次 zoom 命令都发，主 frame `load-end` 后也发一次，因为 Chromium 按 origin 持久化；0.0 = 100 %） |
+| helper → host | `copy-text` | `text`（菜单里的“复制链接地址/复制图片地址/复制媒体地址”；宿主写系统剪贴板） |
+| helper → host | `open-url` | `url`、`disposition`（菜单里的“在新窗口打开…”；demo 起第二个窗口，库宿主自己决定） |
 | helper → host | `js-result` | `id`、`ok`、`value`、`message` |
 | helper → host | `download-begin` | `id`、`url`、`suggested_name`、`mime_type`、`total_bytes` |
 | helper → host | `download-progress` | `id`、`received_bytes`、`total_bytes`、`percent`、`speed` |
@@ -171,7 +175,7 @@ host` / `helper closed the browser` / `control channel closed` / `process exited
 | 想要的功能 | CEF 那边 | 决定 | 为什么 |
 | --- | --- | --- | --- |
 | 页内查找 | `CefBrowserHost::Find` + `CefFindHandler`（命中数、高亮位置都是回调） | **已做**（2026-10-21） | 当初的理由仍然对：一问一答装不下"总共 N 处、当前第 M 处"。解法是不硬塞——`find` 不发回答，命中情况全部走 `find-result` 事件，一次请求可以来好几条（`final` 才是答案到了）。宿主侧要的状态只有"数到几、第几"，`selectionRect` 不上线：`docs/find-path.md` §2.4 量到浏览器自己会把**选中的**那条滚进视野，而宿主画不进页面 |
-| 页面缩放 | `SetZoomLevel` / `GetZoomLevel` | **不做** | 代价最小的一条，但宿主此刻没有理由需要它：控件尺寸变了 Chromium 自己会重排。等真出现"字号设置"的产品需求再加 |
+| 页面缩放 | `SetZoomLevel` / `GetZoomLevel` | **已做**（2026-10-21） | 三条无回答命令（`zoom-in`/`zoom-out`/`zoom-reset`），步进 0.5，`zoom` 事件把 `SetZoomLevel` 之后回读的 level 送回来。Chromium 自己按 origin 持久化，正好是内嵌组件想要的浏览器行为；宿主不需要在尺寸变化时替它重排 |
 | 静音 / 音量 | `SetAudioMuted` / `IsAudioMuted` | **mute 已做**，音量不做 | `docs/audio-path.md` 把路径量掉了：页面出的声住在一个不沙箱的 `audio.mojom.AudioService` utility 里、直达宿主桌面，组件自己的开关只有这一个；它一次请求、无需回答，符合判据。音量是桌面混音器已经管着的事，不再画第二遍 |
 | 下载 | `CefDownloadHandler::OnBeforeDownload` + 进度 + 取消 | **已做**（2026-10-21） | 当初判"不做"的理由是对的：它不是一问一答。解法不是硬塞进一问一答，而是给通道加一个**挂着不答的问答**——`OnBeforeDownload` 把 CEF 的门禁回调停在 helper 里，发一条 `download-begin` 就返回，答案由宿主在方便的时候用 `download-accept`/`download-reject` 送回来。宿主不答，文件就不落盘。细节见 `docs/download-path.md` |
 | DevTools | `ShowDevTools` | **不做** | 那是第二个顶层窗口；嵌套合成器现在只合成一个 toplevel + 它的 popup（#21），要开就是 `xdg_toplevel` 的第二实例，属于协议侧的决定 |
@@ -182,8 +186,8 @@ host` / `helper closed the browser` / `control channel closed` / `process exited
 | 上下文菜单 | `CefContextMenuHandler::RunContextMenu` + `CefMenuModel` + `CefRunContextMenuCallback` | **已做**（2026-10-21） | 判据到这里已经不够用了：`download-*` 是"挂着等回答"，`find-*` 是"不发回答"，而 `context-menu` 是**必须回答**——CEF 只有这一条路把菜单交给宿主，`RunContextMenu` 返回 true 之后画与不画、答与不答全在宿主手上，而实测（`docs/context-menu.md` §2）证明 Chromium 同时只允许一个没答的请求，不答就等于把右键弄坏。形状是最省的一种：模型（`items` 五条属性）+ 坐标上线，答案下去，中间没有任何进度。`CefContextMenuParams` 留在 helper：模型本身已经是它的回答，`link URL` 这类"宿主想加自己的行"的信息是下一个增量，不是这次没有量的部分 |
 | 权限提示 | `CefPermissionHandler` + `CefMediaAccessCallback` + `CefPermissionPromptCallback` | **已做**（2026-10-21） | 和菜单同一个判据：`OnRequestMediaAccessPermission` / `OnShowPermissionPrompt` 返回 true 之后，**页面就站在宿主的回答上**，不答不是安静而是 promise 永不 settle（基线实测：通知、剪贴板读、MIDI sysex 三条全 `pending`）。形状仍然最省：问题（origin + 名单 + mask）上线，一个词的答案回去，中间没有进度。两处"不能替宿主决定"留在原地：media 的 `accept` 只能整份给（`Continue()` 要求 `allowed` 等于 `required`），所以 API 上没开名单参数；反过来，`storage.persist()`、`permissions.query()` 和 idle 那三种问法根本不走 `CefPermissionHandler`（通知是走的，实测过），通道上因此没有它们——不是没做，是 CEF 那边没有可以问的地方（`docs/permission-prompt.md` §1、§10） |
 
-反过来，**这 15 条够用**的证据还是这套组件的全部交互：导航（`load`/`back`/`forward`/
-`reload`/`stop`）、任意脚本（`js` 一条顶十条，页内状态、标题、当前 URL 都能自己读）、退出
+反过来，**这 18 条够用**的证据还是这套组件的全部交互：导航（`load`/`back`/`forward`/
+`reload`/`stop`）、页面缩放（`zoom-*`）、任意脚本（`js` 一条顶十条，页内状态、标题、当前 URL 都能自己读）、退出
 （`quit`）、加上现在这几条要回话的（`download-*`、`find-*`、`context-menu-*`、`permission-*`）。要加的新命令
 得先说明它不能用 `js` 表达——上面那张表里除了 DevTools，其余几条其实都能用 `js` 大致凑出来，
 只是凑得不干净；下载**不能**凑，因为它落盘、要宿主给路径，而 `js` 那条通道一个字一个字都在
@@ -229,11 +233,11 @@ host` / `helper closed the browser` / `control channel closed` / `process exited
 页面、步进才滚进视野"。假 helper 那一半复刻的是**实测形状**而不是头文件措辞，所以两边能对上
 号；四条语义和一次没归因的 flake 写在 `docs/find-path.md` §2、§4。
 
-`meson test -C builddir` 10/10 照旧全过（那套测的是 compositor 侧，不碰控制通道）。
+`meson test -C builddir` 14/14 照旧全过（那套测的是 compositor 侧，不碰控制通道）。
 
 `context-menu` 这一组也是先量再做，量出来的三条都进了门禁：`test/menu-gate.sh` 八次运行
 （六次假 helper、两次真 Chromium）、47 条断言。假 helper 那一半复刻的是 §2 那个"同时只有一个
-没答的请求"，以及一份真机量到的模型（链接 5 行、可编辑区 9 行、有选区 1 行，分隔符的 `id` 是
+没答的请求"，以及一份真机量到的模型（链接 2 行、图片 3 行、可编辑区 9 行、有选区 1 行，分隔符的 `id` 是
 -1），所以"没接管就画默认菜单""接管之后答案只有一条""不答就再也问不出下一个"这些都能不开
 浏览器钉住。真 Chromium 那一半钉的是通道的两端：`menu-pick 117` 之后页面里
 `selectionEnd - selectionStart` 是 18，也就是 CEF 自己的全选命令真的在 Blink 里跑了；导航那次

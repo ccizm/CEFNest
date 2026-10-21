@@ -141,15 +141,16 @@ of it is reproducible runs:
 | `CHROMIUM_HELPER` | set (to anything) to force session mode; a path here must contain `/`, and it is used as written even when it does not exist |
 | `CEFNEST_HELPER` | the same rule one step earlier: a path with `/` in it wins over `CHROMIUM_HELPER`. With neither set, the library resolves the helper itself — compiled-in install path, then the cmake tree it was built next to (`docs/packaging.md`) |
 | `CHROMIUM_URL` | page to open |
-| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `drop-in <x0> <y0> <x1> <y1> [text] [mimes]`, `drop-in-hold`, `drop-in-move <x> <y>`, `drop-in-drop`, `drop-in-cancel`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `perm-accept <id>`, `perm-deny <id>`, `perm-dismiss <id>`, `close`, `quit` — see `test/*.session`. Navigation, JS, mute, download, find, menu and permission steps need a helper session — any of them in a run that has none ends it with status 1 instead of being skipped, while `wait`, `shot`, `dump`, `surfaces`, `hover`, `click`, `drag`, `wheel`, `drop-in*` and `close` drive the nested compositor alone |
+| `CHROMIUM_SESSION_SCRIPT` | file of one command per line: `load`, `back`, `forward`, `reload`, `reload-hard`, `stop`, `zoom-in`, `zoom-out`, `zoom-reset`, `js`, `wait`, `shot`, `dump`, `hover`, `click`, `drag`, `drag-hold`, `release`, `drop-in <x0> <y0> <x1> <y1> [text] [mimes]`, `drop-in-hold`, `drop-in-move <x> <y>`, `drop-in-drop`, `drop-in-cancel`, `surfaces`, `wheel`, `download-accept <path>`, `download-reject`, `find <pattern>`, `find-case <pattern>`, `find-next`, `find-prev`, `find-stop`, `menu-pick <id>`, `menu-dismiss`, `perm-accept <id>`, `perm-deny <id>`, `perm-dismiss <id>`, `close`, `quit` — see `test/*.session`. Navigation, JS, zoom, mute, download, find, menu and permission steps need a helper session — any of them in a run that has none ends it with status 1 instead of being skipped, while `wait`, `shot`, `dump`, `surfaces`, `hover`, `click`, `drag`, `wheel`, `drop-in*` and `close` drive the nested compositor alone |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_WINDOW` | `fullscreen` or `maximize`, for deterministic geometry |
 | `CHROMIUM_CLIPSET` / `CHROMIUM_CLIPWATCH` | seed the host clipboard, and bridge it into the page |
 | `CHROMIUM_HELPER_NO_SANDBOX` | set to exactly `1` to run the helper without Chromium's sandbox; anything else — including a typo — leaves it on (`docs/sandbox-policy.md`) |
 | `CEFNEST_DOWNLOAD_DIR` | where the demo panel auto-accepts a download; defaults to the XDG download directory (`docs/download-path.md`) |
 | `CEFNEST_DOWNLOAD_ASK` | any value: every download waits for the 保存/丢弃 buttons or a script step instead of landing on disk |
+| `CEFNEST_DOWNLOAD_NO_SAVE_AS` | any value: image downloads skip the `GtkFileDialog` and use the normal download-directory/ask path |
 | `CEFNEST_PERMISSION` | `ask` (default: a row with 允许/拒绝 per request), `deny` / `allow` (answer on arrival, the row stays as the record), or `ignore` (do not take the question at all — the session then denies it, which is what a host with no permission UI does) (`docs/permission-prompt.md`) |
-| `CEFNEST_DRAG_OUT` | what the demo does with a page drag that leaves the window. Default: take the payload and start the window's own `GdkDrag` with it. `take`: read and log what came out but do not start a drag of our own — what the automated runs use, because a scripted press leaves GDK no serial to begin one with. `off`: do not connect to `::drag-out` at all, so the page keeps its drag until the button lets go, which is what a host with no handler gets (`docs/drag-loop.md`) |
+| `CEFNEST_DRAG_OUT` | what the demo does with a page drag that leaves the window. Default: take the payload and start the window's own `GdkDrag` with it; image bytes become a temp file offered as `GdkFileList`, text stays text. `take`: read and log what came out but do not start a drag of our own — what the automated runs use, because a scripted press leaves GDK no serial to begin one with. `off`: do not connect to `::drag-out` at all, so the page keeps its drag until the button lets go, which is what a host with no handler gets (`docs/drag-loop.md`) |
 | `G_MESSAGES_DEBUG` | **space-separated** domains: `all`, or `nested chromium-view chromium-session` — a comma list matches nothing |
 
 ## Test
@@ -298,6 +299,12 @@ the one assertion a display without a monitor cannot satisfy (its popups are
 created, laid out and never mapped), so inside `test/ci-session.sh` the gate
 reports those two as skips and still exits green on the other 45.
 
+`test/image-dnd-page.html` is the manual image-drag fixture: it carries a
+draggable 8x8 PNG, and the host converts Chromium's
+`application/octet-stream;name="download.png"` into a temp file plus
+`GdkFileList` so a file manager can copy it. It is not part of a scripted gate;
+the source-side GTK drag needs a real press serial.
+
 `test/permission-gate.sh` is the permission half, ten runs — seven against
 `test/fake-helper.py`, three against real Chromium on `test/permission-page.html`
 — and 58 assertions. It never opens a camera or a microphone: every media ask in
@@ -434,14 +441,25 @@ the model as a `GList` of rows — returning TRUE means the host draws it),
 `::permission-request` (the helper's id, `media` or `prompt`, the requesting
 origin, a `GList` of permission names and the raw mask — returning TRUE means the
 host answers it), `::permission-dismissed` (id, result: the request Chromium took
-back from under the host), `::closed` (the helper is gone and will not come back,
-with which of the four reasons: the host stopped it, the helper closed the browser,
-its channel hung up, or the process was reaped — a death reports either of the last
-two, which is why an unattended run says *that* rather than guessing).
+back from under the host), `::zoom-changed` (the CEF zoom level the helper read
+back after a zoom command or a main-frame load; 0.0 is 100 %, 0.5 is one Chrome UI
+step), `::copy-text` (a URL chosen from a link/image/media menu row — the host
+owns the clipboard), `::open-url` (a URL chosen from a new-window menu row; the
+demo starts a second window with its own CEF profile, a library host can open it
+however it likes), `::closed`
+(the helper is gone and will not come back, with which of the four reasons: the
+host stopped it, the helper closed the browser, its channel hung up, or the
+process was reaped — a death reports either of the last two, which is why an
+unattended run says *that* rather than guessing).
 `chromium_session_set_muted ()` silences the page — its sound leaves the helper
 through an unsandboxed audio process and lands on the host's speakers, and the
 stream stays open while muted, so the desktop mixer cannot see the switch
 (`docs/audio-path.md`).
+`chromium_session_zoom (session, "in"/"out"/"reset")` changes the page's CEF zoom
+level in half-level steps; Chromium persists the level per origin, and the
+helper answers with `::zoom-changed` rather than leaving the host to guess
+whether the change landed. `chromium_session_get_zoom_level ()` is the last
+level it reported. The demo binds Ctrl+plus, Ctrl+minus and Ctrl+0.
 A download is a question, not a command: nothing reaches the disk until the host
 answers `::download-begin` with `chromium_session_accept_download (session, id,
 path)` or refuses it with `chromium_session_reject_download (session, id)`, and
@@ -461,8 +479,8 @@ event. `::context-menu` returns TRUE to take the menu over, and then exactly one
 `chromium_session_context_menu_select (session, id)` (runs CEF's own command for
 that id — 全选 measured as selecting in the page) or
 `chromium_session_context_menu_dismiss (session)` has to follow. Return FALSE, or
-connect nothing, and the session draws the model itself as a `GtkPopoverMenu` over
-the view, so a right click is never a dead gesture (`docs/context-menu.md`).
+connect nothing, and the session draws the model itself as a popover over the
+view, so a right click is never a dead gesture (`docs/context-menu.md`).
 A permission request is the fourth shape and the same contract with a page standing
 on the answer: an unanswered `getUserMedia` leaves the promise pending *and* holds
 the media queue behind it, and an unanswered prompt is dismissed as `ignore` the
@@ -493,34 +511,36 @@ They are the record of *why* the code is shaped like this:
 | `clipboard-offer-during-client-init.md` | a legal `data_offer` sent one dispatch too early kills a GTK client |
 | `sandbox-policy.md` | the sandbox decision: no setuid helper needed, what a host without user namespaces does to the run, the soak that keeps the process tree and the fd count flat through repeated navigation and two `kill -9`'d renderers (now `test/sandbox-soak.sh`), and why there is no crash handler here to fix or to turn off |
 | `control-channel.md` | every command and event on the socket, what a failed load and a dead renderer look like, and the commands decided against |
+| `zoom-path.md` | CEF zoom levels, the half-level step, per-origin persistence, why `load-end` re-reports the level, and the demo's keyboard bindings |
 | `audio-path.md` | where the page's sound actually goes: an unsandboxed audio service, straight to the host's speakers, and what muting it measures |
 | `protocol-ceilings.md` | what real clients bind against the nested compositor, and the measured verdict on every protocol and version ceiling left un-advertised |
 | `download-path.md` | the parked `OnBeforeDownload` gate, who decides the path, and the three CEF download behaviours only a measurement can tell you |
 | `find-path.md` | a command that answers nothing, the reply shape only a measurement gives (one identifier per request, one to three updates per request), and what actually scrolls the page |
-| `drag-loop.md` | the in-page drag choreography, the measured proof that a `wl_data_device.enter` reaches the page, what the destination actually accepts, why the fd relay is not what carries a same-page payload, how a drag that crosses the window edge is read off the page's source and handed to the host, and how the same crossing in reverse makes the compositor the source — including the measurement that says a page reads a host drag the moment it is entered, so only `finish` can decide the verdict |
-| `context-menu.md` | the one constraint that decided the whole design (Chromium holds a single unanswered menu request), what CEF's default model really contains — the same five rows for a link, an image and a blank page — and `Continue(id)` proven inside the page |
+| `drag-loop.md` | the in-page drag choreography, the measured proof that a `wl_data_device.enter` reaches the page, what the destination actually accepts, why the fd relay is not what carries a same-page payload, how a drag that crosses the window edge is read off the page's source and handed to the host (image bytes become a temp file offered as a file list), and how the same crossing in reverse makes the compositor the source — including the measurement that says a page reads a host drag the moment it is entered, so only `finish` can decide the verdict |
+| `context-menu.md` | the one constraint that decided the whole design (Chromium holds a single unanswered menu request), what CEF's Alloy default model really contains, the helper-added link/image/media rows, and `Continue(id)` proven inside the page |
 | `permission-prompt.md` | which asks never reach the host at all, the two queues that make an unanswered request cost the page its next question too, and why `accept` can only ever mean "the whole mask" |
 | `packaging.md` | what installs where, the five-step rule by which a session finds its helper, why `get_option('libexecdir')` must be joined to the prefix before it is compiled in, and the two fallbacks that deliberately run in opposite directions |
 | `headless-ci.md` | running the gates against a nested mutter nobody can see: why the session needs its own HOME and bus, how one signal reaps the whole tree, and what a display with no output device can and cannot prove |
 
 ## Known limitations
 
-- **Drag crosses the window edge in both directions; neither outer leg is on real
-  GTK input yet.** A drag that starts and ends inside one page works: the
-  compositor runs the whole `wl_data_device` negotiation, the page's own drag
-  image is composited on top of everything, and the drop lands where the pointer
-  says. Going out, the compositor reads the payload off the page's own source,
-  calls that drag off and hands mime, bytes and the full type list to the host,
-  which can start a `GdkDrag` of its own (`docs/drag-loop.md` §6). Coming in, it
-  is the source: `nested_compositor_drag_from_host()` introduces the host's bytes
-  as a `wl_data_offer`, the page negotiates and reads them, and whether the
-  destination kept the drop comes back on `::drag-in-end`
-  (`docs/drag-loop.md` §7) — but that direction is driven today by the `drop-in`
-  script steps, not by an application dropping on the window: no `GtkDropTarget`
-  is installed on the widget yet. And neither leg can be finished by a script:
-  `gdk_drag_begin()` and a real `GdkDrop` each need a press GDK saw itself, while
-  a scripted press is on the inner seat, so the automated runs stop at the
-  handover and the outer legs are measured with a hand on the mouse.
+- **Drag out works; drag in still lacks a `GtkDropTarget`.** A drag that starts
+  and ends inside one page works: the compositor runs the whole
+  `wl_data_device` negotiation, the page's own drag image is composited on top,
+  and the drop lands where the pointer says. Going out, the compositor reads the
+  payload off the page's own source, calls that drag off and hands mime, bytes
+  and the full type list to the host, which starts a `GdkDrag` on the toplevel
+  native surface (`docs/drag-loop.md` §6). Text is carried as text; Chromium's
+  image drag arrives as `application/octet-stream;name="download.png"`, so the
+  demo writes a temp file and offers a `GdkFileList`, which is what a file
+  manager can copy. Coming in, the compositor is the source:
+  `nested_compositor_drag_from_host()` introduces the host's bytes as a
+  `wl_data_offer`, the page negotiates and reads them, and the verdict comes back
+  on `::drag-in-end` (`docs/drag-loop.md` §7) — but that direction is still
+  driven by the `drop-in` script steps, not by an application dropping on the
+  window. The outbound GTK leg can only be finished by hand: `gdk_drag_begin()`
+  needs a press GDK saw itself, while a scripted press is on the inner seat. The
+  inbound outer `GdkDrop` is likewise manual.
 - **One seat, one pointer, no touch.** The embedding widget is the only device
   the compositor knows about.
 - **No pinch zoom, no tablet input, no middle-click paste.** Chromium binds
@@ -551,13 +571,13 @@ They are the record of *why* the code is shaped like this:
   host that wants the fifth match sends five steps. Measured once in three runs,
   the first step reported the third match instead — the ordinal is Blink's own
   ordering and the gate deliberately does not pin it (`docs/find-path.md`).
-- **The context menu is redrawn, not extended.** A right click now comes to the host
-  as a model and goes back as a command id, and CEF's own action runs — but
-  `CefContextMenuParams` stays in the helper, so a host cannot yet add the rows that
-  need it: 复制链接地址 needs `link_url`, 图片另存为 needs `src_url`. Measured, that
-  costs little today: libcef's default model is the same five rows for a link, an
-  image and a blank page, and the nine rows for an editable field are all there
-  (`docs/context-menu.md` has the table). Check and radio marks are not drawn and a
+- **The helper extends the context menu; the host still cannot extend it.** A right
+  click comes to the host as a model and goes back as a command id. The helper adds
+  link/image/media rows from `CefContextMenuParams` (open in a new window, copy the
+  address, save an image) and executes them; a host that wants its own rows still
+  needs those params over the channel, which is the next protocol step. Image save
+  now asks for a path with `GtkFileDialog`; `CEFNEST_DOWNLOAD_NO_SAVE_AS` opts out
+  and returns to the download directory. Check and radio marks are not drawn and a
   submenu row does not open — the menu is rebuilt from a fresh model after every
   command, so a mark would have nothing to remember.
 - **A permission can be granted or denied, not narrowed.** A media request has to be

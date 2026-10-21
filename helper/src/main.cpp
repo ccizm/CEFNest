@@ -19,6 +19,7 @@
 // Without CHROMIUM_HELPER_SOCKET this is just the Gate 1 probe: a window that
 // loads the URL from argv and quits on Esc.
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -526,6 +527,19 @@ const char* MenuItemTypeName(cef_menu_item_type_t type) {
   }
 }
 
+/* CEF's Alloy menu only knows the generic cef_menu_id_t commands. These ids
+ * are ours; the host draws the rows and sends the id back, and the command is
+ * executed here while CefContextMenuParams still describes the clicked node. */
+enum {
+  kMenuOpenLinkWindow = MENU_ID_USER_FIRST + 1,
+  kMenuCopyLinkAddress,
+  kMenuOpenImageWindow,
+  kMenuCopyImageAddress,
+  kMenuSaveImage,
+  kMenuOpenMediaWindow,
+  kMenuCopyMediaAddress,
+};
+
 class HelperContextMenuHandler : public CefContextMenuHandler {
  public:
   bool RunContextMenu(CefRefPtr<CefBrowser> browser,
@@ -539,15 +553,73 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
     // going away is how CEF is told so.
     g_menu_callback = callback;
 
+    // Alloy's default model has no link/image/media actions. Add the browser
+    // rows the node actually supports, and let OnContextMenuCommand execute
+    // them while |params| is still valid.
+    const uint32_t flags = params->GetTypeFlags();
+    const bool is_link = (flags & CM_TYPEFLAG_LINK) != 0;
+    const bool is_media = (flags & CM_TYPEFLAG_MEDIA) != 0;
+    const cef_context_menu_media_type_t media = params->GetMediaType();
+    const bool is_image = is_media && media == CM_MEDIATYPE_IMAGE;
+    const bool is_video = is_media && (media == CM_MEDIATYPE_VIDEO ||
+                                       media == CM_MEDIATYPE_AUDIO);
+
+    int at = 0;
+    if (is_link) {
+      model->InsertItemAt(at++, kMenuOpenLinkWindow, "在新窗口打开链接");
+      model->InsertItemAt(at++, kMenuCopyLinkAddress, "复制链接地址");
+      model->InsertSeparatorAt(at++);
+    }
+    if (is_image) {
+      model->InsertItemAt(at++, kMenuOpenImageWindow, "在新窗口打开图片");
+      model->InsertItemAt(at++, kMenuCopyImageAddress, "复制图片地址");
+      model->InsertItemAt(at++, kMenuSaveImage, "图片另存为…");
+      model->InsertSeparatorAt(at++);
+    } else if (is_video) {
+      model->InsertItemAt(at++, kMenuOpenMediaWindow, "在新窗口打开媒体");
+      model->InsertItemAt(at++, kMenuCopyMediaAddress, "复制媒体地址");
+      model->InsertSeparatorAt(at++);
+    }
+
     CefRefPtr<CefListValue> items = CefListValue::Create();
     int written = 0;
+    bool skip_separator = false;
     for (size_t i = 0; i < model->GetCount(); ++i) {
       if (!model->IsVisibleAt(i))
         continue;
 
+      const int command_id = model->GetCommandIdAt(i);
+      // A link/image context menu is about that node, not about where the
+      // page's history happens to be; the browser menu we are matching does
+      // not put Back/Forward above its link/image actions.
+      if ((is_link || is_media) &&
+          (command_id == MENU_ID_BACK || command_id == MENU_ID_FORWARD ||
+           command_id == MENU_ID_PRINT || command_id == MENU_ID_VIEW_SOURCE)) {
+        skip_separator = true;
+        continue;
+      }
+      if (command_id == MENU_ID_ADD_TO_DICTIONARY) {
+        // The dictionary row is a browser-profile feature this embedded host
+        // does not expose. Drop it rather than render a dead entry.
+        skip_separator = true;
+        continue;
+      }
+      if (skip_separator && model->GetTypeAt(i) == MENUITEMTYPE_SEPARATOR) {
+        skip_separator = false;
+        continue;
+      }
+      skip_separator = false;
+
+      std::string label = model->GetLabelAt(i).ToString();
+      if (command_id == MENU_ID_NO_SPELLING_SUGGESTIONS) {
+        // The CEF resource spells this one with a leading & in some locales;
+        // it is not a shortcut and must not reach the GTK menu as a literal.
+        label.erase(std::remove(label.begin(), label.end(), '&'), label.end());
+      }
+
       CefRefPtr<CefDictionaryValue> item = CefDictionaryValue::Create();
-      item->SetInt("id", model->GetCommandIdAt(i));
-      item->SetString("label", model->GetLabelAt(i).ToString());
+      item->SetInt("id", command_id);
+      item->SetString("label", label);
       item->SetString("type", MenuItemTypeName(model->GetTypeAt(i)));
       item->SetBool("enabled", model->IsEnabledAt(i));
       item->SetBool("checked", model->IsCheckedAt(i));
@@ -566,6 +638,64 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
             params->GetXCoord(), params->GetYCoord());
 
     // True: this helper will not draw anything and the host owes the answer.
+    return true;
+  }
+
+  bool OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
+                            CefRefPtr<CefFrame> frame,
+                            CefRefPtr<CefContextMenuParams> params,
+                            int command_id,
+                            EventFlags event_flags) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    CefString url;
+    const char* event = nullptr;
+
+    switch (command_id) {
+      case kMenuOpenLinkWindow:
+        url = params->GetLinkUrl();
+        event = "open-url";
+        break;
+      case kMenuCopyLinkAddress:
+        url = params->GetUnfilteredLinkUrl();
+        if (url.empty())
+          url = params->GetLinkUrl();
+        event = "copy-text";
+        break;
+      case kMenuOpenImageWindow:
+      case kMenuOpenMediaWindow:
+        url = params->GetSourceUrl();
+        event = "open-url";
+        break;
+      case kMenuCopyImageAddress:
+      case kMenuCopyMediaAddress:
+        url = params->GetSourceUrl();
+        event = "copy-text";
+        break;
+      case kMenuSaveImage:
+        url = params->GetSourceUrl();
+        if (url.empty())
+          return false;
+        // Reuse the existing download path: the host gets download-begin and
+        // chooses the file, exactly as it does for a page-initiated download.
+        browser->GetHost()->StartDownload(url);
+        return true;
+      default:
+        // Generic CEF ids: let the library's default implementation run.
+        return false;
+    }
+
+    if (!event || url.empty())
+      return false;
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent(event);
+    if (!strcmp(event, "copy-text")) {
+      dict->SetString("text", url);
+    } else {
+      dict->SetString("url", url);
+      dict->SetString("disposition", "new-window");
+    }
+    Emit(dict);
     return true;
   }
 
@@ -937,6 +1067,31 @@ void HandleCommand(const std::string& line) {
       g_browser->Reload();
     return;
   }
+  // Page zoom: the host drives, the level is a CEF zoom level (0 = 100 %,
+  // each +0.5 is one Chrome UI step ±). Chromium persists zoom per origin,
+  // which is the browser-like behavior an embedded component wants.
+  if (name == "zoom-in" || name == "zoom-out" || name == "zoom-reset") {
+    CefRefPtr<CefBrowserHost> host = g_browser->GetHost();
+    if (!host) {
+      EmitStatus("no-host");
+      return;
+    }
+
+    double level = host->GetZoomLevel();
+    if (name == "zoom-in")
+      level += 0.5;
+    else if (name == "zoom-out")
+      level -= 0.5;
+    else
+      level = 0.0;
+    host->SetZoomLevel(level);
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("zoom");
+    dict->SetDouble("level", host->GetZoomLevel());
+    Emit(dict);
+    return;
+  }
+
   if (name == "stop") {
     g_browser->StopLoad();
     return;
@@ -1439,6 +1594,15 @@ class HelperClient : public CefClient,
     dict->SetString("url", frame->GetURL().ToString());
     dict->SetInt("http_code", http_status_code);
     Emit(dict);
+
+    // Chromium keeps zoom per origin, so a navigation can change the level
+    // without a zoom command. Report what the new page actually has instead of
+    // leaving the host's cached value on the previous origin.
+    if (browser && browser->GetHost()) {
+      CefRefPtr<CefDictionaryValue> zoom = NewEvent("zoom");
+      zoom->SetDouble("level", browser->GetHost()->GetZoomLevel());
+      Emit(zoom);
+    }
   }
 
   void OnLoadError(CefRefPtr<CefBrowser> browser,

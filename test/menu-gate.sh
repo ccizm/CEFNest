@@ -244,21 +244,21 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "$WHICH" = all ] || [ "$WHICH" = real ]; then
-  # 7. The contexts the fixture puts at known coordinates. A link, an image and
-  #    ordinary text all answer the same thin model; an editable answers the edit
-  #    one; a selection answers copy alone. Then 全选 is picked and the textarea
-  #    reports that its own selection grew — which is the whole point of
-  #    Continue(): the command runs in Chromium, and the host only chose it.
+  # 7. The contexts the fixture puts at known coordinates. Link and image get the
+  #    helper's custom rows (and no Back/Forward/Print/View Source); the editable
+  #    and selection keep Chromium's own models. Copy is picked from the link and
+  #    image menus; 全选 is picked from the editable and the textarea reports that
+  #    its selection grew — which is the whole point of Continue().
   script real-models <<EOF
 load $PAGE
 wait 3000
 click 140 40 273
 wait 1200
-menu-dismiss
+menu-pick 26502
 wait 600
 click 120 130 273
 wait 1200
-menu-dismiss
+menu-pick 26504
 wait 600
 js window.selectEdit()
 wait 600
@@ -278,15 +278,16 @@ close
 EOF
   run_demo real-models "$WORK/real-models.log" "$HELPER"
   expect 'loaded .*menu-page\.html \(HTTP 200\)' "$WORK/real-models.log" real-models
-  expect 'context menu with 5 items at 140,40' "$WORK/real-models.log" real-models
-  expect 'menu row 3 id=131 type=command enabled=1' "$WORK/real-models.log" real-models
+  expect 'context menu with 3 items at 140,40' "$WORK/real-models.log" real-models
+  expect 'menu row 0 id=26501 type=command enabled=1' "$WORK/real-models.log" real-models
+  expect 'menu row 1 id=26502 type=command enabled=1' "$WORK/real-models.log" real-models
   expect_mapped "$WORK/real-models.log" real-models
-  expect 'context menu with 9 items at' "$WORK/real-models.log" real-models
+  expect 'context menu with 4 items at' "$WORK/real-models.log" real-models
+  expect 'context menu with 4 items drawn' "$WORK/real-models.log" real-models
   expect 'context menu with 9 items drawn' "$WORK/real-models.log" real-models
   expect 'context menu with 1 items at 400,4[0-9]' "$WORK/real-models.log" real-models
-  # The link and the image contexts are the same model: CEF's default has nothing
-  # link- or image-specific in it, which is what docs/context-menu.md records.
-  expect_count 'menu row 0 id=100 type=command' "$WORK/real-models.log" 2 real-models
+  expect_count 'demo: copy-text https://example.invalid/target' "$WORK/real-models.log" 1 real-models
+  expect_count 'demo: copy-text data:image/png' "$WORK/real-models.log" 1 real-models
 
   picked=$(js_value "$WORK/real-models.log" 2)
   if [ "$picked" = "0-18" ]; then
@@ -313,9 +314,11 @@ close
 EOF
   run_demo real-nav "$WORK/real-nav.log" "$HELPER"
   expect 'context menu dismissed by a navigation' "$WORK/real-nav.log" real-nav
-  expect_count 'context menu with 5 items drawn' "$WORK/real-nav.log" 2 real-nav
-  # 返回 is enabled on the second one: the navigation the menu was dismissed for is
-  # the history entry it now goes back to.
+  expect_count 'context menu with 3 items drawn' "$WORK/real-nav.log" 1 real-nav
+  expect_count 'context menu with 5 items drawn' "$WORK/real-nav.log" 1 real-nav
+  # The first is the link (custom rows); the second is the other page's blank
+  # background, whose 返回 is enabled by the navigation that dismissed the menu.
+  expect 'menu row 0 id=26501 type=command enabled=1' "$WORK/real-nav.log" real-nav
   expect 'menu row 0 id=100 type=command enabled=1' "$WORK/real-nav.log" real-nav
 fi
 

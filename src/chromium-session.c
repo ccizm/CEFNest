@@ -41,6 +41,9 @@ enum {
   SIG_CONTEXT_MENU,
   SIG_PERMISSION_REQUEST,
   SIG_PERMISSION_DISMISSED,
+  SIG_ZOOM_CHANGED,
+  SIG_COPY_TEXT,
+  SIG_OPEN_URL,
   SIG_CLOSED,
   N_SIGNALS
 };
@@ -75,6 +78,7 @@ struct _ChromiumSession {
   gboolean can_go_back;
   gboolean can_go_forward;
   gboolean muted;
+  double zoom_level;
   gboolean running;
   gboolean stopping;
   gboolean closed_emitted;
@@ -83,8 +87,8 @@ struct _ChromiumSession {
    * it, and the two widgets that draw it while this side is the one that does. */
   gboolean menu_pending;
   GtkWidget *menu_popover;
-  GSimpleActionGroup *menu_actions;
   guint menu_release_source;
+  guint menu_focus_source;
 
   /* Permission requests this side has asked about and not yet answered. Unlike a
    * menu, several are open at once, so it is a set of ids rather than a flag —
@@ -315,6 +319,27 @@ handle_event (ChromiumSession *self, const char *line)
        * request; background tabs are reported and left to the host. */
       g_signal_emit (self, signals[SIG_POPUP_REQUESTED], 0,
                      json_object_get_string_member (object, "url"));
+      return;
+    }
+
+  if (!strcmp (event, "copy-text"))
+    {
+      g_signal_emit (self, signals[SIG_COPY_TEXT], 0,
+                     json_object_get_string_member (object, "text"));
+      return;
+    }
+
+  if (!strcmp (event, "open-url"))
+    {
+      g_signal_emit (self, signals[SIG_OPEN_URL], 0,
+                     json_object_get_string_member (object, "url"));
+      return;
+    }
+
+  if (!strcmp (event, "zoom"))
+    {
+      self->zoom_level = json_object_get_double_member (object, "level");
+      g_signal_emit (self, signals[SIG_ZOOM_CHANGED], 0, self->zoom_level);
       return;
     }
 
@@ -672,8 +697,18 @@ menu_label (const char *cef_label)
         g_string_append (out, "__");      /* a real underscore, said twice */
       else if (*p == '&' && p[1] == '(' && g_ascii_isalnum (p[2]) && p[3] == ')')
         {
+          /* The "&(B)" spelling. */
           g_string_append_printf (out, "(_%c)", p[2]);
           p += 3;
+        }
+      else if (*p == '&' && g_ascii_isalnum (p[1]) && p[2] == ')')
+        {
+          /* CEF's actual spelling is "(&B)": the ampersand is inside the
+           * parentheses, so turn it into GTK's "(_B)" mnemonic form. */
+          g_string_append_c (out, '_');
+          g_string_append_c (out, p[1]);
+          g_string_append_c (out, ')');
+          p += 2;
         }
       else
         g_string_append_c (out, *p);
@@ -686,8 +721,55 @@ static void menu_release      (ChromiumSession *self);
 static void menu_release_soon (ChromiumSession *self);
 static void menu_popover_closed (GtkPopover *popover, gpointer data);
 
+/* A popover takes keyboard focus while it is mapped. If its focus is still
+ * inside the menu when we tear it down, put it back on the view: that is what
+ * makes the nested seat keep sending keys to the page. If the user clicked the
+ * address bar or another host widget, leave that focus alone. */
+static void
+menu_restore_view_focus (ChromiumSession *self, GtkWidget *popover)
+{
+  GtkRoot *root;
+  GtkWidget *focus;
+
+  if (!self->view)
+    return;
+
+  root = gtk_widget_get_root (GTK_WIDGET (self->view));
+  if (!root)
+    return;
+
+  focus = gtk_root_get_focus (root);
+  if (focus == NULL ||
+      (popover && (focus == popover ||
+                   gtk_widget_is_ancestor (focus, popover))))
+    gtk_widget_grab_focus (GTK_WIDGET (self->view));
+}
+
 /* Put the menu's widgets back. The popover is reached both from the answer path
  * and from its own ::closed, so this has to survive being called twice. */
+/* grab_focus() from inside the popover teardown can be refused while the
+ * popover still owns the keyboard; wait one idle, after the surface is gone,
+ * and only then hand it back if nothing else took it. */
+static void
+menu_focus_restore_idle (gpointer data)
+{
+  ChromiumSession *self = data;
+
+  self->menu_focus_source = 0;
+  menu_restore_view_focus (self, NULL);
+  g_object_unref (self);
+}
+
+static void
+menu_restore_focus_soon (ChromiumSession *self)
+{
+  if (self->menu_focus_source > 0)
+    return;
+
+  self->menu_focus_source =
+    g_timeout_add_once (50, menu_focus_restore_idle, g_object_ref (self));
+}
+
 static void
 menu_release (ChromiumSession *self)
 {
@@ -711,9 +793,12 @@ menu_release (ChromiumSession *self)
       if (GTK_IS_WIDGET (gtk_widget_get_parent (popover)))
         gtk_widget_unparent (popover);
       g_object_unref (popover);
+
+      /* Hand the keyboard back after the popover (and its focus widget) is
+       * gone; otherwise the page keeps the last frame but stops taking keys. */
+      menu_restore_focus_soon (self);
     }
 
-  g_clear_object (&self->menu_actions);
 }
 
 /* Not from inside the popover's own ::closed, and not from inside the activate of
@@ -725,6 +810,17 @@ menu_release_later (gpointer data)
   ChromiumSession *self = data;
 
   self->menu_release_source = 0;
+
+  /* The popover's ::closed can arrive before the row's action activate (the
+   * menu pops down and GTK delivers the activation afterwards). Waiting one
+   * idle lets the activation answer while the request is still pending; a
+   * closed menu with no activation is then the dismissal CEF expects. */
+  if (self->menu_pending)
+    {
+      self->menu_pending = FALSE;
+      send_command (self, "context-menu-dismiss");
+    }
+
   menu_release (self);
   g_object_unref (self);
 }
@@ -732,7 +828,7 @@ menu_release_later (gpointer data)
 static void
 menu_release_soon (ChromiumSession *self)
 {
-  if (self->menu_release_source > 0 || (!self->menu_popover && !self->menu_actions))
+  if (self->menu_release_source > 0 || !self->menu_popover)
     return;
 
   self->menu_release_source =
@@ -744,52 +840,74 @@ menu_popover_closed (GtkPopover *popover, gpointer data)
 {
   ChromiumSession *self = data;
 
-  /* Escape, a click outside, or the window going away: all three are a
-   * dismissal as far as CEF is concerned, and the only way it learns. */
-  if (self->menu_pending)
-    {
-      self->menu_pending = FALSE;
-      send_command (self, "context-menu-dismiss");
-    }
-
+  /* Do not answer here: an action activated by this same click may still be on
+   * its way. menu_release_later() decides once the current event has drained. */
   menu_release_soon (self);
 }
 
-static void
-menu_action_activate (GSimpleAction *action, GVariant *parameter, gpointer data)
-{
-  ChromiumSession *self = data;
-  int command = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (action), "cefnest-command"));
+/* The theme puts 8px of padding on a popover's contents; for a one-row copy
+ * menu that reads as a blank strip under the only row. The content class and a
+ * selector at the same specificity as the theme's override it locally. */
+static GtkCssProvider *menu_css;
 
-  chromium_session_context_menu_select (self, command);
+static void
+menu_ensure_css (GtkWidget *view)
+{
+  GdkDisplay *display;
+
+  if (menu_css)
+    return;
+
+  menu_css = gtk_css_provider_new ();
+  gtk_css_provider_load_from_string (
+    menu_css,
+    "popover.cefnest-menu > contents.cefnest-menu-content { padding: 0; }"
+    ".cefnest-menu-box { padding: 4px; }"
+    ".cefnest-menu-box button { padding: 4px 8px; }"
+    ".cefnest-menu-box separator { margin: 3px 0; }");
+  display = gtk_widget_get_display (view);
+  if (display)
+    gtk_style_context_add_provider_for_display (
+      display, GTK_STYLE_PROVIDER (menu_css),
+      GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 }
 
-/* A popover on Wayland is its own surface, so a grab of the view never shows it.
- * This is how a run finds out that the menu really got an allocation rather than
- * being built and dropped. */
 static void
 menu_report_size (gpointer data)
 {
   GtkWidget *popover = data;
 
   if (GTK_IS_WIDGET (popover))
-    g_debug ("session: context menu mapped=%d size=%dx%d",
-             gtk_widget_get_mapped (popover),
-             gtk_widget_get_width (popover), gtk_widget_get_height (popover));
+    {
+      g_debug ("session: context menu mapped=%d size=%dx%d",
+               gtk_widget_get_mapped (popover),
+               gtk_widget_get_width (popover), gtk_widget_get_height (popover));
+    }
 
   g_object_unref (popover);
+}
+
+static void
+menu_button_clicked (GtkButton *button, gpointer data)
+{
+  ChromiumSession *self = data;
+  int command = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (button),
+                                                     "cefnest-command"));
+
+  chromium_session_context_menu_select (self, command);
 }
 
 static void
 session_menu_show (ChromiumSession *self, int x, int y, GList *items)
 {
   GList *l;
-  GMenu *menu;
-  GMenu *section;
   GtkWidget *popover;
+  GtkWidget *box;
   GdkRectangle point;
-  char name[32];
   guint index = 0;
+  guint rows = 0;
+  gboolean pending_separator = FALSE;
+
   if (!self->view)
     {
       /* Nothing to draw over. Saying so with a dismissal is what keeps the
@@ -800,75 +918,82 @@ session_menu_show (ChromiumSession *self, int x, int y, GList *items)
       return;
     }
 
-  self->menu_actions = g_simple_action_group_new ();
-  menu = g_menu_new ();
-  /* Items between two separators become one section, because a section break is
-   * how a GtkPopoverMenu draws a line. */
-  section = g_menu_new ();
+  /* A plain GtkPopover with a box, not GtkPopoverMenu: the latter wraps its
+   * content in a GtkScrolledWindow and reserves section padding, which leaves
+   * an empty strip under a one-row copy menu. A box gives the menu exactly the
+   * height of its rows and the same input surface as the rows themselves. */
+  popover = gtk_popover_new ();
+  gtk_widget_add_css_class (popover, "cefnest-menu");
+  box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_add_css_class (box, "cefnest-menu-box");
+  gtk_widget_set_valign (box, GTK_ALIGN_CENTER);
+  gtk_popover_set_child (GTK_POPOVER (popover), box);
+  {
+    GtkWidget *content = gtk_widget_get_first_child (popover);
+    if (content)
+      gtk_widget_add_css_class (content, "cefnest-menu-content");
+  }
 
   for (l = items; l; l = l->next, index++)
     {
       ChromiumMenuItem *item = l->data;
-      g_autofree char *label = NULL;
-      GSimpleAction *action;
 
       if (!strcmp (item->type, "separator"))
         {
-          if (g_menu_model_get_n_items (G_MENU_MODEL (section)) > 0)
-            {
-              g_menu_append_section (menu, NULL, G_MENU_MODEL (section));
-              g_object_unref (section);
-              section = g_menu_new ();
-            }
+          if (rows > 0)
+            pending_separator = TRUE;
           continue;
         }
 
-      g_snprintf (name, sizeof (name), "cmd-%u", index);
-      label = menu_label (item->label);
+      /* A submenu row cannot open a submenu in this flat popover. The fake
+       * "mixed" model ends with one and an empty label; drawing it as a button
+       * leaves exactly the empty strip this menu is supposed to avoid. */
+      if (!strcmp (item->type, "submenu") || !item->label || !*item->label)
+        continue;
 
-      action = g_simple_action_new (name, NULL);
-      g_simple_action_set_enabled (action, item->enabled);
-      g_object_set_data (G_OBJECT (action), "cefnest-command",
-                         GINT_TO_POINTER (item->id));
-      g_signal_connect (action, "activate", G_CALLBACK (menu_action_activate), self);
-      g_action_map_add_action (G_ACTION_MAP (self->menu_actions), G_ACTION (action));
-      g_object_unref (action);
-
-      /* A stateless action, even for a check or radio item: the mark CEF would
-       * have shown is the menu's own state, and this menu is rebuilt from a new
-       * model after every command anyway. */
       {
-        g_autofree char *detailed = g_strdup_printf ("menu.%s", name);
-        GMenuItem *row = g_menu_item_new (label, NULL);
+        g_autofree char *label = menu_label (item->label);
+        GtkWidget *button;
 
-        g_menu_item_set_detailed_action (row, detailed);
-        g_menu_append_item (section, row);
-        g_object_unref (row);
+        if (pending_separator)
+          {
+            gtk_box_append (GTK_BOX (box),
+                            gtk_separator_new (GTK_ORIENTATION_HORIZONTAL));
+            pending_separator = FALSE;
+          }
+
+        button = gtk_button_new_with_mnemonic (label);
+
+        gtk_widget_add_css_class (button, "flat");
+        gtk_button_set_use_underline (GTK_BUTTON (button), TRUE);
+        gtk_widget_set_halign (button, GTK_ALIGN_FILL);
+        gtk_widget_set_hexpand (button, TRUE);
+        gtk_widget_set_valign (button, GTK_ALIGN_CENTER);
+        gtk_widget_set_sensitive (button, item->enabled);
+        g_object_set_data (G_OBJECT (button), "cefnest-command",
+                           GINT_TO_POINTER (item->id));
+        g_signal_connect (button, "clicked",
+                          G_CALLBACK (menu_button_clicked), self);
+        gtk_box_append (GTK_BOX (box), button);
+        rows++;
       }
     }
 
-  if (g_menu_model_get_n_items (G_MENU_MODEL (section)) > 0)
-    g_menu_append_section (menu, NULL, G_MENU_MODEL (section));
-  g_object_unref (section);
-
-  if (g_menu_model_get_n_items (G_MENU_MODEL (menu)) == 0)
+  if (rows == 0)
     {
       /* An empty menu is not a menu; dismissing is what frees the request. */
-      g_object_unref (menu);
+      gtk_widget_unparent (popover);
       chromium_session_context_menu_dismiss (self);
       menu_release (self);
       return;
     }
 
-  popover = gtk_popover_menu_new_from_model (G_MENU_MODEL (menu));
-  g_object_unref (menu);
+  menu_ensure_css (GTK_WIDGET (self->view));
 
   /* The view owns it as a child; this side keeps a reference of its own because
    * it has to be able to put it down from three different places. */
   gtk_widget_set_parent (popover, GTK_WIDGET (self->view));
   self->menu_popover = g_object_ref (popover);
-
-  gtk_widget_insert_action_group (popover, "menu", G_ACTION_GROUP (self->menu_actions));
 
   point.x = x;
   point.y = y;
@@ -877,6 +1002,14 @@ session_menu_show (ChromiumSession *self, int x, int y, GList *items)
   gtk_popover_set_pointing_to (GTK_POPOVER (popover), &point);
   gtk_popover_set_position (GTK_POPOVER (popover), GTK_POS_BOTTOM);
   gtk_popover_set_has_arrow (GTK_POPOVER (popover), FALSE);
+
+  /* GTK_POS_BOTTOM anchors the surface according to the popover's halign:
+   * CENTER (the default) straddles the pointer, START puts the menu's left edge
+   * on the pointer and lets it grow right. That is the context-menu geometry. */
+  gtk_widget_set_halign (popover, GTK_ALIGN_START);
+
+  gtk_popover_present (GTK_POPOVER (popover));
+
   g_signal_connect (popover, "closed", G_CALLBACK (menu_popover_closed), self);
 
   gtk_popover_popup (GTK_POPOVER (popover));
@@ -1328,9 +1461,11 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
   self->running = TRUE;
   self->stopping = FALSE;
   self->closed_emitted = FALSE;
-  /* A fresh helper is a fresh browser: it starts unmuted whatever the previous
-   * one was told. */
+  /* A fresh helper is a fresh browser: it starts unmuted and at 100 % zoom
+   * whatever the previous one was told. Chromium's own per-origin zoom is
+   * applied inside the new helper when that origin loads. */
   self->muted = FALSE;
+  self->zoom_level = 0.0;
   chromium_session_set_state (self, initial_url && *initial_url ? initial_url : "",
                               "", FALSE, FALSE, FALSE);
 
@@ -1442,6 +1577,24 @@ chromium_session_set_muted (ChromiumSession *self, gboolean muted)
 
   root = json_builder_get_root (builder);
   send_json (self, root);
+}
+
+/* One command per step: the helper applies the CEF zoom level and answers with
+ * a zoom event, so the host never has to guess whether the change landed. */
+void
+chromium_session_zoom (ChromiumSession *self, const char *action)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (action != NULL);
+
+  if (!strcmp (action, "in"))
+    send_command (self, "zoom-in");
+  else if (!strcmp (action, "out"))
+    send_command (self, "zoom-out");
+  else if (!strcmp (action, "reset"))
+    send_command (self, "zoom-reset");
+  else
+    g_return_if_reached ();
 }
 
 void
@@ -1678,6 +1831,15 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                   G_TYPE_INT, G_TYPE_STRING);
   signals[SIG_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_ZOOM_CHANGED] =
+    g_signal_new ("zoom-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_DOUBLE);
+  signals[SIG_COPY_TEXT] =
+    g_signal_new ("copy-text", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_OPEN_URL] =
+    g_signal_new ("open-url", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
   signals[SIG_PAGE_MESSAGE] =
     g_signal_new ("page-message", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,

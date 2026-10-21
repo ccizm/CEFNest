@@ -178,6 +178,14 @@ session_changed (ChromiumSession *session, gpointer data)
 }
 
 static void
+session_zoom_changed (ChromiumSession *session, double level, gpointer data)
+{
+  /* The helper read the level back after SetZoomLevel; this is the only place
+   * a scripted run can see that the command reached Chromium. */
+  g_printerr ("demo: zoom level=%.2f\n", level);
+}
+
+static void
 session_load_end (ChromiumSession *session, const char *uri, int http_code,
                   gpointer data)
 {
@@ -207,6 +215,99 @@ session_popup_requested (ChromiumSession *session, const char *url, gpointer dat
 {
   (void) session; (void) data;
   g_printerr ("demo: popup-requested %s\n", url);
+}
+
+/* A menu action that the helper executes is only half of a browser action:
+ * copying is the host clipboard, and "new window" is a second widget with its
+ * own helper. The demo implements the latter by starting another copy of
+ * itself with a unique CEF profile, so two windows never fight over
+ * ~/.cache/cefnest-helper-hosted. */
+static void
+open_url_in_new_window (const char *url)
+{
+  GError *error = NULL;
+  g_autofree char *exe = g_file_read_link ("/proc/self/exe", &error);
+  g_autofree char *uuid = NULL;
+  g_autofree char *cache = NULL;
+  g_autofree char *config = NULL;
+  GSubprocessLauncher *launcher;
+  GSubprocess *child;
+  const char *argv[] = { NULL, NULL };
+
+  if (!exe)
+    {
+      g_warning ("demo: cannot resolve own executable: %s",
+                 error ? error->message : "unknown");
+      g_clear_error (&error);
+      return;
+    }
+
+  uuid = g_uuid_string_random ();
+  cache = g_build_filename (g_get_user_cache_dir (), "cefnest-window", uuid, NULL);
+  config = g_build_filename (g_get_user_config_dir (), "cefnest-window", uuid, NULL);
+  g_mkdir_with_parents (cache, 0700);
+  g_mkdir_with_parents (config, 0700);
+
+  launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_NONE);
+  g_subprocess_launcher_setenv (launcher, "XDG_CACHE_HOME", cache, TRUE);
+  g_subprocess_launcher_setenv (launcher, "XDG_CONFIG_HOME", config, TRUE);
+  g_subprocess_launcher_setenv (launcher, "CHROMIUM_URL", url, TRUE);
+  g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_SESSION_SCRIPT");
+  g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_DUMP");
+  g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_DUMP_DELAY");
+  g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_WINDOW");
+
+  if (demo.session)
+    {
+      const char *helper = chromium_session_get_helper_path (demo.session);
+
+      if (helper && *helper)
+        g_subprocess_launcher_setenv (launcher, "CEFNEST_HELPER", helper, TRUE);
+    }
+
+  argv[0] = exe;
+  child = g_subprocess_launcher_spawnv (launcher, argv, &error);
+  g_object_unref (launcher);
+
+  if (!child)
+    {
+      g_warning ("demo: cannot open a new window: %s",
+                 error ? error->message : "unknown");
+      g_clear_error (&error);
+      return;
+    }
+
+  g_printerr ("demo: opened new window for %s (pid %s)\n", url,
+              g_subprocess_get_identifier (child));
+  g_object_unref (child);
+}
+
+static void
+session_copy_text (ChromiumSession *session, const char *text, gpointer data)
+{
+  GdkClipboard *clipboard;
+
+  (void) session; (void) data;
+
+  if (!demo.window || !text)
+    return;
+
+  clipboard = gdk_display_get_clipboard (
+    gtk_widget_get_display (GTK_WIDGET (demo.window)));
+  gdk_clipboard_set_text (clipboard, text);
+  g_printerr ("demo: copy-text %s\n", text);
+}
+
+static void
+session_open_url (ChromiumSession *session, const char *url, gpointer data)
+{
+  (void) session; (void) data;
+
+  if (!url || !*url)
+    return;
+
+  g_printerr ("demo: open-url %s\n", url);
+  open_url_in_new_window (url);
 }
 
 static void
@@ -446,6 +547,73 @@ reject_clicked (GtkButton *button, gpointer data)
   download_reject ((DownloadRow *) data);
 }
 
+typedef struct {
+  int id;
+} SaveImageRequest;
+
+static void
+save_image_finished (GObject *source, GAsyncResult *result, gpointer data)
+{
+  SaveImageRequest *request = data;
+  GtkFileDialog *dialog = GTK_FILE_DIALOG (source);
+  GError *error = NULL;
+  GFile *file = gtk_file_dialog_save_finish (dialog, result, &error);
+  DownloadRow *row = download_row_for (request->id);
+
+  if (file)
+    {
+      g_autofree char *path = g_file_get_path (file);
+
+      if (path && *path)
+        {
+          if (row)
+            download_accept (row, path);
+          else
+            chromium_session_accept_download (demo.session, request->id, path);
+        }
+      else
+        {
+          g_warning ("demo: save-image returned no local path");
+          if (row)
+            download_reject (row);
+          else
+            chromium_session_reject_download (demo.session, request->id);
+        }
+      g_object_unref (file);
+    }
+  else
+    {
+      /* Dismissed or failed: the page's image is not written anywhere. */
+      g_clear_error (&error);
+      if (row)
+        download_reject (row);
+      else
+        chromium_session_reject_download (demo.session, request->id);
+    }
+
+  g_free (request);
+}
+
+static void
+save_image_prompt (int id, const char *suggested_name)
+{
+  GtkFileDialog *dialog;
+  SaveImageRequest *request;
+
+  if (!demo.window)
+    return;
+
+  dialog = gtk_file_dialog_new ();
+  request = g_new0 (SaveImageRequest, 1);
+  request->id = id;
+
+  gtk_file_dialog_set_title (dialog, "图片另存为");
+  if (suggested_name && *suggested_name)
+    gtk_file_dialog_set_initial_name (dialog, suggested_name);
+  gtk_file_dialog_save (dialog, demo.window, NULL, save_image_finished, request);
+  g_object_unref (dialog);
+}
+
 static void
 session_download_begin (ChromiumSession *session, int id, const char *url,
                         const char *suggested_name, const char *mime_type,
@@ -487,6 +655,16 @@ session_download_begin (ChromiumSession *session, int id, const char *url,
               " url=%s\n", id, row->name, mime_type, total_bytes, url);
 
   download_row_set_text (row, human);
+
+  /* A menu "save image as" action starts an image download; ask for a path
+   * instead of silently dropping it in the downloads directory. Page-initiated
+   * image downloads take the same path, which is the browser-like default. */
+  if (g_str_has_prefix (mime_type ? mime_type : "", "image/") &&
+      !g_getenv ("CEFNEST_DOWNLOAD_NO_SAVE_AS"))
+    {
+      save_image_prompt (id, row->name);
+      return;
+    }
 
   if (!g_getenv ("CEFNEST_DOWNLOAD_ASK"))
     {
@@ -637,6 +815,30 @@ static gboolean
 find_key_pressed (GtkEventControllerKey *controller, guint keyval,
                   guint keycode, GdkModifierType state, gpointer data)
 {
+  /* The window owns the browser zoom shortcuts, not the page: the view forwards
+   * every key it gets, so Ctrl+plus/minus/0 has to be taken in the capture
+   * phase first. Ctrl+Shift+= arrives as GDK_KEY_plus; the keypad variants are
+   * what a full-size keyboard sends when Num Lock is on. */
+  if (demo.session && (state & GDK_CONTROL_MASK) &&
+      !(state & (GDK_ALT_MASK | GDK_SUPER_MASK)))
+    {
+      if (keyval == GDK_KEY_plus || keyval == GDK_KEY_equal || keyval == GDK_KEY_KP_Add)
+        {
+          chromium_session_zoom (demo.session, "in");
+          return TRUE;
+        }
+      if (keyval == GDK_KEY_minus || keyval == GDK_KEY_KP_Subtract)
+        {
+          chromium_session_zoom (demo.session, "out");
+          return TRUE;
+        }
+      if (keyval == GDK_KEY_0 || keyval == GDK_KEY_KP_0)
+        {
+          chromium_session_zoom (demo.session, "reset");
+          return TRUE;
+        }
+    }
+
   /* Capture phase, on purpose: Esc inside the page is what the helper reads as
    * "close the browser" (docs/session-lifecycle.md), so a find bar that wants
    * the key has to take it before the view forwards it. */
@@ -657,6 +859,50 @@ find_key_pressed (GtkEventControllerKey *controller, guint keyval,
     }
 
   return FALSE;
+}
+
+static gboolean
+find_key_released (GtkEventControllerKey *controller, guint keyval,
+                   guint keycode, GdkModifierType state, gpointer data)
+{
+  NestedCompositor *compositor;
+  gboolean modifier_key;
+  gboolean shortcut_key;
+
+  /* find_key_pressed() takes Ctrl+plus/minus/0 and Ctrl+F in the capture phase,
+   * so the view never sees those presses. If the same controller also keeps the
+   * release, Chromium is left with Ctrl down — and then every later wheel event
+   * is Ctrl+wheel, i.e. another zoom. Forward the releases straight to the
+   * nested seat here:
+   *
+   * key-released is a void signal, so this cannot stop propagation by returning
+   * TRUE; the view may also send the release. A duplicate release is harmless,
+   * while a missing one is the stuck-key bug. Shortcut keys still go to the
+   * view as well, because they may be ordinary keys when Ctrl is not down
+   * (F, Esc, bare plus/minus/0). */
+  modifier_key =
+    keyval == GDK_KEY_Control_L || keyval == GDK_KEY_Control_R ||
+    keyval == GDK_KEY_Shift_L || keyval == GDK_KEY_Shift_R ||
+    keyval == GDK_KEY_Alt_L || keyval == GDK_KEY_Alt_R ||
+    keyval == GDK_KEY_Super_L || keyval == GDK_KEY_Super_R;
+  shortcut_key =
+    keyval == GDK_KEY_plus || keyval == GDK_KEY_equal ||
+    keyval == GDK_KEY_KP_Add || keyval == GDK_KEY_minus ||
+    keyval == GDK_KEY_KP_Subtract || keyval == GDK_KEY_0 ||
+    keyval == GDK_KEY_KP_0 || keyval == GDK_KEY_f || keyval == GDK_KEY_F ||
+    keyval == GDK_KEY_Escape;
+
+  if ((!modifier_key && !shortcut_key) || !demo.view)
+    return FALSE;
+
+  compositor = chromium_view_get_compositor (demo.view);
+  if (!compositor)
+    return FALSE;
+
+  g_debug ("demo: shortcut release keyval=%u (%s) evdev=%u", keyval,
+           gdk_keyval_name (keyval), keycode - 8);
+  nested_compositor_notify_keyboard_key (compositor, keycode - 8, FALSE);
+  return modifier_key;
 }
 
 static void
@@ -1111,6 +1357,12 @@ build_toolbar (GtkHeaderBar *header)
   chromium_session_set_view (demo.session, demo.view);
   g_signal_connect (demo.session, "ready", G_CALLBACK (session_ready), NULL);
   g_signal_connect (demo.session, "changed", G_CALLBACK (session_changed), NULL);
+  g_signal_connect (demo.session, "zoom-changed",
+                    G_CALLBACK (session_zoom_changed), NULL);
+  g_signal_connect (demo.session, "copy-text",
+                    G_CALLBACK (session_copy_text), NULL);
+  g_signal_connect (demo.session, "open-url",
+                    G_CALLBACK (session_open_url), NULL);
   g_signal_connect (demo.session, "load-end", G_CALLBACK (session_load_end), NULL);
   g_signal_connect (demo.session, "load-error",
                     G_CALLBACK (session_load_error), NULL);
@@ -1265,10 +1517,134 @@ dump_view (gpointer data)
 /* Only one handover is ever in flight — a widget has one pointer — and a drag
  * whose compositor never answered it is not worth keeping a second one for. */
 static GdkDrag *demo_out_drag;
+static char *demo_out_temp_dir;
+static char *demo_out_temp_path;
+
+static void
+demo_out_clear_temp (void)
+{
+  if (demo_out_temp_path)
+    {
+      g_unlink (demo_out_temp_path);
+      g_clear_pointer (&demo_out_temp_path, g_free);
+    }
+  if (demo_out_temp_dir)
+    {
+      g_rmdir (demo_out_temp_dir);
+      g_clear_pointer (&demo_out_temp_dir, g_free);
+    }
+}
 
 static void
 demo_out_drag_end (GdkDrag *drag, gpointer data)
 {
+  if (demo_out_drag == drag)
+    {
+      /* dnd-finished means the destination has finished reading the file. Only
+       * now is it safe to unlink the temp file; doing this on drop-performed
+       * makes Nautilus open a path that no longer exists. */
+      gdk_drag_drop_done (drag, TRUE);
+      g_clear_object (&demo_out_drag);
+      /* Keep the temp file alive after the drag as well: a file manager can
+       * still open the URI a moment after dnd-finished. It is removed on the
+       * next handover or when the window goes away. */
+    }
+}
+
+/* Chromium's image drag offers its bytes as application/octet-stream with a
+ * suggested name, not just text/html. Turn that into a real file so a file
+ * manager has something it can copy. */
+static char *
+drag_suggested_name (const char *mime)
+{
+  const char *p = strstr (mime, "name=\"");
+  char *name;
+
+  if (p)
+    {
+      p += 6;
+      const char *end = strchr (p, '\"');
+      name = end ? g_strndup (p, end - p) : g_strdup (p);
+    }
+  else if (!strncmp (mime, "image/png", 9))
+    name = g_strdup ("dragged-image.png");
+  else if (!strncmp (mime, "image/jpeg", 10))
+    name = g_strdup ("dragged-image.jpg");
+  else if (!strncmp (mime, "image/gif", 9))
+    name = g_strdup ("dragged-image.gif");
+  else if (!strncmp (mime, "image/webp", 10))
+    name = g_strdup ("dragged-image.webp");
+  else
+    name = g_strdup ("dragged-file");
+
+  for (char *q = name; *q; q++)
+    if (*q == '/' || *q == '\\' || g_ascii_iscntrl (*q))
+      *q = '_';
+  g_strstrip (name);
+
+  if (!*name || !strcmp (name, ".") || !strcmp (name, ".."))
+    {
+      g_free (name);
+      name = g_strdup ("dragged-file");
+    }
+  return name;
+}
+
+static GFile *
+demo_out_write_temp (const char *mime, GBytes *bytes, char **path_out,
+                     char **dir_out)
+{
+  GError *error = NULL;
+  g_autofree char *dir = g_dir_make_tmp ("cefnest-drag-XXXXXX", &error);
+  g_autofree char *name = NULL;
+  g_autofree char *path = NULL;
+  gsize size = g_bytes_get_size (bytes);
+  gconstpointer data = g_bytes_get_data (bytes, NULL);
+  GFile *file;
+
+  if (!dir)
+    {
+      g_print ("demo: drag out: no temp directory: %s\n",
+               error ? error->message : "unknown");
+      g_clear_error (&error);
+      return NULL;
+    }
+
+  name = drag_suggested_name (mime);
+  path = g_build_filename (dir, name, NULL);
+
+  if (!g_file_set_contents (path, data, size, &error))
+    {
+      g_print ("demo: drag out: cannot write %s: %s\n", path,
+               error ? error->message : "unknown");
+      g_clear_error (&error);
+      return NULL;
+    }
+
+  file = g_file_new_for_path (path);
+  *path_out = g_steal_pointer (&path);
+  *dir_out = g_steal_pointer (&dir);
+  return file;
+}
+
+static GdkContentProvider *
+provider_for_file (GFile *file)
+{
+  GdkFileList *list = gdk_file_list_new_from_array (&file, 1);
+  GValue value = G_VALUE_INIT;
+  GdkContentProvider *provider;
+
+  g_value_init (&value, GDK_TYPE_FILE_LIST);
+  g_value_take_boxed (&value, list);
+  provider = gdk_content_provider_new_for_value (&value);
+  g_value_unset (&value);
+  return provider;
+}
+
+static void
+demo_out_drag_cancel (GdkDrag *drag, GdkDragCancelReason reason, gpointer data)
+{
+  gdk_drag_drop_done (drag, FALSE);
   if (demo_out_drag == drag)
     g_clear_object (&demo_out_drag);
 }
@@ -1278,19 +1654,25 @@ demo_out_drag_drop (GdkDrag *drag, gpointer data)
 {
   g_print ("demo: drag out: dropped as 0x%x\n", gdk_drag_get_selected_action (drag));
 
-  /* Nothing to wait for: the payload was copied out of the page and is already
-   * in this process, so the transfer is complete as it stands. */
-  gdk_drag_drop_done (drag, TRUE);
+  /* drop-performed only says the destination accepted; it may still be
+   * reading. dnd-finished is where drop_done() and temp cleanup belong. */
 }
 
 static void
 demo_drag_out (NestedCompositor *compositor, const char *mime, GBytes *bytes,
                char **types, gpointer data)
 {
-  GdkDisplay *display = gdk_display_get_default ();
+  GdkDisplay *display = demo.window
+    ? gtk_widget_get_display (GTK_WIDGET (demo.window))
+    : gdk_display_get_default ();
   GdkSeat *seat = display ? gdk_display_get_default_seat (display) : NULL;
   GdkDevice *pointer = seat ? gdk_seat_get_pointer (seat) : NULL;
-  GdkSurface *surface = demo.view ? gtk_native_get_surface (GTK_NATIVE (demo.view)) : NULL;
+  /* ChromiumView is not a GtkNative; using it here returned a bogus surface and
+   * gdk_drag_begin() never started a drag. The toplevel window is the native
+   * whose surface owns the pointer grab. */
+  GdkSurface *surface = demo.window
+    ? gtk_native_get_surface (GTK_NATIVE (demo.window))
+    : NULL;
   GdkContentProvider *provider;
   GdkDrag *drag;
 
@@ -1307,19 +1689,65 @@ demo_drag_out (NestedCompositor *compositor, const char *mime, GBytes *bytes,
       return;
     }
 
+  /* A finished drag's file stays around for the target to finish opening; the
+   * next handover is where the previous one is retired. */
+  if (!demo_out_drag)
+    demo_out_clear_temp ();
+
   if (!pointer || !surface)
     {
       g_print ("demo: drag out: no pointer and window to carry it with\n");
       return;
     }
 
-  provider = gdk_content_provider_new_for_bytes (mime, bytes);
+  {
+    gboolean file_payload = g_str_has_prefix (mime, "image/") ||
+                            g_str_has_prefix (mime, "application/octet-stream");
+    GdkContentProvider *file_provider = NULL;
+    GFile *file = NULL;
+    char *temp_path = NULL;
+    char *temp_dir = NULL;
+
+    if (file_payload)
+      {
+        file = demo_out_write_temp (mime, bytes, &temp_path, &temp_dir);
+        if (file)
+          {
+            file_provider = provider_for_file (file);
+            g_object_unref (file);
+          }
+      }
+
+    if (file_provider)
+      {
+        g_autofree char *base = g_strdup (mime);
+        char *semi = strchr (base, ';');
+
+        if (semi)
+          *semi = '\0';
+        /* A file list is what a file manager accepts. The image bytes provider
+         * would be a second representation, but GdkContentProvider's union
+         * path is not needed for the file-manager case and was asserting on
+         * this non-serializable value; keep the file list alone. */
+        provider = file_provider;
+        demo_out_temp_path = temp_path;
+        demo_out_temp_dir = temp_dir;
+      }
+    else
+      {
+        provider = gdk_content_provider_new_for_bytes (mime, bytes);
+        g_free (temp_path);
+        g_free (temp_dir);
+      }
+  }
+
   drag = gdk_drag_begin (surface, pointer, provider, GDK_ACTION_COPY, 0, 0);
   g_object_unref (provider);
 
   if (!drag)
     {
       g_print ("demo: drag out: the compositor this window lives on refused it\n");
+      demo_out_clear_temp ();
       return;
     }
 
@@ -1327,9 +1755,14 @@ demo_drag_out (NestedCompositor *compositor, const char *mime, GBytes *bytes,
 
   g_clear_object (&demo_out_drag);
   demo_out_drag = drag;
-  g_signal_connect (drag, "drop", G_CALLBACK (demo_out_drag_drop), NULL);
-  g_signal_connect (drag, "failed", G_CALLBACK (demo_out_drag_end), NULL);
-  g_signal_connect (drag, "ended", G_CALLBACK (demo_out_drag_end), NULL);
+  /* GTK 4.18 spells these drop-performed / dnd-finished / cancel; the old
+   * drop / failed / ended names do not exist on GdkWaylandDrag. */
+  g_signal_connect (drag, "drop-performed",
+                    G_CALLBACK (demo_out_drag_drop), NULL);
+  g_signal_connect (drag, "dnd-finished",
+                    G_CALLBACK (demo_out_drag_end), NULL);
+  g_signal_connect (drag, "cancel",
+                    G_CALLBACK (demo_out_drag_cancel), NULL);
 }
 
 /* The other direction's report: a host that carried a drag in has to answer its
@@ -1598,6 +2031,7 @@ script_run_next (void)
                             !strcmp (line, "reload") || !strcmp (line, "reload-hard") ||
                             !strcmp (line, "stop") || !strcmp (line, "mute") ||
                             !strcmp (line, "unmute") ||
+                            !strncmp (line, "zoom-", 5) ||
                             !strncmp (line, "download-", 9) ||
                             !strncmp (line, "find", 4) ||
                             !strncmp (line, "menu-", 5) ||
@@ -1664,6 +2098,21 @@ script_run_next (void)
       else if (!strcmp (line, "stop"))
         {
           chromium_session_stop_loading (demo.session);
+          continue;
+        }
+      else if (!strcmp (line, "zoom-in"))
+        {
+          chromium_session_zoom (demo.session, "in");
+          continue;
+        }
+      else if (!strcmp (line, "zoom-out"))
+        {
+          chromium_session_zoom (demo.session, "out");
+          continue;
+        }
+      else if (!strcmp (line, "zoom-reset"))
+        {
+          chromium_session_zoom (demo.session, "reset");
           continue;
         }
       else if (!strcmp (line, "mute"))
@@ -2226,6 +2675,7 @@ window_close_request (GtkWindow *window, gpointer data)
    * shutdown, because ::closed updates the toolbar and the toolbar is what
    * dies next — returning FALSE hands the window to GtkApplication, which
    * destroys it and everything inside it. */
+  demo_out_clear_temp ();
   stop_everything ();
   forget_widgets ();
   return FALSE;
@@ -2238,6 +2688,7 @@ app_shutdown (GApplication *application, gpointer data)
    * timer, a terminating signal — has to stop the helper too: the socket name
    * is a fresh uuid per run, so a run that never stopped left one dead file
    * behind in $XDG_RUNTIME_DIR and nothing came back for it. */
+  demo_out_clear_temp ();
   stop_everything ();
   g_clear_object (&demo.session);
   g_clear_object (&demo.child);
@@ -2347,6 +2798,7 @@ activate (GApplication *application, gpointer data)
 
         gtk_event_controller_set_propagation_phase (keys, GTK_PHASE_CAPTURE);
         g_signal_connect (keys, "key-pressed", G_CALLBACK (find_key_pressed), NULL);
+        g_signal_connect (keys, "key-released", G_CALLBACK (find_key_released), NULL);
         gtk_widget_add_controller (GTK_WIDGET (demo.window), keys);
       }
     }

@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Custom context menu vs CEF</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; color: #16324f;
+    font: 15px/1.55 system-ui, "Noto Sans CJK SC", sans-serif;
+    background: linear-gradient(140deg, #f4f8ff, #e8f0fb 55%, #f7f2ff);
+  }
+  header { padding: 32px 40px 0; }
+  h1 { margin: 0 0 8px; font-size: 25px; letter-spacing: -0.02em; }
+  p { margin: 0; color: #5b7187; max-width: 70ch; }
+  .mode { margin-top: 12px; font-size: 12px; color: #4f6b88; }
+  .mode b { color: #0b5f9e; }
+  main { display: flex; gap: 32px; padding: 28px 40px 40px; align-items: flex-start; }
+  .stage {
+    width: 560px; min-height: 360px; padding: 22px;
+    background: rgba(255,255,255,.72); border: 1px solid #c9dcf1;
+    border-radius: 18px; box-shadow: 0 12px 30px rgba(24,60,100,.08);
+  }
+  .stage h2 { margin: 0 0 14px; font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: #6f87a1; }
+  a.link, img.photo {
+    display: block; margin: 0 0 22px; border-radius: 12px;
+    border: 1px solid #93bce0; background: #eaf4ff;
+  }
+  a.link {
+    width: 320px; padding: 16px 18px; color: #075b9b; font-weight: 650;
+    text-decoration: none; line-height: 1.3;
+  }
+  a.link:hover { background: #dcefff; }
+  img.photo { width: 320px; height: 150px; object-fit: cover; }
+  .blank {
+    height: 90px; margin-top: 8px; display: flex; align-items: center; justify-content: center;
+    border: 1px dashed #9db8d2; border-radius: 12px; color: #7189a1; font-size: 12px;
+  }
+  aside {
+    width: 340px; padding: 18px; border: 1px solid #c9dcf1; border-radius: 18px;
+    background: rgba(255,255,255,.6);
+  }
+  aside h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: #6f87a1; }
+  #status { min-height: 48px; color: #0b5f9e; font-weight: 600; }
+  #log {
+    margin: 12px 0 0; padding: 12px; height: 190px; overflow: auto;
+    background: #0c1a2a; color: #cfe6ff; border-radius: 10px;
+    font: 11px/1.6 ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap;
+  }
+  .custom-menu {
+    position: fixed; z-index: 50; min-width: 190px; padding: 6px;
+    background: #fff; border: 1px solid #b9cee4; border-radius: 10px;
+    box-shadow: 0 14px 38px rgba(15,45,80,.22);
+    font: 14px/1.2 system-ui, "Noto Sans CJK SC", sans-serif;
+  }
+  .custom-menu[hidden] { display: none; }
+  .custom-menu button[hidden] { display: none; }
+  .custom-menu button {
+    display: block; width: 100%; padding: 9px 10px; border: 0; border-radius: 7px;
+    background: transparent; color: #16324f; text-align: left; font: inherit; cursor: pointer;
+  }
+  .custom-menu button:hover { background: #e7f2ff; }
+  .custom-menu .hint { padding: 6px 10px 4px; color: #7a91a8; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>网页自定义右键菜单</h1>
+  <p>链接和图片调用 <code>preventDefault()</code> 并画一个 DOM 菜单；空白区域不拦截，交给 CEF 的原生菜单。用来观察两套菜单是否冲突。</p>
+  <div class="mode">模式：<b id="mode">仅网页菜单（preventDefault）</b> · 添加 <code>?both=1</code> 可看“网页菜单 + CEF 菜单”同时出现</div>
+</header>
+
+<main>
+  <section class="stage">
+    <h2>Right-click targets</h2>
+    <a class="link" id="link" href="https://example.com/cefnest-custom-menu">这是一个链接 · right-click me</a>
+    <img class="photo" id="photo" alt="right-click image"
+         src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='300'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%232f88d8'/%3E%3Cstop offset='1' stop-color='%239d8cff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='640' height='300' fill='url(%23g)'/%3E%3Ccircle cx='500' cy='80' r='110' fill='%23ffffff' opacity='.14'/%3E%3Ccircle cx='120' cy='250' r='160' fill='%23ffffff' opacity='.10'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' fill='white' font-family='sans-serif' font-size='34' font-weight='700'%3Eright-click image%3C/text%3E%3C/svg%3E">
+    <div class="blank" id="blank">空白区域：不拦截，CEF 原生菜单</div>
+  </section>
+
+  <aside>
+    <h2>Page log</h2>
+    <div id="status">等待右键…</div>
+    <pre id="log"></pre>
+  </aside>
+</main>
+
+<div class="custom-menu" id="custom-menu" role="menu" hidden>
+  <div class="hint" id="custom-menu-hint"></div>
+  <button data-action="open-link" role="menuitem">打开链接</button>
+  <button data-action="copy-link" role="menuitem">复制链接地址</button>
+  <button data-action="open-image" role="menuitem">查看图片地址</button>
+  <button data-action="copy-image" role="menuitem">复制图片地址</button>
+  <button data-action="close" role="menuitem">关闭</button>
+</div>
+
+<script>
+(() => {
+  const both = new URLSearchParams(location.search).get('both') === '1';
+  const menu = document.getElementById('custom-menu');
+  const hint = document.getElementById('custom-menu-hint');
+  const status = document.getElementById('status');
+  const log = document.getElementById('log');
+  const link = document.getElementById('link');
+  const photo = document.getElementById('photo');
+  let target = null;
+  let records = 0;
+
+  if (both)
+    document.getElementById('mode').textContent = '网页菜单 + CEF 菜单（没有 preventDefault）';
+
+  function note(text) {
+    records++;
+    log.textContent += (records > 1 ? '\n' : '') + text;
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function close() {
+    menu.hidden = true;
+    target = null;
+  }
+
+  function show(kind, x, y, prevented) {
+    target = kind;
+    hint.textContent = kind === 'link' ? '网页自定义 · 链接' : '网页自定义 · 图片';
+
+    // Show only the actions that make sense for this target.
+    menu.querySelectorAll('button[data-action]').forEach((button) => {
+      const action = button.dataset.action;
+      if (kind === 'link')
+        button.hidden = (action === 'open-image' || action === 'copy-image');
+      else
+        button.hidden = (action === 'open-link' || action === 'copy-link');
+    });
+
+    // Keep the menu inside the viewport.
+    const w = 220, h = 210;
+    menu.style.left = Math.min(x, innerWidth - w - 8) + 'px';
+    menu.style.top = Math.min(y, innerHeight - h - 8) + 'px';
+    menu.hidden = false;
+    status.textContent = (kind === 'link' ? '链接' : '图片') +
+      ' · 网页菜单已打开 · preventDefault=' + (prevented ? 'yes' : 'no');
+    note('custom-menu ' + kind + ' at ' + Math.round(x) + ',' + Math.round(y) +
+         ' preventDefault=' + (prevented ? 'yes' : 'no'));
+  }
+
+  document.addEventListener('contextmenu', (ev) => {
+    const linkTarget = ev.target.closest('a');
+    const imgTarget = ev.target.closest('img');
+    if (!linkTarget && !imgTarget) {
+      close();
+      note('contextmenu ' + (ev.target.id || ev.target.tagName.toLowerCase()) +
+           ' at ' + Math.round(ev.clientX) + ',' + Math.round(ev.clientY) +
+           ' -> native CEF menu');
+      return;
+    }
+
+    // In the default mode the page owns the menu; ?both=1 deliberately lets CEF
+    // open its own menu as well, so the two can be compared.
+    if (!both)
+      ev.preventDefault();
+
+    close();
+    show(linkTarget ? 'link' : 'image', ev.clientX, ev.clientY, !both);
+  }, { capture: true });
+
+  menu.addEventListener('click', (ev) => {
+    const button = ev.target.closest('button[data-action]');
+    if (!button)
+      return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const action = button.dataset.action;
+    let result = '';
+
+    if (action === 'close') {
+      result = 'closed';
+    } else if (!target) {
+      result = 'no-target';
+    } else if (target === 'link') {
+      if (action === 'open-link') {
+        window.location.href = link.href;
+        result = 'navigating';
+      } else if (action === 'copy-link') {
+        navigator.clipboard?.writeText(link.href).then(
+          () => note('action copy-link ok'), () => note('action copy-link failed'));
+        result = 'copy-link';
+      }
+    } else if (target === 'image') {
+      if (action === 'open-image') {
+        window.open(photo.src, '_blank');
+        result = 'open-image';
+      } else if (action === 'copy-image') {
+        navigator.clipboard?.writeText(photo.src).then(
+          () => note('action copy-image ok'), () => note('action copy-image failed'));
+        result = 'copy-image';
+      }
+    }
+
+    note('action ' + action + ' target=' + target + ' result=' + result);
+    status.textContent = '网页菜单动作：' + action + '（target=' + target + '）';
+    close();
+  });
+
+  document.addEventListener('pointerdown', (ev) => {
+    if (!menu.hidden && !menu.contains(ev.target))
+      close();
+  }, true);
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !menu.hidden) {
+      close();
+      status.textContent = '网页菜单已用 Esc 关闭';
+    }
+  });
+  window.addEventListener('scroll', close, { passive: true });
+})();
+</script>
+</body>
+</html>

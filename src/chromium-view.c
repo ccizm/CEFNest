@@ -315,7 +315,19 @@ chromium_view_on_unmap (GtkWidget *widget, gpointer data)
 static void
 chromium_view_size_allocate (GtkWidget *widget, int width, int height, int baseline)
 {
+  GtkWidget *child;
+
   chromium_view_push_size (CHROMIUM_VIEW (widget));
+
+  /* A GtkPopover is an out-of-flow child but still has to be allocated by its
+   * parent. The default GtkWidget size_allocate does not do that, and GTK's
+   * contract says the parent must call gtk_popover_present(): without it the
+   * popover surface keeps a stale/default height, which shows up as a scrolled
+   * menu and an input region that does not cover the rows. */
+  for (child = gtk_widget_get_first_child (widget); child;
+       child = gtk_widget_get_next_sibling (child))
+    if (GTK_IS_POPOVER (child))
+      gtk_popover_present (GTK_POPOVER (child));
 }
 
 static void

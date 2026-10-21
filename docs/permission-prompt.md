@@ -214,7 +214,7 @@ helper: permission 2 answered deny
 起步的**，冷 profile 下第一条 `load` 发在通道打开之前，整段脚本静默地什么都没做。现在 session 模式下
 脚本从 `::ready` 起步（`session_ready`），没有 helper 的纯 Wayland 客户端那条路才保留原来的定时器。
 
-`meson test -C builddir` 10/10、`test/audit-impl-slots.py` 0 uncovered，find / menu / download / dnd 四套门禁
+`meson test -C builddir` 14/14、`test/audit-impl-slots.py` 0 uncovered，find / menu / download / dnd 四套门禁
 在改完之后各自重跑全绿。
 
 ## 10. 还没做的

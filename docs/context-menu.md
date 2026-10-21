@@ -65,10 +65,10 @@ dismiss（`session: context menu dismissed by a navigation`），`real-nav` 门�
 **空串**、enabled 恒为 true；`type` 的拼写是 command / check / radio / separator / submenu / none。
 `IsVisibleAt(i)` 为 false 的行**不上线**——宿主看到的模型就是该显示的菜单。
 
-`CefContextMenuParams` 故意留在 helper 进程里。params 回答的是「模型为什么长成这样」，而模型已经把
-答案带过来了（可编辑 → 9 行，有选中 → 只有复制）。宿主**加自己的行**才真正需要 params
-（`link_url`、`src_url`、`media_type`、`has_image_contents`…），那是下一步的协议扩展；现在就上线，
-只会是没人在读的一堆字段。
+`CefContextMenuParams` 留在 helper 进程里，但不再是“只用来回答模型为什么长成这样”：helper 现在
+自己读 `GetTypeFlags()` / `GetMediaType()` / `GetLinkUrl()` / `GetSourceUrl()`，在默认模型前面插入
+链接/图片/媒体的浏览器动作（见 §4 和 §9）。宿主仍然只拿模型和 id，不知道 params；要由宿主加自己的
+行，才需要把 params 上线，那是下一条协议扩展。
 
 ## 4. 实测的模型：CEF 的默认模型很薄
 
@@ -76,15 +76,16 @@ dismiss（`session: context menu dismissed by a navigation`），`real-nav` 门�
 
 | 点在哪里 | 模型 |
 | --- | --- |
-| 链接 (140,40) | **5 行**：`返回(&B)`#100(off) `前进(&F)`#101(off) \| sep \| `打印(&P)…`#131 `查看网页源代码(&V)`#132 |
-| 图片 (120,130) | 和链接**一模一样**的 5 行 |
-| 空白页面 (400,300) | 还是那 5 行 |
+| 链接 (140,40) | **2 行**：在新窗口打开链接 / 复制链接地址（不再带返回、前进、打印、查看源代码） |
+| 图片 (120,130) | **3 行**：在新窗口打开图片 / 复制图片地址 / 图片另存为…（同上，不带通用导航行） |
+| 空白页面 (400,300) | 5 行：返回/前进(off) \| sep \| 打印 / 查看网页源代码 |
 | 文本框内 (100,250) | **9 行**：撤消/重做(off) \| sep \| 剪切/复制(off) 粘贴/粘贴为纯文本(on) \| sep \| 全选(on) |
 | 段落有选中 (400,45) | **1 行**：`复制(&C)`#113(on) |
 
-「复制链接地址」「图片另存为」**不在默认模型里**——那些是 cefsimple 自己的 handler 加的行，libcef 只
-给上面这些。所以原生菜单和 CEF 自画的菜单**内容完全一致**，这一点要在 README 里说清楚，否则用户会
-以为换了个更差的菜单。
+「复制链接地址」「图片另存为」**不在 libcef 的 Alloy 默认模型里**——CEF 的 `cef_menu_id_t` 根本没有
+这些 id。它们现在由 `HelperContextMenuHandler` 按 params 插入（id 26501–26507）：宿主只负责画行，
+选中后 `OnContextMenuCommand` 在 helper 里执行。图片保存复用 `StartDownload`，到宿主侧用
+`GtkFileDialog` 选择路径；`CEFNEST_DOWNLOAD_NO_SAVE_AS` 可以退回普通下载目录策略。
 
 两条测的时候绊到我的：
 
@@ -106,19 +107,36 @@ dismiss（`session: context menu dismissed by a navigation`），`real-nav` 门�
 `chromium_session_context_menu_select()` 只发 id，`flags` 走 0。等真需要区分修饰键时再加，不要先建
 一个没人用的参数。
 
-## 6. GtkPopoverMenu 这一侧
+## 6. 默认菜单这一侧
 
-- **分隔行 → `GMenu` 的 section 边界**，这是 GtkPopoverMenu 画一条线的唯一方式；`GMenu` 里没有
-  「separator 项」这种东西。
+- **普通 `GtkPopover` + `GtkBox`，不再用 `GtkPopoverMenu`**。后者把内容包进 `GtkScrolledWindow`，
+  还会给 section 留 padding；单行“复制”菜单因此底部空出一截，菜单行也点不中。现在每行是一个
+  `GtkButton`（flat），分隔行是 `GtkSeparator`，按钮的 `clicked` 直接调
+  `chromium_session_context_menu_select()`。行的数量决定菜单高度，没有隐藏的滚动容器。
+- **位置用 `gtk_widget_set_halign (popover, GTK_ALIGN_START)`**：`GTK_POS_BOTTOM` 按 popover 的
+  halign 选 anchor，默认 `CENTER` 会让菜单横跨指针；`START` 才是“菜单左边缘在指针上，向右展开”。
 - **`(&B)` → `(_B)`**，label 里真的下划线写两遍。不转义的话 `(&B)` 会原样打印在词后面（CEF 的快捷
   键写法是 GTK 的转义写法的子集，反过来不成立）。
-- check / radio / submenu 都当普通 command 行画。这份菜单**没有状态可标记**：每条命令之后模型会整个
-  重建，`checked` 因此只是信息，不是显示。fake 的 `mixed` 模型专门用来钉这个决定不会崩。
+- check / radio 当普通 command 行画；submenu 直接跳过——这个扁平 popover 不展开子菜单，空的 submenu
+  行只会留下一条空白。`MENU_ID_ADD_TO_DICTIONARY`（添加到字典）也在 helper 侧丢掉，因为内嵌组件
+  没有字典/语言设置；`MENU_ID_NO_SPELLING_SUGGESTIONS` 保留，但 label 里的字面 `&` 会被清掉，不再
+  以快捷键残渣的形式显示。这份菜单**没有状态可标记**：每条命令之后模型会整个重建，`checked` 因此
+  只是信息，不是显示。fake 的 `mixed` 模型专门用来钉 submenu 的跳过不会崩。
 - **popover 挂在 `ChromiumView` 上**（`gtk_widget_set_parent`）。GTK 的提示写着「父控件要支持 popover
   子控件，否则要在 `size_allocate` 里调 `gtk_popover_present()`」，而 `ChromiumView` 是个只有自定义
-  snapshot 的普通 GtkWidget——这是个没被验证过的假设，所以它是这次开工里我最怕的一条。**实测**：没有
-  警告、没有崩溃、菜单 `mapped=1`，尺寸随行数变（5 行 173x138、9 行 131x228、1 行 101x64，设备像素，
-  scale 1.25）。
+  snapshot 的普通 GtkWidget。**2026-10-21 的真实点击把这条假设打破了**：菜单会出现滚动条、显示不全，
+  行也点不中——popover 的 surface 高度和输入区域停在了旧值。现在 `ChromiumView::size_allocate()` 会
+  遍历 `GtkPopover` 子控件并调用 `gtk_popover_present()`，`session_menu_show()` 在 `popup` 前也补一次；
+  修复后 9 行编辑菜单完整显示，不再出现滚动条。此前的尺寸记录（5 行 173x138、9 行 131x228、
+  1 行 101x64）是**逻辑像素**（`gtk_widget_get_width()` 的单位，scale 1.25 下 surface 会更大），
+  不是设备像素。
+- **真实点击的另一个坑：`::closed` 可能先于行的动作到达**。`menu_popover_closed()` 原来会立刻把
+  `menu_pending` 清掉并发送 `context-menu-dismiss`；如果 GTK 先 popdown、后发按钮回调，同一次点击的
+  命令就丢了。现在 `::closed` 只安排一个 idle，由 `menu_release_later()` 在事件排空后决定：还 pending
+  才 dismiss；同一击已经 `select` 就什么都不发。
+- **popover 拆掉后把键盘焦点还给 `ChromiumView`。** 菜单显示期间它需要拿焦点；关闭/选中后如果焦点为空
+  或还停在旧菜单上，session 在 50 ms 后把它交还 view（若用户已经点了地址栏等别的控件则不动），否则
+  页面会保持最后一帧但再也收不到键盘。实测日志：菜单打开 `has-focus=0`，dismiss 后回到 `has-focus=1`。
 - Wayland 上 popover 是**它自己的 surface**，所以 `shot` 抓 view 抓不到它。这就是 session 要打那条
   `context menu mapped=1 size=...` debug 的原因：进程内唯一能证明「菜单到了屏幕」的地方，也是门禁
   断言它的地方。**但这条断言问的是显示器，不是菜单**：`./test/ci-session.sh` 那块没有输出设备的
@@ -159,19 +177,19 @@ dismiss（`session: context menu dismissed by a navigation`），`real-nav` 门�
 | `fake-empty` | 空模型和「只有分隔」模型都**不画**，但都答 dismiss；第三次 pick 没有可答的 |
 | `fake-auto` | helper 自己关掉请求 → 菜单下来，且**不发**第二条 dismiss；下一条请求照常 |
 | `fake-double` | 两条请求之间没回答 → 旧的静默放下，只有第二条被回答，全程没有 dismiss |
-| `real-models` | 链接 5 行 / 文本框 9 行 / 选中 1 行；`menu-pick 117` 后页面回读 `0-18` |
+| `real-models` | 链接 2 行 / 图片 3 行 / 文本框 9 行 / 选中 1 行；`menu-pick 117` 后页面回读 `0-18` |
 | `real-nav` | 导航关掉挂起的菜单；之后右键又有菜单，且 `返回` 变 enabled |
 
 `real-*` 那两次要等：载入 3 s，每次右键之后 1.2 s（菜单要画、要 mapped、要被 snapshot 一轮）。
 
 它开真窗口、跑真浏览器，所以和 `test/*.session`、`test/download-gate.sh` 同一档：手跑门禁，不进
-`meson test`。`meson test -C builddir` 10/10 与 `python3 test/audit-impl-slots.py builddir`
+`meson test`。`meson test -C builddir` 14/14 与 `python3 test/audit-impl-slots.py builddir`
 （0 uncovered）不受影响。
 
 ## 9. 还没做的
 
-- **params 不上线**，所以宿主加不了「复制链接地址 / 图片另存为」这类需要 URL 的行。这是这一条剩下
-  的全部实质工作，也是 §3 说的那次协议扩展。
+- **params 不上线**，宿主仍然不能自己加需要 `link_url` / `src_url` 的行；链接/图片/媒体的内置动作
+  由 helper 加了，宿主自定义行仍是下一步的协议扩展。
 - 菜单被 Esc 或外部点击关掉，走的是 GTK 自己的 grab，**没有无头办法测**：注入的右键直接进嵌套
   compositor，绕开外层 grab。`fake-auto` 测的是同一段收尾代码的另一条入口。
 - `flags`（中键、修饰键）在 API 上没开；check / radio 的勾选标记没画；submenu 不展开。

@@ -132,5 +132,5 @@ find-next         →           ordinal=1 → scrollTop 2751.199951171875
 再出现时先看 helper 的收尾时序。
 
 它开真窗口、跑真浏览器，所以和 `test/*.session`、`test/download-gate.sh` 同一档：手跑门禁，
-不进 `meson test`。`meson test -C builddir` 10/10 与
+不进 `meson test`。`meson test -C builddir` 14/14 与
 `python3 test/audit-impl-slots.py builddir`（0 uncovered）不受影响。

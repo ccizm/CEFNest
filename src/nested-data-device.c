@@ -171,6 +171,38 @@ pick_text_mime (GPtrArray *types)
   return types->len > 0 ? g_ptr_array_index (types, 0) : NULL;
 }
 
+/* A drag out of the page needs one representation, and for an image/file drag
+ * that representation is the file bytes, not Chromium's text/plain fallback.
+ * Text drags still prefer text/plain; URL/HTML are fallbacks for a drag that
+ * only offers a link. */
+static const char *
+pick_drag_mime (GPtrArray *types)
+{
+  gsize i, j;
+
+  for (i = 0; i < types->len; i++)
+    if (g_str_has_prefix (g_ptr_array_index (types, i), "image/") ||
+        g_str_has_prefix (g_ptr_array_index (types, i),
+                          "application/octet-stream"))
+      return g_ptr_array_index (types, i);
+
+  for (i = 0; i < G_N_ELEMENTS (text_mimes); i++)
+    for (j = 0; j < types->len; j++)
+      if (!strcmp ((const char *) g_ptr_array_index (types, j), text_mimes[i]))
+        return text_mimes[i];
+
+  for (i = 0; i < types->len; i++)
+    {
+      const char *type = g_ptr_array_index (types, i);
+
+      if (!strcmp (type, "text/uri-list") || !strcmp (type, "text/x-moz-url") ||
+          !strcmp (type, "text/html"))
+        return type;
+    }
+
+  return types->len > 0 ? g_ptr_array_index (types, 0) : NULL;
+}
+
 /* Whether the bytes of this source are the compositor's own: a drag the host
  * picked up outside the window and is carrying in has no client on the source
  * side, so nothing may be sent to it and everything asked for is answered from
@@ -1206,7 +1238,7 @@ nested_compositor_drag_take_out (NestedCompositor *self)
    * one payload. Asking before telling would be the other way round — a source
    * that has not been told which type is wanted is a source that has no reason
    * to answer. */
-  mime = pick_text_mime (source->mime_types);
+  mime = pick_drag_mime (source->mime_types);
   wl_data_source_send_target (source->resource, mime);
   clipboard_transfer_start (self, source, mime, drag_out_finish,
                             &self->drag_out_transfer);

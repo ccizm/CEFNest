@@ -1,0 +1,23 @@
+<!doctype html>
+<!-- Draggable image for the host's drag-out path. Chromium exposes the image
+     bytes as application/octet-stream;name="download.png"; the demo turns that
+     into a temp file and offers GdkFileList so a file manager can copy it. -->
+<html>
+<head><title>IMAGE-DND</title></head>
+<body style="margin:0;font:18px sans-serif;background:#fff;color:#036">
+  <p style="margin:20px 20px 8px">Drag the image to a file manager (or another app).</p>
+  <img id="img" draggable="true" width="320" height="220"
+       style="position:absolute;left:20px;top:70px;border:1px solid #369"
+       src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR42mM4YWODFTEMLQkAZZlQAS/gME0AAAAASUVORK5CYII=">
+  <pre id="log" style="position:absolute;left:20px;top:320px;margin:0;pointer-events:none"></pre>
+<script>
+  const img = document.getElementById('img');
+  const log = document.getElementById('log');
+  img.addEventListener('dragstart', (ev) => {
+    log.textContent = 'dragstart: ' +
+      Array.prototype.join.call(ev.dataTransfer.types, ' | ');
+  });
+  img.addEventListener('dragend', () => { log.textContent += ' | dragend'; });
+</script>
+</body>
+</html>

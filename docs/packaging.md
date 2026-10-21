@@ -199,7 +199,7 @@ demo: script 3 ok value="DND-PAGE|true"
 `helper:` 报的是安装位置而不是仍在旁边的开发树，`script … ok` 是一次走完的 JS 往返——它经过的第 3 位
 就是编译进来的那个默认值，这一 run 没有任何环境变量可以怪。横幅里还有 `helper: sandbox=on`、
 `CEF 154.0.34+g14c5a08+chromium-154.0.8037.98`，退出码 0。
-重构之后的回归：`meson test -C builddir` 13/13，`./test/dnd-gate.sh` 六次真 Chromium 运行、59 条断言全过。
+重构之后的回归：`meson test -C builddir` 14/14，`./test/dnd-gate.sh` 六次真 Chromium 运行、59 条断言全过。
 
 ## 9. 一条被实测否证的担心：cmake 的绝对路径会跟着搬过去吗
 
