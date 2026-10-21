@@ -324,6 +324,24 @@ pinned — it is a sawtooth. Measured run: 40 s, 19 samples, fd 379 → 378 (pea
 386), 898 MB, 18 of 20 readbacks answered, 0 leftovers.
 `docs/sandbox-policy.md` §7 and §8 are the numbers this keeps from going stale.
 
+`test/pixel-gate.sh` is the only gate that looks at pixels instead of at logs. Every
+other one reads a scroll position, a find count, a menu model — those say the page is
+alive, none of them say a pixel of it arrived. `test/pixel-page.html` fills the
+viewport with four flat fills, the demo dumps the view once, and the gate compares the
+middle of each quadrant against the rgb the CSS asked for, byte for byte, on both the
+composited widget and the client texture it was composited from. Inside
+`./test/ci-session.sh` the buffer comes back exactly `18,52,86 / 200,50,60 /
+43,138,62 / 232,232,232` (12 assertions, 14 s). On this laptop's real display a demo
+window that is behind other windows has no pixels to assert: its own
+`requestAnimationFrame` counter stops at 3 callbacks in 4.4 s and every dump is the
+buffer Chromium cleared and never painted (`#101828`, with the GPU on or with
+`CHROMIUM_HELPER_DISABLE_GPU=1`, GL or cairo renderer). A `js` step still answers that
+the page is visible and its background is red there, because CSS needs no frame — so
+the gate reports that as a skip next to the page's own answer rather than a regression,
+and asserts in full wherever the buffer does have content in it
+(`docs/headless-ci.md` §5). What this gate would have caught is the whole-page freeze of
+`docs/frame-clock-pacing.md` §8, which passed every log-based gate.
+
 `test/ci-session.sh` is the one gate runner that does not open a window on the
 desktop of whoever is sitting here. It starts a nested compositor — GNOME Shell 48
 in `--headless` mode, which is mutter with no output device — inside its own HOME,
@@ -343,8 +361,9 @@ takes the bus, the portal and gvfsd with it, and the run asserts that nothing is
 left behind. What it proves is that a real window maps, that a real Chromium
 session with the sandbox on loads a page and answers JavaScript, and that the
 existing gates run inside it: `find-gate.sh` (34 assertions), `permission-gate.sh`
-(58), `download-gate.sh` (46), `dnd-gate.sh` (59), `sandbox-soak.sh` (12) and
-`meson test` (13/13) all pass unchanged, and `menu-gate.sh` passes 45 of its 47 —
+(58), `download-gate.sh` (46), `dnd-gate.sh` (59), `pixel-gate.sh` (12),
+`sandbox-soak.sh` (12) and `meson test` (13/13) all pass unchanged, and
+`menu-gate.sh` passes 45 of its 47 —
 the two it skips are the ones that assert a popup surface reached a screen, which a
 display with no output device cannot do (`docs/headless-ci.md` §5). What it cannot
 prove is frame pacing: a display with no output device never runs a second GTK
@@ -353,9 +372,9 @@ documents, where a client left waiting on that cycle stopped animating and stopp
 painting. `docs/headless-ci.md` is the write-up.
 
 `test/ci-all.sh` is the one command that runs the whole battery through it — proof,
-`meson test` and all six gates, each in its own nested compositor, one verdict table
+`meson test` and all seven gates, each in its own nested compositor, one verdict table
 with the skipped checks counted in a column of their own, non-zero exit if anything
-failed. Measured on this laptop: 364 s for the eight runs — 257 gate assertions plus
+failed. Measured on this laptop: 381 s for the nine runs — 269 gate assertions plus
 `meson test` 13/13, with 2 checks skipped.
 
 ```bash

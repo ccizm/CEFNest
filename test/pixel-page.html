@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset=utf-8>
+<title>pixel-quadrants</title>
+<style>
+  /* Four flat fills, one per quadrant, chosen far apart in hue and in
+   * luminance so a buffer that never got painted cannot imitate them. */
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  .row { display: flex; height: 50%; }
+  .q { width: 50%; height: 100%; }
+</style>
+<div class="row">
+  <div class="q" style="background:#123456"></div>
+  <div class="q" style="background:#c8323c"></div>
+</div>
+<div class="row">
+  <div class="q" style="background:#2b8a3e"></div>
+  <div class="q" style="background:#e8e8e8"></div>
+</div>

@@ -7,7 +7,7 @@
 # at this machine, so the run can be left going: that is what makes it a release
 # gate rather than the manual gates README documents one by one.
 #
-#   ./test/ci-all.sh                 # everything: measured 364 s on this laptop
+#   ./test/ci-all.sh                 # everything: measured 381 s on this laptop
 #   ./test/ci-all.sh find menu       # only the named ones
 #   KEEP_LOGS=1 ./test/ci-all.sh     # keep each run's full transcript
 #
@@ -33,6 +33,7 @@ KEEP_LOGS=${KEEP_LOGS:-0}
 ALL_RUNS=(
   "proof||240"
   "unit|meson test -C builddir|240"
+  "pixel|./test/pixel-gate.sh|240"
   "find|./test/find-gate.sh|420"
   "permission|./test/permission-gate.sh|420"
   "download|./test/download-gate.sh|420"

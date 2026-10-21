@@ -5,9 +5,10 @@
 跑等于把窗口糊在使用者脸上，所以它们一直是"文档化的手动门禁"。
 结果：`test/ci-session.sh` 起一个 nested mutter（GNOME Shell 48.7 的 `--headless`
 模式），把任意命令塞进那个 Wayland 会话里跑；`test/ci-all.sh` 在它上面把 proof、
-`meson test` 和六条门禁串成一条命令的发布闸门。不装包、不用 sudo、跑完不留进程；
-六条门禁全绿，唯一要改的是 `menu-gate.sh` 里那两条"弹层上了屏"的断言——那块显示器
-没有屏可上，于是它们报成 skip（§5）。
+`meson test` 和七条门禁串成一条命令的发布闸门。不装包、不用 sudo、跑完不留进程；
+七条门禁全绿，唯一要改的是 `menu-gate.sh` 里那两条"弹层上了屏"的断言——那块显示器
+没有屏可上，于是它们报成 skip（§5）。新加的 `test/pixel-gate.sh` 是第一条不看日志、
+只看像素的门禁，它量得到的恰恰是这块显示器比真桌面多出来的东西（§5 有对照）。
 
 ## 1. 底座：这台机器上现成有什么
 
@@ -80,7 +81,7 @@ surface 真的上了屏"的门禁读它，把那几条报成 skip 并把数量�
 
 ### 全套：`test/ci-all.sh`
 
-发布闸门是**一条命令**，不是一个循环脚本：proof、`meson test`、六条门禁按顺序跑，
+发布闸门是**一条命令**，不是一个循环脚本：proof、`meson test`、七条门禁按顺序跑，
 每个 run 各起一个 nested mutter，跑完打印判定表，任何一条 FAIL 就整体非零退出。
 
 ```bash
@@ -98,10 +99,27 @@ KEEP_LOGS=1 ./test/ci-all.sh        # 保留每个 run 的完整 transcript
 
 证明：真窗口能在一块真 Wayland 显示器上映射；真 Chromium 会话（`sandbox=on`）能起、
 能加载、能回答 JS；`test/*.sh` 那套门禁不需要为 headless 加分支就能跑——除了断言
-"某块 surface 上了屏"的那两条（下一条）。
+"某块 surface 上了屏"的那两条（下一条）。还证明**页面的像素真的到了组件里**：
+`test/pixel-gate.sh` 在这块显示器上量到的是逐字节相符的颜色（见下）。
 
 不证明：
 
+- **像素在真桌面上**。这条是反向的：会话里 `dump` 出来的 PNG 就是页面要的颜色
+  （`test/pixel-page.html` 四块纯色 → 缓冲里 18,52,86 / 200,50,60 / 43,138,62 /
+  232,232,232，合成后的 widget 和原封不动的 client texture 两份都一样），而**同一个
+  二进制在同一块真桌面上量不到**。本机（i915、1.25 缩放）demo 窗口压在别的窗口后面时
+  读回恒为 `#101828` 一整块纯色，而那正是"清了却没画过"的缓冲：判据不是猜的——页面
+  自己的 `requestAnimationFrame` 计数 4.4s 里停在 3 次，同一个页面在会话里是 62/秒。
+  同一次运行里 `js` 那步照旧回答 `visibilityState=visible`、`hasFocus()=true`、
+  `backgroundColor=rgb(255, 0, 0)`、`innerWidth=1000`，但 CSS 不需要一帧，所以这条
+  **不能**当"画对了"的证据。变量拧过一遍都不变：dmabuf（默认）还是
+  `CHROMIUM_HELPER_DISABLE_GPU=1` 逼出来的 shm、gl 还是 `GSK_RENDERER=cairo`。
+  结论：**真桌面上一块没人看的窗口没有像素可断言**，`test/pixel-gate.sh` 读到纯色就报
+  skip 并把页面自己的回答留在日志旁边；缓冲里有内容就照常逐字节比对，换一台窗口在屏幕
+  上的机器，这条门禁一行不改就是全量执行。这里留一个待查：
+  `docs/frame-clock-pacing.md` §8 说遮挡的窗口现在只停 100ms，之后由兜底定时器接着画
+  ——这次量到的是 rAF 停在 3 次，要么看门狗没覆盖这条路径，要么是 Chromium 自己按可见
+  性把帧掐了。两种都值得知道。
 - **帧节拍**。headless mutter 没有输出设备，宿主 GDK 不再产生显示周期，客户端的帧
   由 `docs/frame-clock-pacing.md` §8 的兜底定时器驱动。时序类断言（回调延迟、
   p50/p99）在这里量的不是真实节奏。
@@ -118,18 +136,19 @@ KEEP_LOGS=1 ./test/ci-all.sh        # 保留每个 run 的完整 transcript
 
 ## 6. 实测
 
-`./test/ci-all.sh` 整套跑完 364 秒（T490，一次一条命令）。"断言"只数门禁自己的 ok
+`./test/ci-all.sh` 整套跑完 381 秒（T490，一次一条命令）。"断言"只数门禁自己的 ok
 行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 没有残留）：
 
 | run | 结果 | 断言 | 用时 |
 |---|---|---|---|
 | `proof`（无参数自检） | 通过 | 3 | 12s |
 | `unit`（`meson test -C builddir`） | 通过 | 13 OK | 16s |
-| `find` | 通过 | 34 | 33s |
+| `pixel` | 通过 | 12 | 14s |
+| `find` | 通过 | 34 | 32s |
 | `permission` | 通过 | 58 | 62s |
-| `download` | 通过 | 46 | 51s |
-| `dnd` | 通过 | 59 | 68s |
-| `menu` | 通过\* | 45（+2 skip） | 72s |
+| `download` | 通过 | 46 | 53s |
+| `dnd` | 通过 | 59 | 69s |
+| `menu` | 通过\* | 45（+2 skip） | 73s |
 | `soak` | 通过 | 12 | 50s |
 
 \* 那 2 条是"弹层上了屏"，这块显示器没有屏可上（§5）。
