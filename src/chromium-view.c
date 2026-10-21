@@ -8,6 +8,8 @@ struct _ChromiumView {
   GtkWidget parent_instance;
 
   NestedCompositor *compositor;
+  NestedSurface *target;      /* NULL means "whatever the compositor shows" */
+  gboolean shared;            /* compositor is owned by another view */
   gulong frame_handler;
   gulong scale_handler;
   gulong text_input_handler;
@@ -112,7 +114,9 @@ chromium_view_snapshot (GtkWidget *widget, GtkSnapshot *snapshot)
   GList *stack = NULL, *l;
 
   if (self->compositor)
-    stack = nested_compositor_get_paint_stack (self->compositor);
+    stack = self->target
+      ? nested_compositor_get_paint_stack_for (self->compositor, self->target)
+      : nested_compositor_get_paint_stack (self->compositor);
 
   if (!stack)
     {
@@ -343,6 +347,11 @@ chromium_view_on_map (GtkWidget *widget, gpointer data)
   ChromiumView *self = data;
   GdkSurface *surface;
 
+  /* A view sharing another view's compositor must not take the clipboard,
+   * frame clock or cursor away from the first one. */
+  if (self->shared)
+    return;
+
   /* While the view is on screen, the display's clipboard is the one the
    * clients copy to and paste from. */
   nested_compositor_set_clipboard (self->compositor,
@@ -384,6 +393,9 @@ static void
 chromium_view_on_unmap (GtkWidget *widget, gpointer data)
 {
   ChromiumView *self = CHROMIUM_VIEW (data);
+
+  if (self->shared)
+    return;
 
   chromium_view_unwatch_scale (self);
   nested_compositor_set_clipboard (self->compositor, NULL);
@@ -436,6 +448,9 @@ chromium_view_on_motion_enter (GtkEventControllerMotion *controller,
                                double x, double y, gpointer data)
 {
   ChromiumView *self = data;
+
+  if (self->target)
+    nested_compositor_set_input_surface (self->compositor, self->target);
 
   /* Record the entry position first: the seat sends enter with the coordinates
    * it last knew, and an entering pointer has not produced a motion event yet. */
@@ -505,6 +520,8 @@ chromium_view_on_button_event (GtkEventController *controller, GdkEvent *event,
 
   if (pressed)
     {
+      if (self->target)
+        nested_compositor_set_input_surface (self->compositor, self->target);
       /* Clicking the page has to focus it, or the keyboard would stay outside. */
       gtk_widget_grab_focus (GTK_WIDGET (self));
       g_debug ("input: button gdk=%u -> evdev=0x%x pressed", button, evdev);
@@ -777,6 +794,8 @@ chromium_view_on_has_focus_notify (GObject *object, GParamSpec *pspec, gpointer 
   gboolean focused = gtk_widget_has_focus (GTK_WIDGET (self));
 
   g_debug ("focus: has-focus=%d", focused);
+  if (focused && self->target)
+    nested_compositor_set_input_surface (self->compositor, self->target);
   nested_compositor_set_keyboard_active (self->compositor, focused);
 }
 
@@ -886,6 +905,52 @@ chromium_view_init (ChromiumView *self)
                            G_CALLBACK (chromium_view_on_has_focus_notify), self, 0);
   g_signal_connect_object (self, "map", G_CALLBACK (chromium_view_on_map), self, 0);
   g_signal_connect_object (self, "unmap", G_CALLBACK (chromium_view_on_unmap), self, 0);
+}
+
+static void
+chromium_view_use_shared_compositor (ChromiumView *self,
+                                     NestedCompositor *compositor,
+                                     NestedSurface *target)
+{
+  g_return_if_fail (CHROMIUM_IS_VIEW (self));
+  g_return_if_fail (NESTED_IS_COMPOSITOR (compositor));
+
+  if (self->frame_handler)
+    {
+      g_signal_handler_disconnect (self->compositor, self->frame_handler);
+      self->frame_handler = 0;
+    }
+  if (self->text_input_handler)
+    {
+      g_signal_handler_disconnect (self->compositor, self->text_input_handler);
+      self->text_input_handler = 0;
+    }
+
+  g_set_object (&self->compositor, compositor);
+  g_set_object (&self->target, target);
+  self->shared = TRUE;
+  self->frame_handler = g_signal_connect (self->compositor, "frame",
+                                          G_CALLBACK (chromium_view_on_frame), self);
+  self->text_input_handler =
+    g_signal_connect (self->compositor, "text-input-state",
+                      G_CALLBACK (chromium_view_im_on_text_input_state), self);
+}
+
+ChromiumView *
+chromium_view_new_shared (NestedCompositor *compositor, NestedSurface *target)
+{
+  ChromiumView *view = g_object_new (CHROMIUM_TYPE_VIEW, NULL);
+
+  chromium_view_use_shared_compositor (view, compositor, target);
+  return view;
+}
+
+void
+chromium_view_set_target_surface (ChromiumView *self, NestedSurface *target)
+{
+  g_return_if_fail (CHROMIUM_IS_VIEW (self));
+  g_set_object (&self->target, target);
+  gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 
 static void

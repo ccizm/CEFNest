@@ -63,6 +63,7 @@ enum {
   SIGNAL_WINDOW_FULLSCREEN_REQUEST,
   SIGNAL_DRAG_OUT,
   SIGNAL_DRAG_IN_END,
+  SIGNAL_TOPLEVELS_CHANGED,
   N_SIGNALS,
 };
 
@@ -1922,6 +1923,28 @@ surface_stack_append (NestedSurface *self, GList **stack)
     surface_stack_append (child, stack);
 }
 
+/* Same tree walk for a toplevel that is not the compositor's primary. A host
+ * window showing a standalone CEF window must draw its own surface even while
+ * another toplevel is primary. */
+static void
+surface_stack_append_target (NestedSurface *self, NestedSurface *root,
+                             GList **stack)
+{
+  NestedSurface *child;
+
+  if (!self->nested || !self->mapped || !self->texture)
+    return;
+  if (self->is_drag_icon &&
+      nested_compositor_drag_icon (self->nested) != self)
+    return;
+  (void) root;
+
+  *stack = g_list_append (*stack, g_object_ref (self));
+
+  wl_list_for_each (child, &self->popup_children, popup_link)
+    surface_stack_append_target (child, root, stack);
+}
+
 /* The topmost painted surface under a point in the widget's logical pixels.
  * Searching from the top of the stack down is what makes a click land on the
  * menu the client opened rather than on the page underneath it. */
@@ -1957,6 +1980,34 @@ nested_compositor_surface_at (NestedCompositor *self, double x, double y)
 
   return found;
 }
+NestedSurface *
+nested_compositor_surface_at_for (NestedCompositor *self, NestedSurface *root,
+                                  double x, double y)
+{
+  GList *stack = nested_compositor_get_paint_stack_for (self, root);
+  NestedSurface *icon = nested_compositor_drag_icon (self);
+  GList *l;
+  NestedSurface *found = NULL;
+
+  for (l = g_list_last (stack); l; l = l->prev)
+    {
+      NestedSurface *surface = l->data;
+      int left, above;
+
+      if (surface == icon)
+        continue;
+      nested_surface_get_position (surface, &left, &above);
+      if (x >= left && y >= above && x < left + surface->width &&
+          y < above + surface->height)
+        {
+          found = surface;
+          break;
+        }
+    }
+
+  g_list_free_full (stack, g_object_unref);
+  return found ? found : root;
+}
 
 /* The surface the keys belong to. A popup that asked for a grab is a client's
  * own idea of a modal — a context menu, a <select> list — and its code waits
@@ -1965,10 +2016,15 @@ nested_compositor_surface_at (NestedCompositor *self, double x, double y)
 NestedSurface *
 nested_compositor_keyboard_target (NestedCompositor *self)
 {
-  GList *stack = nested_compositor_get_paint_stack (self);
+  GList *stack;
   GList *l;
   NestedSurface *target = self->primary;
 
+  if (self->input_surface && self->input_surface->mapped &&
+      self->input_surface->wl_surface)
+    target = self->input_surface;
+
+  stack = nested_compositor_get_paint_stack_for (self, target);
   for (l = g_list_last (stack); l; l = l->prev)
     {
       NestedSurface *surface = l->data;
@@ -2032,26 +2088,34 @@ void
 nested_update_primary (NestedCompositor *self)
 {
   NestedSurface *candidate = NULL, *surface;
+  guint fingerprint = 0;
 
   wl_list_for_each (surface, &self->surfaces, nested_link)
     {
       if (surface->is_toplevel && surface->mapped && surface->texture)
         {
-          candidate = surface;
-          break;
+          if (!candidate)
+            candidate = surface;
+          fingerprint = fingerprint * 33u + (guint) (guintptr) surface;
         }
     }
 
-  if (candidate == self->primary)
+  if (candidate == self->primary && fingerprint == self->toplevels_fingerprint)
     return;
 
-  g_set_object (&self->primary, candidate);
-  g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_SURFACE]);
-  g_signal_emit (self, signals[SIGNAL_FRAME], 0);
+  if (candidate != self->primary)
+    {
+      g_set_object (&self->primary, candidate);
+      g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_SURFACE]);
+      g_signal_emit (self, signals[SIGNAL_FRAME], 0);
 
-  /* Input follows whatever is on screen: a client that maps a second surface,
-   * or unmaps the only one, must not keep the pointer. */
-  seat_retarget (self);
+      /* Input follows whatever is on screen: a client that maps a second
+       * surface, or unmaps the only one, must not keep the pointer. */
+      seat_retarget (self);
+    }
+
+  self->toplevels_fingerprint = fingerprint;
+  g_signal_emit (self, signals[SIGNAL_TOPLEVELS_CHANGED], 0);
 }
 
 void
@@ -2156,6 +2220,7 @@ nested_compositor_dispose (GObject *object)
   g_clear_pointer (&self->shm_budget, g_hash_table_destroy);
 
   g_clear_object (&self->primary);
+  g_clear_object (&self->input_surface);
   g_clear_object (&self->pointer_focus);
   g_clear_object (&self->keyboard_focus);
   g_clear_object (&self->cursor_pending);
@@ -2290,6 +2355,17 @@ nested_compositor_class_init (NestedCompositorClass *klass)
    * payload is not that answer — a page was measured asking for a host drag's
    * bytes the moment it was entered, whether or not it then dropped them.
    */
+  /**
+   * NestedCompositor::toplevels-changed:
+   *
+   * A mapped toplevel appeared or disappeared. Hosts that put each CEF window
+   * into its own GTK window use nested_compositor_get_toplevels() to bind a
+   * view to the new surface.
+   */
+  signals[SIGNAL_TOPLEVELS_CHANGED] =
+    g_signal_new ("toplevels-changed", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+
   signals[SIGNAL_DRAG_IN_END] =
     g_signal_new ("drag-in-end", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 2,
@@ -2452,6 +2528,53 @@ nested_compositor_get_surface (NestedCompositor *self)
 {
   g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), NULL);
   return self->primary;
+}
+
+void
+nested_compositor_set_input_surface (NestedCompositor *self,
+                                     NestedSurface *surface)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+  g_set_object (&self->input_surface, surface);
+  seat_retarget (self);
+}
+
+GList *
+nested_compositor_get_toplevels (NestedCompositor *self)
+{
+  GList *list = NULL;
+  NestedSurface *surface;
+
+  g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), NULL);
+  wl_list_for_each (surface, &self->surfaces, nested_link)
+    {
+      if (surface->is_toplevel && surface->mapped && surface->texture)
+        list = g_list_append (list, g_object_ref (surface));
+    }
+  return list;
+}
+
+/* The paint stack for one toplevel rather than for the compositor's current
+ * primary. Independent host windows need this: every CEF window is a toplevel
+ * on the same nested display, and a view must draw only its own. */
+GList *
+nested_compositor_get_paint_stack_for (NestedCompositor *self,
+                                       NestedSurface *surface)
+{
+  GList *stack = NULL;
+  NestedSurface *icon;
+
+  g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), NULL);
+  if (surface == NULL)
+    return nested_compositor_get_paint_stack (self);
+
+  surface_stack_append_target (surface, surface, &stack);
+
+  icon = nested_compositor_drag_icon (self);
+  if (icon && surface_is_painted (icon))
+    stack = g_list_append (stack, g_object_ref (icon));
+
+  return stack;
 }
 
 GList *

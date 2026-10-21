@@ -427,7 +427,7 @@ to report and the script engine says it itself (`docs/session-lifecycle.md` §4�
 and that the
 existing gates run inside it: `find-gate.sh` (34 assertions), `permission-gate.sh`
 (58), `download-gate.sh` (46), `dnd-gate.sh` (59), `pixel-gate.sh` (12),
-`primary-gate.sh` (2),
+`primary-gate.sh` (2), `multi-browser-gate.sh` (6),
 `sandbox-soak.sh` (12) and `meson test` (14/14) all pass unchanged, and
 `menu-gate.sh` passes 45 of its 47 —
 the two it skips are the ones that assert a popup surface reached a screen, which a
@@ -439,7 +439,7 @@ painting — and §9, where the fix for it silently froze the displays whose clo
 answer. `docs/headless-ci.md` is the write-up.
 
 `test/ci-all.sh` is the one command that runs the whole battery through it — proof,
-`meson test` and all eight gates, each in its own nested compositor, one verdict table
+`meson test` and all nine gates, each in its own nested compositor, one verdict table
 with the skipped checks counted in a column of their own, non-zero exit if anything
 failed. Measured on this laptop: 370 s for the nine runs — 273 gate assertions plus
 `meson test` 14/14, with 2 checks skipped.
@@ -561,7 +561,7 @@ They are the record of *why* the code is shaped like this:
 | `zoom-path.md` | CEF zoom levels, the half-level step, per-origin persistence, why `load-end` re-reports the level, and the demo's keyboard bindings |
 | `real-sites.md` | the five-site real-page inspection batch: one nested session per site, screenshots, JS readbacks, 3-second rAF counts, and the measured H.264/VP9 result |
 | `pdf-path.md` | the measured PDF-viewer result: thumbnails/page controls in the widget dump, and what was not tested (forms, annotations, printing) |
-| `multi-browser.md` | the single-helper browser registry, tab strip, standalone-window command, protocol ids, and what is still missing for separate host windows |
+| `multi-browser.md` | the single-helper browser registry, tab strip, standalone host windows, protocol ids, and the remaining per-window input/popup caveat |
 | `cnb-ci.md` | the cnb.cool entry point, the self-hosted runner it expects, and the one-time native/CEF prerequisites |
 | `structural-decisions.md` | the two items intentionally left for a product decision: browser routing for tabs/windows, and arm64/loong64 CEF supply |
 | `frame-metrics.md` | the compositor frame counter / script/env export and the software-path pool mmap + damage shadow copy |

@@ -38,6 +38,11 @@ typedef struct {
    * host window layer exists. */
   GtkWidget *tabs;
   GHashTable *tab_buttons;      /* int id -> GtkButton* */
+  GHashTable *browser_windows;  /* int id -> GtkWindow* (windowed only) */
+  GHashTable *browser_views;    /* int id -> ChromiumView* (windowed only) */
+  GHashTable *assigned_surfaces;/* NestedSurface* -> browser id */
+  GList *pending_window_ids;    /* windowed browsers waiting for a surface */
+  NestedSurface *tab_surface;   /* the tab CefWindow's toplevel */
   int active_browser;
 } Demo;
 
@@ -54,6 +59,8 @@ static uint64_t demo_frame_count (void);
 #endif
 
 static void session_ready (ChromiumSession *session, gpointer data);
+static void open_browser_window (int id);
+static void assign_browser_surfaces (void);
 static void session_browser_created (ChromiumSession *session, int id,
                                      const char *url, gboolean windowed,
                                      gpointer data);
@@ -198,6 +205,8 @@ session_browser_created (ChromiumSession *session, int id, const char *url,
     gtk_widget_add_css_class (button, "suggested-action");
   g_printerr ("demo: browser %d created %s%s\n", id, windowed ? "[window] " : "",
               shown);
+  if (windowed)
+    open_browser_window (id);
 }
 
 static void
@@ -237,6 +246,13 @@ session_browser_closed (ChromiumSession *session, int id, gpointer data)
       g_hash_table_remove (demo.tab_buttons, GINT_TO_POINTER (id));
       gtk_box_remove (GTK_BOX (demo.tabs), button);
     }
+  if (demo.browser_windows)
+    {
+      GtkWidget *window = g_hash_table_lookup (demo.browser_windows,
+                                               GINT_TO_POINTER (id));
+      if (window)
+        gtk_window_destroy (GTK_WINDOW (window));
+    }
   g_printerr ("demo: browser %d closed\n", id);
 }
 
@@ -258,6 +274,126 @@ new_window_clicked (GtkButton *button, gpointer data)
   if (demo.session)
     chromium_session_new_browser (demo.session, url && *url ? url : "about:blank",
                                   TRUE);
+}
+
+static void
+assign_browser_surfaces (void)
+{
+  NestedCompositor *compositor;
+  GList *tops, *l;
+
+  if (!demo.view)
+    return;
+  compositor = chromium_view_get_compositor (demo.view);
+  if (!compositor)
+    return;
+  if (!demo.assigned_surfaces)
+    demo.assigned_surfaces = g_hash_table_new (g_direct_hash, g_direct_equal);
+
+  tops = nested_compositor_get_toplevels (compositor);
+  for (l = tops; l; l = l->next)
+    {
+      NestedSurface *surface = l->data;
+      ChromiumView *view;
+      int id;
+
+      if (g_hash_table_contains (demo.assigned_surfaces, surface))
+        continue;
+
+      if (!demo.tab_surface)
+        {
+          demo.tab_surface = g_object_ref (surface);
+          chromium_view_set_target_surface (CHROMIUM_VIEW (demo.view), surface);
+          g_hash_table_insert (demo.assigned_surfaces, surface,
+                               GINT_TO_POINTER (demo.active_browser));
+          continue;
+        }
+
+      if (!demo.pending_window_ids)
+        continue;
+      id = GPOINTER_TO_INT (demo.pending_window_ids->data);
+      demo.pending_window_ids = g_list_delete_link (demo.pending_window_ids,
+                                                    demo.pending_window_ids);
+      view = g_hash_table_lookup (demo.browser_views, GINT_TO_POINTER (id));
+      if (view)
+        chromium_view_set_target_surface (view, surface);
+      g_hash_table_insert (demo.assigned_surfaces, surface, GINT_TO_POINTER (id));
+    }
+  g_list_free_full (tops, g_object_unref);
+}
+
+static void
+on_toplevels_changed (NestedCompositor *compositor, gpointer data)
+{
+  assign_browser_surfaces ();
+  gtk_widget_queue_draw (GTK_WIDGET (demo.view));
+}
+
+static void
+browser_window_destroyed (GtkWidget *widget, gpointer data)
+{
+  int id = GPOINTER_TO_INT (data);
+
+  if (!demo.browser_windows)
+    return;
+  g_hash_table_remove (demo.browser_windows, GINT_TO_POINTER (id));
+  g_hash_table_remove (demo.browser_views, GINT_TO_POINTER (id));
+}
+
+static void
+browser_window_active (GObject *object, GParamSpec *pspec, gpointer data)
+{
+  int id = GPOINTER_TO_INT (data);
+
+  if (gtk_window_is_active (GTK_WINDOW (object)) && demo.session)
+    chromium_session_select_browser (demo.session, id);
+}
+
+static void
+browser_window_close_request (GtkWindow *window, gpointer data)
+{
+  int id = GPOINTER_TO_INT (data);
+
+  if (demo.session)
+    chromium_session_close_browser (demo.session, id);
+  /* The helper's browser-closed event destroys the window; if it never comes,
+   * do not leave a dead window behind. */
+  gtk_window_destroy (window);
+}
+
+static void
+open_browser_window (int id)
+{
+  NestedCompositor *compositor;
+  ChromiumView *view;
+  GtkWidget *window;
+
+  if (!demo.view || !demo.browser_windows)
+    return;
+  compositor = chromium_view_get_compositor (demo.view);
+  if (!compositor)
+    return;
+
+  window = gtk_application_window_new (demo.app);
+  view = chromium_view_new_shared (compositor, NULL);
+  gtk_window_set_default_size (GTK_WINDOW (window), 900, 650);
+  gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (view));
+  gtk_window_set_title (GTK_WINDOW (window), "CEFNest window");
+  gtk_window_present (GTK_WINDOW (window));
+
+  g_hash_table_insert (demo.browser_windows, GINT_TO_POINTER (id), window);
+  g_hash_table_insert (demo.browser_views, GINT_TO_POINTER (id), view);
+  demo.pending_window_ids = g_list_append (demo.pending_window_ids,
+                                           GINT_TO_POINTER (id));
+  g_signal_connect (window, "destroy", G_CALLBACK (browser_window_destroyed),
+                    GINT_TO_POINTER (id));
+  g_signal_connect (window, "close-request",
+                    G_CALLBACK (browser_window_close_request),
+                    GINT_TO_POINTER (id));
+  g_signal_connect (window, "notify::is-active",
+                    G_CALLBACK (browser_window_active), GINT_TO_POINTER (id));
+  g_printerr ("demo: browser %d standalone window\n", id);
+  assign_browser_surfaces ();
 }
 
 static void
@@ -2995,6 +3131,8 @@ activate (GApplication *application, gpointer data)
   g_signal_connect (demo.window, "close-request", G_CALLBACK (window_close_request), NULL);
 
   demo.view = g_object_new (CHROMIUM_TYPE_VIEW, NULL);
+  demo.browser_windows = g_hash_table_new (g_direct_hash, g_direct_equal);
+  demo.browser_views = g_hash_table_new (g_direct_hash, g_direct_equal);
 
   if (chromium_view_get_compositor (demo.view))
     {
@@ -3002,6 +3140,8 @@ activate (GApplication *application, gpointer data)
 
       g_signal_connect (compositor, "notify::surface",
                         G_CALLBACK (on_surface_notify), NULL);
+      g_signal_connect (compositor, "toplevels-changed",
+                        G_CALLBACK (on_toplevels_changed), NULL);
 
       /* Connecting to ::drag-out is what tells the compositor that a host can
        * carry a page's drag out of the window. A run that wants the page to keep

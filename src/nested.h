@@ -127,6 +127,23 @@ uint64_t          nested_compositor_get_frame_count (NestedCompositor *self);
  * are not mapped, have no pixels yet, or hang off a different toplevel are left
  * out, so the stack is exactly what is on screen. */
 GList            *nested_compositor_get_paint_stack (NestedCompositor *self);
+/* Every mapped top-level surface, bottom-to-top in the compositor's own list
+ * order. The caller owns the list and its references. */
+GList            *nested_compositor_get_toplevels    (NestedCompositor *self);
+/* Route pointer/keyboard input to @surface instead of the primary. A NULL
+ * clears the override. This is what lets two GTK windows share one nested
+ * compositor: each view names the CEF toplevel it displays when it takes focus. */
+void              nested_compositor_set_input_surface (NestedCompositor *self,
+                                                       NestedSurface *surface);
+/* Hit-test inside one toplevel's own paint stack. Used when input is routed to
+ * a host window's surface rather than to the compositor's primary. */
+NestedSurface    *nested_compositor_surface_at_for     (NestedCompositor *self,
+                                                        NestedSurface *root,
+                                                        double x, double y);
+/* The paint stack belonging to one toplevel (itself and its popups), for a host
+ * that shows one CEF window per GTK window. Pass NULL for the primary stack. */
+GList            *nested_compositor_get_paint_stack_for (NestedCompositor *self,
+                                                         NestedSurface *surface);
 
 /* The nested compositor has no devices of its own: the embedding widget owns
  * the real pointer and keyboard and forwards their events here. Coordinates

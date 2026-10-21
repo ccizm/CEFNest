@@ -40,6 +40,7 @@ ALL_RUNS=(
   "dnd|./test/dnd-gate.sh|420"
   "menu|./test/menu-gate.sh|420"
   "primary|./test/primary-gate.sh|240"
+  "multi|./test/multi-browser-gate.sh|240"
   "soak|./test/sandbox-soak.sh|600"
 )
 # Real sites are external and change under us, so they are opt-in. The batch

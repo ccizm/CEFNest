@@ -342,6 +342,11 @@ seat_retarget (NestedCompositor *self)
 
   if (nested_compositor_drag_active (self))
     pointer_target = self->pointer_focus;
+  else if (self->input_surface && self->input_surface->mapped &&
+           self->input_surface->wl_surface)
+    pointer_target = nested_compositor_surface_at_for (self, self->input_surface,
+                                                       self->pointer_x,
+                                                       self->pointer_y);
   else if (self->pointer_wanted)
     pointer_target = nested_compositor_surface_at (self, self->pointer_x,
                                                    self->pointer_y);

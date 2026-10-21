@@ -291,6 +291,15 @@ struct _NestedCompositor {
   /* The window the widget draws its pointer in: whatever a client asks the
    * cursor to be, it is set on this GdkSurface. NULL until the view maps. */
   GdkSurface *cursor_target;
+  /* The toplevel whose host view last took input. With several GTK windows
+   * sharing one compositor, the pointer/keyboard target cannot be inferred from
+   * one global pointer coordinate; the view that owns the event names it. */
+  NestedSurface *input_surface;
+  /* Fingerprint of the mapped-toplevel set, folded into the same walk that
+   * picks the primary. ::toplevels-changed only fires when this moves: commits
+   * of an already-painted window call nested_update_primary() every frame and
+   * must not re-run the host's surface assignment with them. */
+  guint toplevels_fingerprint;
   /* wl_pointer.set_cursor names a surface, and the cursor only changes when
    * that surface commits. Set when the request arrives, applied again on the
    * commit, and dropped as soon as a buffer is current. */

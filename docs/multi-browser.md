@@ -19,19 +19,31 @@
 实测：两个 tab 切换时 dump 分别是 MENU-PAGE 和 spellcheck 页面；`new-window` 创建了第二个
 `CefWindow`，host 的同一个嵌套 view 会跟随当前合成器 primary。
 
-## 2. 还没完成：独立 host 窗口
+## 2. 独立 host 窗口
 
-`new-window` 在 helper 里确实是独立 `CefWindow`，但宿主目前还是一个 `ChromiumView`：
-一个嵌套 compositor 只把一个 primary surface 画到 widget 里。所以“独立窗口”现在表现为
-helper 的第二个 CEF toplevel 抢到同一个 host view，而不是第二个 GTK 窗口。
+已经落地：
 
-要真正收口需要：
+- `NestedCompositor::toplevels-changed` + `nested_compositor_get_toplevels()`；
+- `nested_compositor_get_paint_stack_for()` 允许一个 view 画指定 `NestedSurface`，而不是
+  compositor 的 primary；
+- `ChromiumView` 新增 `chromium_view_new_shared()` 和
+  `chromium_view_set_target_surface()`；
+- demo 在 `windowed` 的 `browser-created` 上开第二个 `GtkWindow`，用共享 compositor 的
+  view 绑定该 CEF window 的 surface；
+- 主 tab 窗口固定绑定 tab CEF window 的 surface，独立窗口不再抢主 view；
+- 实测：`new-window` 后主窗口仍显示 MENU-PAGE，第二个 GTK 窗口显示 spellcheck 页面；
+  `select-browser 1` 切回 tab 后主窗口内容保持正确。
 
-1. `ChromiumView` 支持共享同一个 `NestedCompositor`，并绑定到指定 `NestedSurface`；
-2. `NestedCompositor` 暴露 toplevel 列表/选择，把 host 窗口和 CEF 窗口对上；
-3. 每个 host 窗口有自己的输入焦点和 `ChromiumView`，但不能各自复制一份 compositor。
+输入也做了第一层：`nested_compositor_set_input_surface()` 让获得焦点/指针进入的
+`ChromiumView` 指定自己的 `NestedSurface`；pointer/keyboard 不再只跟随 compositor 的
+primary。`chromium_view_new_shared()` 的 view 在 motion/button/focus 时设置该 target。
 
-在此之前，标签形态是可用的；`new-window` 只是 helper/protocol 层的窗口。
+pointer 的 popup 命中也已用 target 自己的 paint stack 做 `surface_at`，所以独立窗口里的
+右键菜单/`<select>` 弹层能落到 target 的 popup 上，而不是主窗口。
+
+**仍待确认**：多窗口同时输入/焦点切换只有手工观察，没有像菜单那样的自动门禁；
+`linuxarm64` 也只有 fetch/install 路径，没有目标机实跑。文档把这两点列成验证缺口，不把
+它们说成已验证。
 
 ## 3. 协议
 
