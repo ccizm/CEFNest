@@ -133,14 +133,14 @@ follow the CEF stable `X.Y.Z`; see `docs/testing/cnb-ci.md`.
 ```bash
 # the real thing — no environment needed once cmake has built the helper,
 # because the library finds it (docs/guides/packaging.md §2)
-CHROMIUM_URL=https://example.com ./builddir/src/cefnest-demo
+CHROMIUM_URL=https://cnb.cool/yanzhiming/CEFNest ./builddir/src/cefnest-demo
 
 # no Chromium involved: name a helper that does not exist, and the demo falls
 # back to driving test/shm-client through the nested compositor
 CEFNEST_HELPER=/nonexistent-helper ./builddir/src/cefnest-demo
 
 # an installed one, from a prefix, with nothing in the environment
-CHROMIUM_URL=https://example.com $HOME/.local/cefnest-stage/bin/cefnest-demo
+CHROMIUM_URL=https://cnb.cool/yanzhiming/CEFNest $HOME/.local/cefnest-stage/bin/cefnest-demo
 ```
 
 `CHROMIUM_HELPER` still forces session mode with any value at all, which is how
@@ -157,6 +157,7 @@ of it is reproducible runs. The core:
 | `CHROMIUM_SESSION_SCRIPT` | a file of one command per line (`load`, `js`, `find`, `menu-pick`, `download-accept`, …); the full verb list and which steps need a helper session are in `docs/testing/overview.md` |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | grab the widget after N ms and write a PNG, then exit |
 | `CHROMIUM_HELPER_NO_SANDBOX` | set to exactly `1` to run the helper without Chromium's sandbox; anything else — including a typo — leaves it on (`docs/internals/sandbox-policy.md`) |
+| `CHROMIUM_USER_AGENT` | a default User-Agent baked into the helper's Chromium at startup; hosts put it in their own environment before `chromium_session_start()` — `examples/cefnest-useragent` switches it live by restarting the session |
 | `G_MESSAGES_DEBUG` | **space-separated** domains: `all`, or `nested chromium-view chromium-session` — a comma list matches nothing |
 
 The rest — download/permission/drag panel modes, clipboard and primary seeds,
@@ -178,7 +179,7 @@ are in `docs/guides/minimal-host.md`.
 
 ```bash
 ninja -C builddir
-CEFNEST_URL=https://example.com ./builddir/examples/cefnest-minimal
+CEFNEST_URL=https://cnb.cool/yanzhiming/CEFNest ./builddir/examples/cefnest-minimal
 ```
 
 ## Test
@@ -229,7 +230,7 @@ ChromiumSession  *session = chromium_session_new (NULL);
 
 chromium_session_set_view (session, CHROMIUM_VIEW (view));
 g_signal_connect (session, "load-end", G_CALLBACK (on_load_end), NULL);
-if (!chromium_session_start (session, "https://example.com", &error))
+if (!chromium_session_start (session, "https://cnb.cool/yanzhiming/CEFNest", &error))
   g_printerr ("%s\n", error->message);
 ```
 

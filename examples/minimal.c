@@ -29,7 +29,7 @@ on_activate (GtkApplication *app, gpointer data)
   gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (view));
   gtk_window_present (GTK_WINDOW (window));
 
-  if (!chromium_session_start (session, url && *url ? url : "https://example.com",
+  if (!chromium_session_start (session, url && *url ? url : "https://cnb.cool/yanzhiming/CEFNest",
                                &error))
     {
       g_warning ("cannot start the helper: %s", error->message);

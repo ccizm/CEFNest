@@ -124,14 +124,14 @@ CEF stable 的 `X.Y.Z`，详见 `docs/testing/cnb-ci.md`。
 ```bash
 # 正常运行 —— cmake 构建过 helper 后无需任何环境变量，
 # 因为库自己能找到它（docs/guides/packaging.md §2）
-CHROMIUM_URL=https://example.com ./builddir/src/cefnest-demo
+CHROMIUM_URL=https://cnb.cool/yanzhiming/CEFNest ./builddir/src/cefnest-demo
 
 # 不涉及 Chromium：指定一个不存在的 helper，demo 会回退到
 # 通过嵌套 compositor 驱动 test/shm-client
 CEFNEST_HELPER=/nonexistent-helper ./builddir/src/cefnest-demo
 
 # 已安装的版本，从 prefix 启动，无需任何环境变量
-CHROMIUM_URL=https://example.com $HOME/.local/cefnest-stage/bin/cefnest-demo
+CHROMIUM_URL=https://cnb.cool/yanzhiming/CEFNest $HOME/.local/cefnest-stage/bin/cefnest-demo
 ```
 
 `CHROMIUM_HELPER` 仍然是"设了任意值即强制 session 模式"，`test/fake-helper.py` 就是这样在
@@ -147,6 +147,7 @@ demo 的全部配置来自环境变量，因为它的目的就是可复现的运
 | `CHROMIUM_SESSION_SCRIPT` | 一行一条命令的脚本文件（`load`、`js`、`find`、`menu-pick`、`download-accept`……）；完整的动词清单以及"哪些步骤需要 helper session"见 `docs/testing/overview.md` |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | N ms 后抓取 widget 写一张 PNG 然后退出 |
 | `CHROMIUM_HELPER_NO_SANDBOX` | 恰好为 `1` 才不带 Chromium 沙箱运行 helper；其它任何值——包括手滑打错——都保持开启（`docs/internals/sandbox-policy.md`） |
+| `CHROMIUM_USER_AGENT` | 随 helper 启动烙进 Chromium 的默认 User-Agent；宿主在 `chromium_session_start()` 前放进自己的环境即可——`examples/cefnest-useragent` 演示运行中重启切换 |
 | `G_MESSAGES_DEBUG` | **空格分隔**的域：`all`，或 `nested chromium-view chromium-session`——逗号列表什么都匹配不到 |
 
 其余的——下载/权限/拖动的面板模式、剪贴板与主选区预置、无障碍、拼写检查、帧指标、窗口
@@ -165,7 +166,7 @@ demo 的全部配置来自环境变量，因为它的目的就是可复现的运
 
 ```bash
 ninja -C builddir
-CEFNEST_URL=https://example.com ./builddir/examples/cefnest-minimal
+CEFNEST_URL=https://cnb.cool/yanzhiming/CEFNest ./builddir/examples/cefnest-minimal
 ```
 
 ## 测试
@@ -213,7 +214,7 @@ ChromiumSession  *session = chromium_session_new (NULL);
 
 chromium_session_set_view (session, CHROMIUM_VIEW (view));
 g_signal_connect (session, "load-end", G_CALLBACK (on_load_end), NULL);
-if (!chromium_session_start (session, "https://example.com", &error))
+if (!chromium_session_start (session, "https://cnb.cool/yanzhiming/CEFNest", &error))
   g_printerr ("%s\n", error->message);
 ```
 

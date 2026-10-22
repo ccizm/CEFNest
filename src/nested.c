@@ -438,6 +438,9 @@ surface_clear_content (NestedSurface *self)
   if (!self->texture && !self->mapped)
     return;
 
+  g_debug ("nested: surface %p clears content (mapped=%d texture=%p)",
+           (void *) self, self->mapped, (void *) self->texture);
+
   was_primary = self->nested && self == self->nested->primary;
   was_painted = surface_is_painted (self);
 
@@ -1078,6 +1081,8 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
           g_object_unref (texture);
           self->natural_width = natural_width;
           self->natural_height = natural_height;
+          g_debug ("nested: surface %p commits %dx%d",
+                   (void *) self, natural_width, natural_height);
 
           wl_buffer_send_release (buffer->resource);
           repaint = TRUE;
@@ -2256,6 +2261,8 @@ nested_update_primary (NestedCompositor *self)
 
   if (candidate != self->primary)
     {
+      g_debug ("nested: primary %p -> %p",
+               (void *) self->primary, (void *) candidate);
       g_set_object (&self->primary, candidate);
 
       /* The primary changes because a surface went away or was destroyed, so the

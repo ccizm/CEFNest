@@ -225,6 +225,51 @@ std::string CacheDirectory(const std::string& name) {
   return dir;
 }
 
+// Chromium allows one browser process per cache directory: a second helper
+// pointed at the same profile prints "Opening in an existing browser session"
+// and exits — and the collision has also been observed to take the first
+// helper down with it. Hosts each listen on their own socket, so the socket
+// path is a stable per-instance identity: hash it into the directory name and
+// concurrent hosts stop sharing a profile. The same host keeps the same
+// directory across runs, so cookies and the GPU cache are still reused.
+std::string SocketCacheSuffix(const std::string& socket_path) {
+  uint64_t hash = 1469598103934665603ull;   // FNV-1a
+  for (unsigned char c : socket_path) {
+    hash ^= c;
+    hash *= 1099511628211ull;
+  }
+  char out[17];
+  snprintf(out, sizeof(out), "%016llx",
+           static_cast<unsigned long long>(hash));
+  return out;
+}
+
+// Hosts come and go — crashed ones especially — so their per-instance
+// directories would pile up forever without a sweep. Anything not touched for
+// two weeks goes. The current instance's directory is created moments later
+// and is brand new, so it is never its own victim; a failure to remove is
+// ignored: the sweep is best effort and must never block startup.
+void PruneStaleCacheDirs(const std::string& keep) {
+  std::string base = EnvOrEmpty("XDG_CACHE_HOME");
+  if (base.empty()) {
+    std::string home = EnvOrEmpty("HOME");
+    base = home.empty() ? "/tmp" : home + "/.cache";
+  }
+  std::error_code error;
+  const auto cutoff = std::filesystem::file_time_type::clock::now() -
+                      std::chrono::hours(24 * 14);
+  for (const auto& entry :
+       std::filesystem::directory_iterator(base, error)) {
+    const std::string name = entry.path().filename().string();
+    if (name.rfind("cefnest-helper-hosted-", 0) != 0 ||
+        entry.path().string() == keep)
+      continue;
+    auto last = std::filesystem::last_write_time(entry.path(), error);
+    if (!error && last < cutoff)
+      std::filesystem::remove_all(entry.path(), error);
+  }
+}
+
 class Control;
 
 Control* g_control = nullptr;
@@ -454,9 +499,16 @@ void SelectBrowserById(int id) {
     }
 
   BrowserSlot* slot = &it->second;
+  if (slot->browser == g_browser)
+    return;   /* already active: a focus echo must not re-enter through
+                 the RequestFocus below */
+
   BrowserSlot* old = FindSlotForBrowser(g_browser);
-  if (old && old != slot && old->view)
-    old->view->SetVisible(false);
+  if (old && old->view && old->window == slot->window)
+    old->view->SetVisible(false);   /* tabs share one window, so only one of
+                                       them can show; a browser in its own
+                                       window stays visible when another
+                                       window's browser activates */
 
   g_browser = slot->browser;
   g_window = slot->window;
@@ -1788,6 +1840,7 @@ class HelperClient : public CefClient,
                      public CefLifeSpanHandler,
                      public CefLoadHandler,
                      public CefDisplayHandler,
+                     public CefFocusHandler,
                      public CefKeyboardHandler,
                      public CefRequestHandler {
  public:
@@ -1798,6 +1851,7 @@ class HelperClient : public CefClient,
   }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
+  CefRefPtr<CefFocusHandler> GetFocusHandler() override { return this; }
   CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override {
@@ -1809,6 +1863,15 @@ class HelperClient : public CefClient,
   }
   CefRefPtr<CefPermissionHandler> GetPermissionHandler() override {
     return permission_handler_;
+  }
+
+  void OnGotFocus(CefRefPtr<CefBrowser> browser) override {
+    /* Clicking a page gives its view focus: make that browser the active one,
+     * so host-drawn menus and plain commands follow the window the user is
+     * looking at. The host sees ::browser-selected before the ::context-menu
+     * that the same click goes on to request. Idempotent by the guard in
+     * SelectBrowserById. */
+    SelectBrowserById(browser->GetIdentifier());
   }
 
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
@@ -2172,6 +2235,23 @@ class HelperWindowDelegate : public CefWindowDelegate {
       QuitOnce();
   }
 
+  void OnWindowActivationChanged(CefRefPtr<CefWindow> window,
+                                 bool active) override {
+    CEF_REQUIRE_UI_THREAD();
+    /* Activating a standalone window makes its browser the active one, so the
+     * host's menus and commands follow even when the click lands on window
+     * chrome instead of the page. The tab window needs no look-up: it shows
+     * the active browser by definition. */
+    if (!active || window == g_tab_window)
+      return;
+    for (auto& entry : g_browser_slots) {
+      if (entry.second.window.get() == window.get() && entry.second.browser) {
+        SelectBrowserById(entry.second.browser->GetIdentifier());
+        break;
+      }
+    }
+  }
+
   // The page is the whole window: the GTK host draws the chrome.
   bool IsFrameless(CefRefPtr<CefWindow> window) override { return true; }
   bool CanResize(CefRefPtr<CefWindow> window) override { return true; }
@@ -2327,9 +2407,15 @@ int main(int argc, char** argv) {
   if (!auto_quit.empty())
     g_auto_quit_ms = std::strtol(auto_quit.c_str(), nullptr, 10);
 
-  const std::string cache_dir =
-      CacheDirectory(socket_path.empty() ? "cefnest-helper"
-                                         : "cefnest-helper-hosted");
+  std::string cache_dir;
+  if (socket_path.empty()) {
+    // Standalone mode: one fixed profile, one instance at a time by design.
+    cache_dir = CacheDirectory("cefnest-helper");
+  } else {
+    cache_dir = CacheDirectory("cefnest-helper-hosted-" +
+                               SocketCacheSuffix(socket_path));
+    PruneStaleCacheDirs(cache_dir);
+  }
   fprintf(stderr, "helper: cache=%s\n", cache_dir.c_str());
 
   CefSettings settings;
@@ -2344,6 +2430,17 @@ int main(int argc, char** argv) {
   settings.external_message_pump = false;
   settings.log_severity = LOGSEVERITY_INFO;
   settings.persist_session_cookies = false;
+  // A host-wide default User-Agent. CEF bakes CefSettings.user_agent in at
+  // CefInitialize — the one chance to set it — so the host opts in by putting
+  // CHROMIUM_USER_AGENT in its own environment before chromium_session_start();
+  // the spawned helper inherits it. Changing the UA later means stopping the
+  // session and starting it again with a new value (see
+  // examples/useragent.c).
+  {
+    const std::string ua = EnvOrEmpty("CHROMIUM_USER_AGENT");
+    if (!ua.empty())
+      CefString(&settings.user_agent).FromString(ua);
+  }
   CefString(&settings.root_cache_path).FromString(cache_dir);
   CefString(&settings.cache_path).FromString(cache_dir + "/browser");
 

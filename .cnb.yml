@@ -10,6 +10,11 @@
 # uploads the same files as Release assets. Push a version tag such as
 # v154.0.34 to publish one.
 #
+# The asset names below are static (the attachment list cannot expand shell
+# variables), so they carry the version they pin: when the CEF package version
+# or CEFNEST_PACKAGE_RELEASE changes, update the names in BOTH lists to match
+# what scripts/build-packages.sh emits for those values.
+#
 # Neither pipeline runs test/ci-all.sh: the full gate needs
 # gnome-shell --headless and a prepared display/D-Bus session, which a hosted
 # runner does not have. That gate stays local or on a prepared self-hosted
@@ -20,22 +25,22 @@ main:
       stages:
         - name: build
           image: ubuntu:24.04
-          script: ./scripts/ci-build.sh
+          script: CEFNEST_PACKAGE_RELEASE=2 ./scripts/ci-build.sh
           timeout: 90m
         - name: upload build
           image: cnbcool/attachments:latest
           settings:
             attachments:
               - "./cefnest-build.tar.gz"
-              - "./dist/libcefnest0.deb"
-              - "./dist/libcefnest-dev.deb"
-              - "./dist/cefnest-demo.deb"
-              - "./dist/cefnest-helper.deb"
-              - "./dist/cefnest.rpm"
-              - "./dist/cefnest-devel.rpm"
-              - "./dist/cefnest-demo.rpm"
-              - "./dist/cefnest-helper.rpm"
-              - "./dist/cefnest-packages.tar.gz"
+              - "./dist/libcefnest0_154.0.34-2_amd64.deb"
+              - "./dist/libcefnest-dev_154.0.34-2_amd64.deb"
+              - "./dist/cefnest-demo_154.0.34-2_amd64.deb"
+              - "./dist/cefnest-helper_154.0.34-2_amd64.deb"
+              - "./dist/cefnest-154.0.34-2.x86_64.rpm"
+              - "./dist/cefnest-devel-154.0.34-2.x86_64.rpm"
+              - "./dist/cefnest-demo-154.0.34-2.x86_64.rpm"
+              - "./dist/cefnest-helper-154.0.34-2.x86_64.rpm"
+              - "./dist/cefnest-packages-154.0.34-2.tar.gz"
               - "./dist/SHA256SUMS"
 $:
   tag_push:
@@ -43,7 +48,7 @@ $:
       stages:
         - name: build
           image: ubuntu:24.04
-          script: ./scripts/ci-build.sh
+          script: CEFNEST_PACKAGE_RELEASE=2 ./scripts/ci-build.sh
           timeout: 90m
         - name: create release
           type: git:release
@@ -56,13 +61,13 @@ $:
           settings:
             attachments:
               - "./cefnest-build.tar.gz"
-              - "./dist/libcefnest0.deb"
-              - "./dist/libcefnest-dev.deb"
-              - "./dist/cefnest-demo.deb"
-              - "./dist/cefnest-helper.deb"
-              - "./dist/cefnest.rpm"
-              - "./dist/cefnest-devel.rpm"
-              - "./dist/cefnest-demo.rpm"
-              - "./dist/cefnest-helper.rpm"
-              - "./dist/cefnest-packages.tar.gz"
+              - "./dist/libcefnest0_154.0.34-2_amd64.deb"
+              - "./dist/libcefnest-dev_154.0.34-2_amd64.deb"
+              - "./dist/cefnest-demo_154.0.34-2_amd64.deb"
+              - "./dist/cefnest-helper_154.0.34-2_amd64.deb"
+              - "./dist/cefnest-154.0.34-2.x86_64.rpm"
+              - "./dist/cefnest-devel-154.0.34-2.x86_64.rpm"
+              - "./dist/cefnest-demo-154.0.34-2.x86_64.rpm"
+              - "./dist/cefnest-helper-154.0.34-2.x86_64.rpm"
+              - "./dist/cefnest-packages-154.0.34-2.tar.gz"
               - "./dist/SHA256SUMS"

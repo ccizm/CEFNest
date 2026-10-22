@@ -99,16 +99,73 @@ tar -czf cefnest-build.tar.gz -C artifact .
 CEF_VERSION=$(cat third_party/cef/dist/.cef-version)
 CHROMIUM_VERSION=$(cat third_party/cef/dist/.chromium-version)
 PACKAGE_VERSION=$(cat third_party/cef/dist/.cef-package-version)
+# Keep in lockstep with build-packages.sh: one revision per re-release.
+RELEASE=${CEFNEST_PACKAGE_RELEASE:-1}
+V="$PACKAGE_VERSION-$RELEASE"
 cat > RELEASE-NOTES.md <<EOF
-CEFNest packages built against CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION).
+# CEFNest $V
 
-Package version: $PACKAGE_VERSION-1.
+CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION)
 
-Debian:
-  libcefnest0, libcefnest-dev, cefnest-demo, cefnest-helper
+## 中文
 
-RPM:
-  cefnest, cefnest-devel, cefnest-demo, cefnest-helper
+本版变更：
+
+- 新增自定义 User-Agent：宿主把 \`CHROMIUM_USER_AGENT\` 放进环境即可，HTTP 头与页面 JS 同时生效（examples/cefnest-useragent 演示运行中切换）。
+- 修复窗口焦点与选中：点击页面/窗口即切换 browser-selected，右键菜单落在正确的窗口；切标签不再藏掉独立窗口。
+- 修复并发宿主的 CEF 缓存冲突：缓存目录按宿主 socket 派生，多宿主并发互不影响。
+- 新增 11 个完整示例（examples/）：单页浏览器、多标签、多窗口、JS 控制台、查找条、下载、自绘菜单、权限、错误恢复、帧率观测、UA 切换。
+- 打包产物统一携带版本与修订号（$V）。
+
+### 附件说明
+
+| 文件 | 说明 |
+| --- | --- |
+| cefnest-build.tar.gz | 完整构建产物（库、demo、全部示例、helper），可整体解包运行 |
+| libcefnest0_${V}_amd64.deb | 运行库：合成器、GTK 4 部件与控制通道 |
+| libcefnest-dev_${V}_amd64.deb | 开发文件：头文件、链接用 .so、cefnest.pc |
+| cefnest-helper_${V}_amd64.deb | helper 与完整 CEF 运行时（约 1.5 GB；只调库可不装） |
+| cefnest-demo_${V}_amd64.deb | 演示浏览器与回退客户端 shm-client |
+| cefnest-$V.x86_64.rpm | 运行库（rpm） |
+| cefnest-devel-$V.x86_64.rpm | 开发文件（rpm） |
+| cefnest-helper-$V.x86_64.rpm | helper 与 CEF 运行时（rpm） |
+| cefnest-demo-$V.x86_64.rpm | demo 与 shm-client（rpm） |
+| cefnest-packages-$V.tar.gz | 除 helper 外 6 个包的归档 |
+| SHA256SUMS | 全部产物的 SHA-256 校验清单 |
+
+---
+
+## English
+
+Highlights of this release:
+
+- Custom User-Agent: put \`CHROMIUM_USER_AGENT\` in the host environment and the
+  helper bakes it into CefSettings.user_agent — HTTP headers and page JS alike
+  (examples/cefnest-useragent switches it live).
+- Window focus and selection: clicks move browser-selected, so context menus
+  land in the right window; tab switches no longer blank independent windows.
+- Concurrent-host CEF cache collisions are gone: the cache directory is derived
+  from the host socket path.
+- 11 new complete examples under examples/: browser, tabs, windows, JS console,
+  find bar, downloads, custom menus, permissions, error recovery, frame
+  observation, UA switching.
+- Every artifact carries the version and revision ($V).
+
+### Assets
+
+| File | Description |
+| --- | --- |
+| cefnest-build.tar.gz | Full build tree (library, demo, all examples, helper); unpack and run |
+| libcefnest0_${V}_amd64.deb | Runtime library: compositor, GTK 4 widget, control channel |
+| libcefnest-dev_${V}_amd64.deb | Development files: headers, link .so, cefnest.pc |
+| cefnest-helper_${V}_amd64.deb | Helper and full CEF runtime (~1.5 GB; skippable for library-only hosts) |
+| cefnest-demo_${V}_amd64.deb | Demo browser and the shm-client fallback |
+| cefnest-$V.x86_64.rpm | Runtime library (rpm) |
+| cefnest-devel-$V.x86_64.rpm | Development files (rpm) |
+| cefnest-helper-$V.x86_64.rpm | Helper and CEF runtime (rpm) |
+| cefnest-demo-$V.x86_64.rpm | Demo and shm-client (rpm) |
+| cefnest-packages-$V.tar.gz | Archive of the six packages except the helper |
+| SHA256SUMS | SHA-256 manifest for every artifact |
 
 The helper packages carry the CEF runtime; cefnest-demo depends on
 cefnest-helper, and libcefnest0 recommends it.

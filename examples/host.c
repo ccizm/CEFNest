@@ -23,7 +23,7 @@
  * ::browser-created, clicking it is select_browser(), and CEF assigns the ids, so
  * a host keys its own map from the signal instead of guessing the order.
  *
- *   ./builddir/examples/cefnest-host https://example.com
+ *   ./builddir/examples/cefnest-host https://cnb.cool/yanzhiming/CEFNest
  *
  * and with no keyboard at all, which is how this file was tested:
  *
@@ -1043,7 +1043,7 @@ on_activate (GtkApplication *app, gpointer data)
   gtk_window_present (GTK_WINDOW (host.window));
 
   if (!chromium_session_start (host.session,
-                               url && *url ? url : "https://example.com",
+                               url && *url ? url : "https://cnb.cool/yanzhiming/CEFNest",
                                &error))
     {
       note ("cannot start the helper: %s",

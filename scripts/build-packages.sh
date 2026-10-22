@@ -36,6 +36,12 @@ fi
 [ -n "$CEF_VERSION" ] || CEF_VERSION=unknown
 [ -n "$CHROMIUM_VERSION" ] || CHROMIUM_VERSION=unknown
 
+# The package revision: same CEF, rebuilt sources. Package managers treat
+# 154.0.34-1 and 154.0.34-2 as different versions, so a re-release must bump
+# this — the CNB pipeline exports CEFNEST_PACKAGE_RELEASE for tag builds
+# (.cnb.yml). Local builds default to 1.
+RELEASE=${CEFNEST_PACKAGE_RELEASE:-1}
+
 HELPER_BUILD="$ROOT/helper/build/Release"
 [ -x "$HELPER_BUILD/cefnest-helper" ] || {
   echo "build-packages: $HELPER_BUILD/cefnest-helper is missing" >&2
@@ -161,7 +167,7 @@ deb_control() {
 
   {
     printf 'Package: %s\n' "$_dc_package"
-    printf 'Version: %s-1\n' "$VERSION"
+    printf 'Version: %s-%s\n' "$VERSION" "$RELEASE"
     printf 'Architecture: %s\n' "$DEB_ARCH"
     printf 'Maintainer: CEFNest packagers <cefnest@example.invalid>\n'
     printf 'Installed-Size: %s\n' "$_dc_size"
@@ -184,17 +190,17 @@ deb_control "$DEB_LIB_DIR" libcefnest0 libs \
   "CEFNest shared library" \
   "The compositor, the GTK 4 widget and the control channel that let a GTK
 application composite a page rendered by Chromium." \
-  "cefnest-helper (= $VERSION-1)"
+  "cefnest-helper (= $VERSION-$RELEASE)"
 
 deb_control "$DEB_DEV_DIR" libcefnest-dev libdevel \
-  "libcefnest0 (= $VERSION-1), libgtk-4-dev (>= 4.14), libwayland-dev, libxkbcommon-dev, libjson-glib-dev, libgbm-dev, libdrm-dev" \
+  "libcefnest0 (= $VERSION-$RELEASE), libgtk-4-dev (>= 4.14), libwayland-dev, libxkbcommon-dev, libjson-glib-dev, libgbm-dev, libdrm-dev" \
   "CEFNest development files" \
   "Headers, the unversioned library link and the pkg-config file needed to
 build a host application against CEFNest." \
   ""
 
 deb_control "$DEB_DEMO_DIR" cefnest-demo utils \
-  "libc6 (>= 2.39), libcefnest0 (= $VERSION-1), cefnest-helper (= $VERSION-1), libgtk-4-1 (>= 4.14), libwayland-client0, libxkbcommon0, libjson-glib-1.0-0 | libjson-glib-1.0-0t64, libgbm1, libdrm2" \
+  "libc6 (>= 2.39), libcefnest0 (= $VERSION-$RELEASE), cefnest-helper (= $VERSION-$RELEASE), libgtk-4-1 (>= 4.14), libwayland-client0, libxkbcommon0, libjson-glib-1.0-0 | libjson-glib-1.0-0t64, libgbm1, libdrm2" \
   "CEFNest demo and headless test client" \
   "The demo window and shm-client, the fallback client it drives when no CEF
 helper is installed." \
@@ -207,22 +213,15 @@ from its own directory. Built for Chromium $CHROMIUM_VERSION; about 1.5 GB
 installed." \
   ""
 
-DEB_LIB="libcefnest0_${VERSION}-1_${DEB_ARCH}.deb"
-DEB_DEV="libcefnest-dev_${VERSION}-1_${DEB_ARCH}.deb"
-DEB_DEMO="cefnest-demo_${VERSION}-1_${DEB_ARCH}.deb"
-DEB_HELPER="cefnest-helper_${VERSION}-1_${DEB_ARCH}.deb"
+DEB_LIB="libcefnest0_${VERSION}-${RELEASE}_${DEB_ARCH}.deb"
+DEB_DEV="libcefnest-dev_${VERSION}-${RELEASE}_${DEB_ARCH}.deb"
+DEB_DEMO="cefnest-demo_${VERSION}-${RELEASE}_${DEB_ARCH}.deb"
+DEB_HELPER="cefnest-helper_${VERSION}-${RELEASE}_${DEB_ARCH}.deb"
 
 dpkg-deb --build -Zxz -z1 --root-owner-group "$DEB_LIB_DIR" "$DIST/$DEB_LIB"
 dpkg-deb --build -Zxz -z1 --root-owner-group "$DEB_DEV_DIR" "$DIST/$DEB_DEV"
 dpkg-deb --build -Zxz -z1 --root-owner-group "$DEB_DEMO_DIR" "$DIST/$DEB_DEMO"
 dpkg-deb --build -Zxz -z1 --root-owner-group "$DEB_HELPER_DIR" "$DIST/$DEB_HELPER"
-
-# Fixed names for the CNB attachment list: the version is in the package
-# metadata, and the attachment list cannot expand a shell variable.
-cp "$DIST/$DEB_LIB"    "$DIST/libcefnest0.deb"
-cp "$DIST/$DEB_DEV"    "$DIST/libcefnest-dev.deb"
-cp "$DIST/$DEB_DEMO"   "$DIST/cefnest-demo.deb"
-cp "$DIST/$DEB_HELPER" "$DIST/cefnest-helper.deb"
 
 # ---------------------------------------------------------------------------
 # RPM
@@ -254,7 +253,7 @@ cp -al "$PKG_DEB/usr/libexec/cefnest/$HELPER_ARCH" \
 cat > "$RPMBUILD/SPECS/cefnest.spec" <<EOF
 Name: cefnest
 Version: $VERSION
-Release: 1
+Release: $RELEASE
 Summary: GTK 4 widget that shows a page rendered by Chromium
 License: LGPL-2.1-only
 URL: https://cnb.cool/yanzhiming/CEFNest
@@ -349,34 +348,31 @@ rpmbuild -bb --noclean \
   --define "_cefnest_pkgroot $PKG_RPM" \
   "$RPMBUILD/SPECS/cefnest.spec"
 
-RPM_LIB="cefnest-${VERSION}-1.${RPM_ARCH}.rpm"
-RPM_DEV="cefnest-devel-${VERSION}-1.${RPM_ARCH}.rpm"
-RPM_HELPER="cefnest-helper-${VERSION}-1.${RPM_ARCH}.rpm"
-RPM_DEMO="cefnest-demo-${VERSION}-1.${RPM_ARCH}.rpm"
+RPM_LIB="cefnest-${VERSION}-${RELEASE}.${RPM_ARCH}.rpm"
+RPM_DEV="cefnest-devel-${VERSION}-${RELEASE}.${RPM_ARCH}.rpm"
+RPM_HELPER="cefnest-helper-${VERSION}-${RELEASE}.${RPM_ARCH}.rpm"
+RPM_DEMO="cefnest-demo-${VERSION}-${RELEASE}.${RPM_ARCH}.rpm"
 
 cp "$RPMBUILD/RPMS/$RPM_ARCH/$RPM_LIB"    "$DIST/$RPM_LIB"
 cp "$RPMBUILD/RPMS/$RPM_ARCH/$RPM_DEV"    "$DIST/$RPM_DEV"
 cp "$RPMBUILD/RPMS/$RPM_ARCH/$RPM_HELPER" "$DIST/$RPM_HELPER"
 cp "$RPMBUILD/RPMS/$RPM_ARCH/$RPM_DEMO"   "$DIST/$RPM_DEMO"
 
-cp "$DIST/$RPM_LIB"    "$DIST/cefnest.rpm"
-cp "$DIST/$RPM_DEV"    "$DIST/cefnest-devel.rpm"
-cp "$DIST/$RPM_HELPER" "$DIST/cefnest-helper.rpm"
-cp "$DIST/$RPM_DEMO"   "$DIST/cefnest-demo.rpm"
-
 # ---------------------------------------------------------------------------
 # Archive, checksums and a summary
 # ---------------------------------------------------------------------------
 
+TARBALL="cefnest-packages-${VERSION}-${RELEASE}.tar.gz"
+
 # The helper packages are hundreds of megabytes; putting them inside this
 # tarball would only compress them a second time. They are separate attachments.
-tar -czf "$DIST/cefnest-packages.tar.gz" -C "$DIST" \
+tar -czf "$DIST/$TARBALL" -C "$DIST" \
   "$DEB_LIB" "$DEB_DEV" "$DEB_DEMO" \
   "$RPM_LIB" "$RPM_DEV" "$RPM_DEMO"
 
 (
   cd "$DIST"
-  sha256sum ./*.deb ./*.rpm ./cefnest-packages.tar.gz > SHA256SUMS
+  sha256sum ./*.deb ./*.rpm "./$TARBALL" > SHA256SUMS
 )
 
 echo "== packages in $DIST"
