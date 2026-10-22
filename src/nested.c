@@ -1375,15 +1375,8 @@ shm_create_pool (struct wl_client *client, struct wl_resource *resource,
   pool->resource = pool_resource;
 }
 
-static void
-shm_release (struct wl_client *client, struct wl_resource *resource)
-{
-  wl_resource_destroy (resource);
-}
-
 static const struct wl_shm_interface shm_impl = {
   .create_pool = shm_create_pool,
-  .release = shm_release,
 };
 
 static void
