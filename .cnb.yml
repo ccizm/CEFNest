@@ -13,7 +13,7 @@ main:
         - name: build
           image: ubuntu:24.04
           script: |
-            set -euo pipefail
+            set -eu
             export DEBIAN_FRONTEND=noninteractive
             SUDO=""
             if [ "$(id -u)" != 0 ]; then SUDO=sudo; fi
