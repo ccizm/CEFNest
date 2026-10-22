@@ -25,3 +25,9 @@ option(
   value: true,
   description: 'Install cefnest-demo, which is the sample app and every test/*.sh gate driver.',
 )
+option(
+  'cefnest-version',
+  type: 'string',
+  value: '0.0.1',
+  description: 'Library, pkg-config and package version. The CNB package build sets this to the CEF stable X.Y.Z it bundles.',
+)

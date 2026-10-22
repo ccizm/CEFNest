@@ -22,7 +22,7 @@ libcefnest = shared_library(
   include_directories: gen_inc,
   dependencies: [ gtk_dep, json_dep, wl_server_dep, xkb_dep, gbm_dep, drm_dep,
                   threads_dep, m_dep ],
-  version: meson.project_version(),
+  version: get_option('cefnest-version'),
   soversion: '0',
   install: true,
 )
@@ -43,6 +43,7 @@ install_headers(
 
 pkgconfig.generate(
   libcefnest,
+  version: get_option('cefnest-version'),
   name: 'cefnest',
   description: 'A GTK 4 widget that shows a page rendered by real Chromium, composited through a Wayland compositor running in the same process',
   subdirs: 'cefnest',

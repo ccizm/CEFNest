@@ -40,10 +40,10 @@ KEEP_LOGS=${KEEP_LOGS:-0}
 if [ "${CI_SKIP_HELPER_BUILD:-0}" != 1 ]; then
   # third_party/ is not in git: a runner can keep an old CEF distribution
   # forever. Refuse to grade a helper built against something other than the
-  # version fetch-cef.sh pins.
+  # version fetch-cef.sh recorded for this tree.
   echo "== cef pin"
   if ! bash "$ROOT/scripts/check-cef-pin.sh"; then
-    echo "ci all: the CEF distribution does not match scripts/fetch-cef.sh" >&2
+    echo "ci all: the CEF distribution does not match the version recorded by fetch-cef.sh" >&2
     exit 1
   fi
   HELPER_BUILD=${HELPER_BUILD:-"$ROOT/helper/build"}

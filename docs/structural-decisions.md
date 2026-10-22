@@ -34,17 +34,14 @@ window，不能直接扩成多 window 而保持语义。
 
 ## 3. loong64 / aarch64 供给
 
-`scripts/fetch-cef.sh` 目前硬编码：
-
-```text
-linux64_minimal
-```
+`scripts/fetch-cef.sh` 按 `CEF_ARCH` 选择 `linux64` / `linuxarm64` 的 minimal 包，
+默认取 CEF build service 上的最新 stable。
 
 **决定（2026-10-21）**：只支持 `linux64`（amd64）和 `linuxarm64`（aarch64）。
 `scripts/fetch-cef.sh` 已按 `CEF_ARCH` 选择这两个 CEF minimal 包；但本机只有 x86_64，
 arm64 仍需目标机验证。要收口需要：
 
-1. 找到对应架构、对应 CEF 154 的官方 minimal 包，或决定自建；
+1. 找到对应架构的最新 stable CEF minimal 包，或决定自建；
 2. 在目标架构上实际跑 `scripts/fetch-cef.sh`、helper 构建、`meson test` 和至少一条真
    Chromium 会话；
 3. 只有三步都过，才把架构从“安装侧预留”改成“已验证”。

@@ -13,7 +13,8 @@ prefix 之后不需要任何环境变量也能启动真 Chromium 的东西。
 ```
 bin/cefnest-demo
 include/cefnest/{nested,chromium-view,chromium-session}.h
-lib/libcefnest.so.0.0.1        (+ libcefnest.so.0、libcefnest.so 两个符号链接)
+lib/libcefnest.so.<cefnest-version>  (+ libcefnest.so.0、libcefnest.so 两个符号链接)
+                              默认 0.0.1；CNB 包用 CEF 的 X.Y.Z，例如 154.0.34
 lib/pkgconfig/cefnest.pc
 libexec/cefnest/shm-client
 libexec/cefnest/x86_64/         cefnest-helper + libcef.so + …，一共 1.5 G
@@ -246,8 +247,9 @@ demo: script 3 ok value="DND-PAGE|true"
   反向对照就是 `-Dhelper-build-dir=helper/build/Nope` 配置一次（上面那行），再用真正的
   `helper/build/Release` 配置一次（通过）。
 - 没有 soname/ABI 门禁：`soversion: '0'` 是手写的，导出清单没有生成（没有 `.symbols` 文件），
-  `version:` 直接跟 `project` 的 0.0.1。
-- 没有 deb/tar 的打包脚本，没有 desktop 文件；`third_party/cef/dist` 那份分发仍假定与可执行文件并排。
+  `version:` 跟 `cefnest-version` 选项（默认 0.0.1；CNB 包设成 CEF 的 X.Y.Z）。
+- deb/rpm 打包在 `scripts/build-packages.sh`；没有 desktop 文件；`third_party/cef/dist`
+  那份分发仍假定与可执行文件并排。
 
 
 ## 架构：linux64 / linuxarm64

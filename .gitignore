@@ -10,6 +10,7 @@ pkg-rpm/
 deb-libcefnest0/
 deb-libcefnest-dev/
 deb-cefnest-demo/
+deb-cefnest-helper/
 rpmbuild/
 dist/
 helper/build/
