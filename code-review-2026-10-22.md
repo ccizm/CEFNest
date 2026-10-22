@@ -315,3 +315,69 @@ CEF 线程模型主干干净。薄弱点集中在"多浏览器 + 异常路径"�
 ---
 
 *审查方式：四个并行深度审查代理分模块通读全部源码，所有【严重】项与关键【中等】项由主审逐一回到源码行核实后收录；存疑项单独列出，未与确认问题混排。*
+
+---
+
+## 第三轮：2026-10-22 修复记录
+
+在本轮审查（二轮）之后，以下问题已修复，并在当前树上重新跑过
+`meson test -C builddir`（26 项全绿）、`test/multi-browser-gate.sh` 和
+`test/framing-gate.sh`。新增门禁都做过变异：把修复退回原状必须变红。
+
+### 新发现并已闭环
+
+| 条目 | 处置 | 门禁 |
+| --- | --- | --- |
+| popup 父链可成环（`nested-xdg.c:831`） | `get_popup` 沿父链走时拒绝 `ancestor == self`；深度循环带步数上限 | `seat-selftest-popup-cycle`；去掉环检查后红 |
+| 控制通道 EOF 后重挂读循环（`chromium-session.c:751`） | EOF 与读错误都 `drop_connection` + `mark_closed` | `framing-gate.sh` 新增 eof 段（测 CPU tick）；退回重挂后 201 ticks 红 |
+| `OnDismissPermissionPrompt` erase 后读迭代器（`helper/src/main.cpp:1133`） | 先取 `wire->second` 再 erase | `permission-gate` |
+| CI 不编译 helper | `ci-all.sh` 开头 `cmake --build helper/build`，失败即整轮失败；`docs/testing/cnb-ci.md` 补 cmake 准备 | 构建失败即红 |
+| M22 tab 关闭无效 | `RemoveChildView` 后清掉 slot 里的 view 引用，再 `CloseBrowser`；`OnBeforeClose` 只 erase | `multi-browser-gate` 新增 `close-browser 2`、`browser 1 selected`、关闭后 js 断言 |
+| `set_size`/`set_window_fullscreen` 在 surfaces 遍历内 flush | 先收集带引用的 `GList`，再 configure | 现有 selftest |
+| surface 销毁不清理 `frame_callbacks` | `surface_discard_frame_callbacks()` | 现有 selftest |
+| text-input 偏移越界读 | 先 `g_utf8_strlen` 夹 offset；start/end 用 gint64 | `seat-selftest-text-input` |
+| `close-request` 返回 void | 改回 `gboolean` 并返回 TRUE | 手工窗口关闭 |
+| `send_json` 失败不拆通道 | 写/flush 失败都 `drop_connection` + `mark_closed` | `framing-gate` 现有段 |
+| `::closed` 后 `start()` 返回 BUSY | 旧 child 未 reap 时允许 restart；`child_waited` 只处理当前 child | 未加门禁（需要构造重启宿主） |
+| `OnBeforePopup` 用全局 `g_browser` | 改用参数 `browser`，并判 `GetMainFrame()` | 无门禁 |
+| helper slot/id 混用、fullscreen 用全局窗口 | 先比较请求 slot 再 re-key；按 browser id 找 window | `multi-browser-gate` 的三浏览器路径 |
+| `pending_window_ids` 死 id、`menu_popover` 覆盖 | 跳过无 view 的 pending id；新菜单先放旧菜单 | 现有 multi/menu gate |
+| `wl_output` v4 不发 name/description；dmabuf v4 仍发 format | 按版本发送 | 现有 seat-selftest |
+| 低危项 | cursor 热点溢出、dispose 半幂等、`GdkFileList` 泄漏、`event_string` 显式 null、`open_listener` socket 残留；L4 drag icon 角色、L6 input surface 类型校验、L7 错误文案 | 静态/现有测试 |
+| L2 positioner 溢出 | `anchor_point` / `gravity_shift` / `place_with` / `overflow` 全部走 gint64，输出处才 clamp 回 int32 | `seat-selftest-popup-overflow`（anchor/offset 取 `INT32_MAX`，四种 constraint 全开） |
+| L5 `xdg_wm_base.destroy` | 发现同 client 的 `xdg_surface` 还活着时 post `INVALID_METHOD`，不再静默销毁 | 现有 selftest |
+| L15 demo out-drag 临时文件 | 前一个 drag 未结束（`demo_out_drag != NULL`）时拒绝新的 handover，不再覆盖 `demo_out_temp_path` | 无门禁（需要真实拖放） |
+| R4 accept 重试不分类 | 只对 `G_IO_ERROR_TOO_MANY_OPEN_FILES` 重试；其他非取消错误 `mark_closed("control listener failed")`，不再 5 Hz 刷日志。旧 listener 的 accept 结果（stop/restart 后到达）直接丢弃 | 无门禁（需要构造 EMFILE/永久失败） |
+| R5 测试客户端轴记账 | `shm-client` 的 `pointer_leave` 清 `axes_moved`/`axes_stopped`/`axis_in_frame`，与合成器的 `scroll_axes` 对称 | 现有 `seat-selftest`（不覆盖 leave/re-enter 序列，真实影响为零） |
+| L25 CNB 流水线与产物 | `ci-all` job 显式 `timeout: 1h`；`CI_LOG_DIR=ci-logs` 保留判定表和每跑日志，`cnbcool/attachments` 上传到 commit 附件；`scripts/check-cef-pin.sh` 在构建 helper 前校验 runner 的 CEF 与 pin 一致 | 本地跑 `check-cef-pin.sh`、`CI_LOG_DIR=ci-logs ./test/ci-all.sh unit` |
+| 门禁基建 | `ci-all` 的 0 断言判 FAIL；内层 `timeout 90` 之和纳入外层预算；`audit-map-arms.py` / `audit-loop-sources.py` 加空跑下限；`ci-session.sh` 把 bus 地址落盘 | 直接运行 |
+| `fetch-cef.sh` 无校验和 | 下载并校验 CEF 构建服务发布的 `.sha256` | 手工核对 CDN 提供该文件 |
+
+### 仍未修/记录
+
+M18 已闭环到可接受程度：9 个 gate 脚本改为 `source test/helper-path.sh`，
+按 `Release/` → 单配置 → `Debug/` 的顺序找 helper，`CHROMIUM_HELPER` 仍然优先；
+`meson.options` 的默认值仍是 `helper/build/Release`，但那只是可配置默认值。
+代码侧没有仍未修的条目。L15、R4、R5 没有门禁，因为分别需要真实拖放、
+构造 EMFILE/永久失败、以及覆盖 leave/re-enter 的轴序列；L25 的附件上传只能在
+CNB runner 上验证。
+
+### 验证状态
+
+- `meson test -C builddir`：27/27 通过（新增 `seat-selftest-popup-cycle`、
+  `seat-selftest-popup-overflow`）。
+- `./test/ci-all.sh unit menu`：`unit` PASS 27 断言；`menu` 在 headless 下
+  `SKIP`（1s，`exit 77`），总退出 0。
+- `./test/ci-all.sh proof primary pixel`：PASS 7 / 2 / 12。
+- `./test/ci-all.sh framing multi`：PASS 13 / 10。
+- `./test/ci-all.sh download`：PASS 54。
+- `./test/ci-session.sh ./test/permission-gate.sh`、`./test/dnd-gate.sh`：通过
+  （permission 的 dismiss 路径、dnd 的拖入拖出都覆盖到了）。
+- `test/menu-gate.sh`：当前 headless mutter 上 `gtk_popover_popup()` 不返回（菜单
+  9 行已经打印后卡住），因此在 `CEFNEST_HEADLESS=1` 下整体 `exit 77`，
+  `ci-all` 报 SKIP（1s）；`run_demo` 另有 90s 看门狗作为真桌面兜底。
+- 同一份 `test/menu-gate.sh` 在真实 Wayland 桌面（`WAYLAND_DISPLAY=wayland-0`）
+  复跑：8 跑、**52 条 ok、0 skip、0 fail**。这也验证了 `menu_popover` 的旧菜单
+  清理改动没有破坏真实弹层。
+- 变异：`popup-cycle` 去掉环检查 → FAIL；`framing` 的 eof 段退回“只 mark_closed、
+  不 drop” → 201 CPU ticks → FAIL。

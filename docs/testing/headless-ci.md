@@ -78,9 +78,11 @@ namespace 里 `tgkill(1, 1, SIGABRT)`，而我们自己的缓冲区都有边界�
 `docs/features/session-lifecycle.md` §4–§6。
 
 **payload**：`"$@"` 原样在会话里跑。注入的是 `WAYLAND_DISPLAY`、
-`GDK_BACKEND=wayland`、`CEFNEST_HEADLESS=1`、隔离的 HOME/XDG/runtime 目录，以及从
-compositor 自己的 `/proc/<pid>/environ` 里取出的 bus 地址（这样门户走会话内那条 bus，
-而不是宿主的），`CHROMIUM_HELPER` 指向真 helper，超时 `PAYLOAD_TIMEOUT`（默认 900s）。
+`GDK_BACKEND=wayland`、`CEFNEST_HEADLESS=1`、隔离的 HOME/XDG/runtime 目录，
+`CHROMIUM_HELPER` 指向真 helper，超时 `PAYLOAD_TIMEOUT`（默认 900s）。会话自己的
+bus 地址写在 `bus.addr` 里供诊断，但不注入 payload：这条 bus 上没有
+`xdg-desktop-portal`，实测把地址交给 payload 会让真 CEF 的下载停在
+`download-begin` 之前（`test/download-gate.sh real` 是那条门禁）。
 payload 的退出码就是这一跑的退出码；失败时把每一跑的 stdout/stderr 都 tail 出来
 （demo、payload，加上 `die`/`exited`/`quit`/`nostart` 那四跑）。
 
@@ -157,8 +159,15 @@ session。产物和五站表见 `docs/testing/real-sites.md`。
   `dump: widget 1000x653 css, toplevel 1028x729`，布局与尺寸都拿得到），但
   **popup surface 永远不会被映射**——菜单弹出后 300ms 的回报恒为
   `context menu mapped=0 size=0x0`，真桌面上同一条是 `mapped=1 size=…x…`。
-  这是显示器的性质，不是组件的性质，所以 `test/menu-gate.sh` 读
-  `CEFNEST_HEADLESS` 把这两条报成 skip（45 条断言照旧全过），别把它当成回归。
+  这是显示器的性质，不是组件的性质，所以 `test/menu-gate.sh` 在
+  `CEFNEST_HEADLESS=1` 下整体 `exit 77`：`ci-all` 报 SKIP（约 1s），而不是让
+  一个没有屏的环境去证明"菜单上了屏"。
+- **popover 的 roundtrip**。2026-10-22 复跑时，这台 headless mutter 上的
+  `gtk_popover_popup()` 在菜单 9 行已经打印后不返回；SIGTERM 也停不下 demo。
+  `test/menu-gate.sh` 的 `run_demo` 另有 90s 看门狗（SIGKILL 整个进程组）作为
+  真桌面上的兜底；此前 71s 全绿是另一台/另一版 mutter 的实测，不是这台环境。
+  2026-10-23 在真实 Wayland 桌面复跑同一脚本：8 跑、52 条 ok、0 skip、0 fail，
+  说明 headless 的阻塞是显示会话的性质，不是组件回归。
 - **焦点**。`document.hasFocus()` 在 headless 里恒为 false，真桌面为 true——过与
   不过都一样，所以门禁不依赖它。
 - **真实输入设备**。门禁仍然只用脚本步骤驱动 seat，不注入指针；`test/uinput-inject`
@@ -184,6 +193,11 @@ ok 行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 
 
 \* 那 2 条是"弹层上了屏"，这块显示器没有屏可上（§5）。`pixel` 在会话里与在真桌面上
 都是 12 条全过、0 skip——它是 `docs/internals/frame-clock-pacing.md` §9 那条回归的判据，两侧都得红得起来。
+
+表是 2026-10-21 的实测。2026-10-22 复跑时 `gtk_popover_popup()` 在这台 mutter 上
+不返回，`menu` 改为在 `CEFNEST_HEADLESS=1` 下整体 `exit 77`（`ci-all` 报 SKIP，约 1s）；
+`unit` 也已经是 27 项（新增 `seat-selftest-popup-cycle`、
+`seat-selftest-popup-overflow` 等）。
 
 两条补充测量：
 

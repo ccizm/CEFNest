@@ -38,10 +38,22 @@ set -u -o pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DEMO="$ROOT/builddir/src/cefnest-demo"
 FAKE="$ROOT/test/fake-helper.py"
-HELPER="$ROOT/helper/build/Release/cefnest-helper"
+. "$ROOT/test/helper-path.sh"
 PAGE="file://$ROOT/test/menu-page.html"
 OTHER="file://$ROOT/test/find-page.html"
 WHICH=${1:-all}
+
+# On the headless mutter used by ci-session.sh, gtk_popover_popup() does not
+# return once the menu model has arrived (measured 2026-10-22: nine rows
+# printed, then the call sat there and even SIGTERM did not finish the demo).
+# Every run here opens a menu, so there is nothing this gate can assert in that
+# session; exit 77 and let ci-all report SKIP instead of spending 90s per run
+# on the watchdog. A real desktop still runs the whole gate.
+if [ "${CEFNEST_HEADLESS:-0}" = 1 ]; then
+  printf '  skip menu: headless mutter does not map popover surfaces and gtk_popover_popup() does not return\n'
+  printf 'menu gate: skipped, it could not assert anything\n'
+  exit 77
+fi
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -102,10 +114,26 @@ run_demo() { # run_demo <tag> <logfile> <helper> <extra env...>
   if [ ! -x "$DEMO" ]; then echo "no demo at $DEMO — run ninja -C builddir"; exit 1; fi
   if [ ! -e "$helper" ]; then echo "no helper at $helper"; exit 1; fi
   echo "== $tag"
-  timeout 90 env "$@" G_MESSAGES_DEBUG=all GDK_BACKEND=wayland \
+  # `timeout` sends SIGTERM to the demo only. GTK can be sitting in a Wayland
+  # roundtrip when the popover is opened on a headless session, and a demo that
+  # ignores or never handles that signal leaves the whole gate waiting forever
+  # (measured: ten minutes on one run). The watchdog below escalates to SIGKILL
+  # and the output goes straight to the log, so no orphaned helper can keep a
+  # `tee` pipe open after the demo is gone.
+  env "$@" G_MESSAGES_DEBUG=all GDK_BACKEND=wayland \
     CHROMIUM_HELPER="$helper" CHROMIUM_SESSION_SCRIPT="$WORK/$tag.session" \
-    "$DEMO" 2>&1 | tee "$log" | cat > /dev/null
-  local status=${PIPESTATUS[0]}
+    "$DEMO" >"$log" 2>&1 &
+  local pid=$!
+
+  ( sleep 90
+    kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+  ) &
+  local watchdog=$!
+
+  wait "$pid"
+  local status=$?
+  kill "$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
   if [ $status -ne 0 ]; then
     bad "$tag: the demo exited with $status"
     tail -6 "$log" | sed 's/^/         /'

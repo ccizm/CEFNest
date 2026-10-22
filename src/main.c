@@ -339,12 +339,26 @@ assign_browser_surfaces (void)
 
       if (!demo.pending_window_ids)
         continue;
-      id = GPOINTER_TO_INT (demo.pending_window_ids->data);
-      demo.pending_window_ids = g_list_delete_link (demo.pending_window_ids,
-                                                    demo.pending_window_ids);
-      view = g_hash_table_lookup (demo.browser_views, GINT_TO_POINTER (id));
-      if (view)
-        chromium_view_set_target_surface (view, surface);
+
+      /* A window can be destroyed before its surface arrives. Its id is then
+       * still in the queue but no view owns it; skip those ids instead of
+       * binding the surface to one — doing that inserts a key nothing holds a
+       * reference to, and the next window that reuses the address is told the
+       * surface is already assigned. */
+      view = NULL;
+      while (demo.pending_window_ids)
+        {
+          id = GPOINTER_TO_INT (demo.pending_window_ids->data);
+          demo.pending_window_ids = g_list_delete_link (demo.pending_window_ids,
+                                                        demo.pending_window_ids);
+          view = g_hash_table_lookup (demo.browser_views, GINT_TO_POINTER (id));
+          if (view)
+            break;
+        }
+      if (!view)
+        continue;
+
+      chromium_view_set_target_surface (view, surface);
       g_hash_table_insert (demo.assigned_surfaces, surface, GINT_TO_POINTER (id));
     }
   g_list_free_full (tops, g_object_unref);
@@ -366,6 +380,10 @@ browser_window_destroyed (GtkWidget *widget, gpointer data)
     return;
   g_hash_table_remove (demo.browser_windows, GINT_TO_POINTER (id));
   g_hash_table_remove (demo.browser_views, GINT_TO_POINTER (id));
+  /* A window that never got its surface leaves its id waiting in the queue;
+   * the next toplevel must not consume it. */
+  demo.pending_window_ids = g_list_remove (demo.pending_window_ids,
+                                           GINT_TO_POINTER (id));
 }
 
 static void
@@ -377,7 +395,7 @@ browser_window_active (GObject *object, GParamSpec *pspec, gpointer data)
     chromium_session_select_browser (demo.session, id);
 }
 
-static void
+static gboolean
 browser_window_close_request (GtkWindow *window, gpointer data)
 {
   int id = GPOINTER_TO_INT (data);
@@ -385,8 +403,11 @@ browser_window_close_request (GtkWindow *window, gpointer data)
   if (demo.session)
     chromium_session_close_browser (demo.session, id);
   /* The helper's browser-closed event destroys the window; if it never comes,
-   * do not leave a dead window behind. */
+   * do not leave a dead window behind. Returning TRUE says this handler took
+   * the close: close-request is a boolean signal, and a void handler leaves
+   * GTK reading whatever the ABI left in the return register. */
   gtk_window_destroy (window);
+  return TRUE;
 }
 
 static void
@@ -2048,9 +2069,18 @@ demo_drag_out (NestedCompositor *compositor, const char *mime, GBytes *bytes,
     }
 
   /* A finished drag's file stays around for the target to finish opening; the
-   * next handover is where the previous one is retired. */
-  if (!demo_out_drag)
-    demo_out_clear_temp ();
+   * next handover is where the previous one is retired. Two drags cannot be in
+   * flight at once: replacing demo_out_drag while the first is still alive
+   * would also strand the first one's temp file, because its dnd-finished
+   * handler no longer matches the global. Say no to the second one. */
+  if (demo_out_drag)
+    {
+      g_print ("demo: drag out: a previous drag is still in flight, not carrying "
+               "this one\n");
+      return;
+    }
+
+  demo_out_clear_temp ();
 
   if (!pointer || !surface)
     {

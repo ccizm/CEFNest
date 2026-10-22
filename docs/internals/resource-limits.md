@@ -143,6 +143,11 @@ client: the compositor refused the 300 MB pool and dropped us
 的唯一位置——链子建不起来，后面每次遍历就都不会超深。菜单套子菜单一般两三行，
 32 层离任何接口能构造的菜单都很远。
 
+同一条走链还要拒绝“父链上出现自己”的请求：两次 `get_popup` 可以让两个 surface
+互为父子，环没有根，深度计数自己也会在环上打转。`shm-client --popup-cycle` 是
+这一半的门禁：第二次请求必须收到 `INVALID_POPUP_PARENT`，而一直在画图的那条连接
+必须还能 roundtrip。
+
 `shm-client --popup-depth` 是它的门。攻击住在第二条连接上，一个 popup 一个 popup
 地挂、每挂一个 roundtrip 一次：被拒的那条请求会杀掉发出它的连接，一批发下去就问不
 出拒绝究竟落在第几层。断言是精确的——第 33 个 popup 必须被拒（前 32 个是允许的

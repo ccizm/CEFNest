@@ -51,7 +51,7 @@ set -u -o pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DEMO="$ROOT/builddir/src/cefnest-demo"
-HELPER="$ROOT/helper/build/Release/cefnest-helper"
+. "$ROOT/test/helper-path.sh"
 PAGE="file://$ROOT/test/dnd-page.html"
 WHICH=${1:-all}
 

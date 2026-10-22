@@ -521,6 +521,21 @@ surface_has_pending_frames (NestedSurface *self)
   return !wl_list_empty (&self->frame_callbacks);
 }
 
+/* A destroyed surface will never get the frame that fires these callbacks.
+ * Their resources also hold a reference to the surface (frame_callback_destroyed
+ * releases it), so leaving them on the list pins the surface and everything it
+ * carries — the imported texture and the shm shadow — until the client hangs
+ * up. Destroy the resources now; the callbacks' clients get no done, which is
+ * the only honest answer for a surface that no longer exists. */
+static void
+surface_discard_frame_callbacks (NestedSurface *self)
+{
+  FrameCallback *cb, *tmp;
+
+  wl_list_for_each_safe (cb, tmp, &self->frame_callbacks, link)
+    wl_resource_destroy (cb->resource);
+}
+
 /* ------------------------------------------------------------------ *
  * Buffer readback                                                    *
  * ------------------------------------------------------------------ */
@@ -1171,6 +1186,7 @@ surface_resource_destroyed (struct wl_resource *resource)
   gboolean was_painted;
 
   self->wl_surface = NULL;
+  surface_discard_frame_callbacks (self);
   surface_set_pending (self, NULL);
   was_painted = surface_is_painted (self);
   self->mapped = FALSE;
@@ -1454,8 +1470,9 @@ shm_pool_create_buffer (struct wl_client *client, struct wl_resource *resource,
   if (needed > (int64_t) pool->size)
     {
       wl_resource_post_error (resource, WL_SHM_ERROR_INVALID_STRIDE,
-                              "buffer needs %" PRId64 " bytes, pool has %zu",
-                              needed - offset, pool->size);
+                              "buffer needs %" PRId64 " bytes from offset %" PRId64
+                              ", pool has %zu",
+                              needed - offset, (int64_t) offset, pool->size);
       return;
     }
 
@@ -2392,12 +2409,12 @@ nested_compositor_dispose (GObject *object)
   g_clear_object (&self->cursor_target);
   g_clear_pointer (&self->socket_name, g_free);
 
-  if (self->xkb_state)
-    xkb_state_unref (self->xkb_state);
-  if (self->xkb_keymap)
-    xkb_keymap_unref (self->xkb_keymap);
-  if (self->xkb_context)
-    xkb_context_unref (self->xkb_context);
+  /* GObject may run dispose more than once. Everything else in this function
+   * clears its field as it goes; these three have to do the same, or the
+   * second pass unrefs memory that is already gone. */
+  g_clear_pointer (&self->xkb_state, xkb_state_unref);
+  g_clear_pointer (&self->xkb_keymap, xkb_keymap_unref);
+  g_clear_pointer (&self->xkb_context, xkb_context_unref);
   nested_shutdown_dmabuf (self);
   g_clear_pointer (&self->dmabuf_formats, g_array_unref);
   if (self->dmabuf_table_fd >= 0)
@@ -2407,9 +2424,8 @@ nested_compositor_dispose (GObject *object)
   nested_compositor_set_clipboard (self, NULL);
   g_clear_pointer (&self->clipboard_bytes, g_bytes_unref);
   g_clear_pointer (&self->clipboard_mime, g_free);
-  free (self->keymap_text);
-
-  g_array_free (self->pressed_keys, TRUE);
+  g_clear_pointer (&self->keymap_text, g_free);
+  g_clear_pointer (&self->pressed_keys, g_array_unref);
 
   G_OBJECT_CLASS (nested_compositor_parent_class)->dispose (object);
 }
@@ -2660,12 +2676,29 @@ nested_compositor_set_size (NestedCompositor *self, int width, int height)
 
   output_send_state_all (self);
 
-  wl_list_for_each (surface, &self->surfaces, nested_link)
-    {
-      if (!surface->xdg_surface)
-        continue;
-      xdg_surface_configure (surface);
-    }
+  /* configure sends its events and flushes; a flush that finds a dead peer
+   * destroys that client before it returns, and the surface being walked is
+   * taken out of self->surfaces by the destroy callback. Hold a reference to
+   * each surface before the walk so the list cannot be mutated under the
+   * iterator, and check xdg_surface again because the callback may have run. */
+  {
+    GList *surfaces = NULL, *link;
+
+    wl_list_for_each (surface, &self->surfaces, nested_link)
+      {
+        if (surface->xdg_surface)
+          surfaces = g_list_prepend (surfaces, g_object_ref (surface));
+      }
+
+    for (link = surfaces; link; link = link->next)
+      {
+        surface = link->data;
+        if (surface->xdg_surface)
+          xdg_surface_configure (surface);
+      }
+
+    g_list_free_full (surfaces, g_object_unref);
+  }
 }
 
 void
@@ -2700,6 +2733,10 @@ nested_compositor_set_input_surface (NestedCompositor *self,
                                      NestedSurface *surface)
 {
   g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+  /* NULL clears the input surface; anything else has to be a NestedSurface,
+   * or the seat's focus would hold a pointer to the wrong object type. */
+  if (surface)
+    g_return_if_fail (NESTED_IS_SURFACE (surface));
   g_set_object (&self->input_surface, surface);
   seat_retarget (self);
 }
@@ -2797,12 +2834,27 @@ nested_compositor_set_window_fullscreen (NestedCompositor *self, gboolean fullsc
 
   /* The states array rides on every configure; resending now tells Chromium
    * the platform window changed state without waiting for a size change that
-   * may never come. */
-  wl_list_for_each (surface, &self->surfaces, nested_link)
-    {
-      if (surface->xdg_surface)
-        xdg_surface_configure (surface);
-    }
+   * may never come. As in set_size(), the flush inside configure can destroy a
+   * client and remove the surface being walked, so the list is snapshotted
+   * with references first. */
+  {
+    GList *surfaces = NULL, *link;
+
+    wl_list_for_each (surface, &self->surfaces, nested_link)
+      {
+        if (surface->xdg_surface)
+          surfaces = g_list_prepend (surfaces, g_object_ref (surface));
+      }
+
+    for (link = surfaces; link; link = link->next)
+      {
+        surface = link->data;
+        if (surface->xdg_surface)
+          xdg_surface_configure (surface);
+      }
+
+    g_list_free_full (surfaces, g_object_unref);
+  }
 }
 
 /* A displayed toplevel asked for the window to change fullscreen state (an

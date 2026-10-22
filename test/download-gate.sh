@@ -21,7 +21,7 @@ set -u -o pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DEMO="$ROOT/builddir/src/cefnest-demo"
 FAKE="$ROOT/test/fake-helper.py"
-HELPER="$ROOT/helper/build/Release/cefnest-helper"
+. "$ROOT/test/helper-path.sh"
 WHICH=${1:-all}
 
 WORK=$(mktemp -d)

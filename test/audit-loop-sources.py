@@ -87,6 +87,11 @@ for path in sorted (sources):
                'any dispose' % (os.path.relpath (path, root),
                                  text[:at].count ('\n') + 1, field, arms))
 
+if not checked:
+    print ('no loop sources found in src/*.c: the ARM pattern no longer matches '
+           'the source, so this audit would be grading nothing')
+    sys.exit (1)
+
 print ('\n%d source(s) armed, %d covered, %d never cancelled' %
        (checked, covered, missing))
 sys.exit (1 if missing else 0)

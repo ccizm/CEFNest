@@ -50,7 +50,7 @@ if [ ! -f "$SESSION" ]; then
   exit 0
 fi
 
-# Every name the dispatch compares against, in the order the source lists them.
+# Every name the dispatch compares against.
 mapfile -t EVENTS < <(grep -oE 'strcmp \(event, "[a-z0-9-]+"\)' "$SESSION" |
                       sed -E 's/.*"([a-z0-9-]+)".*/\1/' | sort -u)
 

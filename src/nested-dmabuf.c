@@ -298,11 +298,18 @@ dmabuf_send_formats (struct wl_resource *resource, NestedCompositor *self)
   uint32_t version = wl_resource_get_version (resource);
   guint i;
 
-  for (i = 0; i < self->dmabuf_formats->len; i++)
+  /* version 4 deprecates `format` and says a compositor must not send it;
+   * from there on `modifier` is the whole answer. Versions 1 and 2 have only
+   * `format`, and version 3 accepts both. */
+  if (version < 4)
     {
-      DmabufFormat *entry = &g_array_index (self->dmabuf_formats, DmabufFormat, i);
+      for (i = 0; i < self->dmabuf_formats->len; i++)
+        {
+          DmabufFormat *entry =
+            &g_array_index (self->dmabuf_formats, DmabufFormat, i);
 
-      zwp_linux_dmabuf_v1_send_format (resource, entry->fourcc);
+          zwp_linux_dmabuf_v1_send_format (resource, entry->fourcc);
+        }
     }
 
   if (version < ZWP_LINUX_DMABUF_V1_MODIFIER_SINCE_VERSION)

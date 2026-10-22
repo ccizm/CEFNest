@@ -32,18 +32,50 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || exit 1          # the payloads below are paths relative to the repo
 KEEP_LOGS=${KEEP_LOGS:-0}
 
+# The helper is built by cmake, not meson, so `meson test` below never sees a
+# change under helper/src. Every real-CEF gate runs the binary this step
+# produces; without it a green table only says the last manual build still
+# works. Build it here, as part of the gate, unless the caller is explicit
+# about grading something else (CI_SKIP_HELPER_BUILD=1).
+if [ "${CI_SKIP_HELPER_BUILD:-0}" != 1 ]; then
+  # third_party/ is not in git: a runner can keep an old CEF distribution
+  # forever. Refuse to grade a helper built against something other than the
+  # version fetch-cef.sh pins.
+  echo "== cef pin"
+  if ! bash "$ROOT/scripts/check-cef-pin.sh"; then
+    echo "ci all: the CEF distribution does not match scripts/fetch-cef.sh" >&2
+    exit 1
+  fi
+  HELPER_BUILD=${HELPER_BUILD:-"$ROOT/helper/build"}
+  if [ ! -f "$HELPER_BUILD/CMakeCache.txt" ]; then
+    echo "ci all: no helper build tree at $HELPER_BUILD" >&2
+    echo "  run: cmake -S helper -B helper/build -DCMAKE_BUILD_TYPE=Release" >&2
+    exit 1
+  fi
+  echo "== helper build"
+  if ! cmake --build "$HELPER_BUILD" --config Release \
+       -j"$(nproc 2>/dev/null || echo 2)"; then
+    echo "ci all: helper build failed" >&2
+    exit 1
+  fi
+fi
+
 # label|payload|timeout — the payload runs inside the nested session, so a path
 # is relative to the repo root, which ci-session.sh inherits as its cwd.
 ALL_RUNS=(
+  # Each timeout is the gate's own per-run budget times its number of runs,
+  # plus a margin: menu 8x90, permission 10x90, download 11x90, find/dnd 6x90.
+  # A budget smaller than that loses both the verdict and the transcript of
+  # whichever run hung.
   "proof||240"
   "unit|meson test -C builddir|240"
-  "framing|./test/framing-gate.sh|240"
+  "framing|./test/framing-gate.sh|420"
   "pixel|./test/pixel-gate.sh|240"
-  "find|./test/find-gate.sh|420"
-  "permission|./test/permission-gate.sh|420"
-  "download|./test/download-gate.sh|420"
-  "dnd|./test/dnd-gate.sh|420"
-  "menu|./test/menu-gate.sh|420"
+  "find|./test/find-gate.sh|600"
+  "permission|./test/permission-gate.sh|960"
+  "download|./test/download-gate.sh|1050"
+  "dnd|./test/dnd-gate.sh|600"
+  "menu|./test/menu-gate.sh|780"
   "primary|./test/primary-gate.sh|240"
   "multi|./test/multi-browser-gate.sh|240"
   "soak|./test/sandbox-soak.sh|600"
@@ -55,7 +87,16 @@ if [ "${CI_ALL_REAL:-0}" = 1 ]; then
   ALL_RUNS+=("real|./test/real-sites.sh|1800")
 fi
 
-LOGS=$(mktemp -d)
+if [ -n "${CI_LOG_DIR:-}" ]; then
+  # CI keeps the verdict table and every run's transcript as build artifacts.
+  # A caller-named directory wins over mktemp, and keeping it is not optional:
+  # the run is about to upload it.
+  LOGS=$CI_LOG_DIR
+  mkdir -p "$LOGS" || exit 1
+  KEEP_LOGS=1
+else
+  LOGS=$(mktemp -d)
+fi
 only=("$@")
 
 wanted() { # is this label selected?
@@ -100,13 +141,27 @@ for spec in "${ALL_RUNS[@]}"; do
   skipped=$(grep -c '^  skip ' "$log")
   # 77 is meson's own "test skipped" status, so the two harnesses agree on what a
   # gate that ran nothing says.
+  zero=""
   if [ $rc = 77 ]; then verdict=SKIP; gate_skips=$((gate_skips + 1))
-  elif [ $rc = 0 ]; then verdict=PASS
+  elif [ $rc = 0 ]; then
+    # An exit status of 0 is not a pass when the gate asserted nothing: that is
+    # exactly the early-`exit 0` shape the top of this file calls worse than a
+    # hidden skip. A gate that legitimately ran no assertion exits 77.
+    if [ "$assertions" = 0 ] && [ "$skipped" = 0 ]; then
+      verdict=FAIL; fails=$((fails + 1)); zero=1
+    else
+      verdict=PASS
+    fi
   else verdict=FAIL; fails=$((fails + 1)); fi
-  [ "$skipped" = 0 ] || verdict="$verdict*"
+  # The star means "passed, but some checks were skipped". A gate that skipped
+  # as a whole already says SKIP; adding the star made it look like a pass.
+  if [ "$verdict" != "SKIP" ] && [ "$skipped" != 0 ]; then verdict="$verdict*"; fi
   printf '%-10s %-6s %5ss %6s %6s\n' "$label" "$verdict" "$(( $(date +%s) - t0 ))" \
     "$assertions" "$skipped"
-  if [ $rc != 0 ]; then
+  if [ -n "$zero" ]; then
+    printf '         %s\n' "no assertion was made: status 0 is not a pass"
+    tail -25 "$log" | sed 's/^/         /'
+  elif [ $rc != 0 ]; then
     tail -25 "$log" | sed 's/^/         /'
   elif [ "$KEEP_LOGS" != 1 ]; then
     rm -f "$log"

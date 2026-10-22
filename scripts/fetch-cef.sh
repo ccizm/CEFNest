@@ -36,6 +36,25 @@ mkdir -p "$DEST"
 echo "fetch: $URL"
 curl -fL --retry 3 -o "$DEST/cef.tar.bz2" "$URL"
 
+# The version is pinned so the build is reproducible; the archive has to be
+# pinned to the same bytes or the pin only names a label. The build service
+# publishes the digest beside the archive, and a missing one is a failure, not
+# a reason to skip the check.
+echo "fetch: $URL.sha256"
+curl -fL --retry 3 -o "$DEST/cef.tar.bz2.sha256" "$URL.sha256"
+# The published file starts with a blank line; take the first full digest.
+expected=$(tr -d '\r' < "$DEST/cef.tar.bz2.sha256" |
+           grep -oE '^[0-9a-fA-F]{64}' | head -1 || true)
+actual=$(sha256sum "$DEST/cef.tar.bz2" | cut -d' ' -f1)
+if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+  echo "fetch: checksum mismatch for $DEST/cef.tar.bz2" >&2
+  echo "  expected: ${expected:-<empty>}" >&2
+  echo "  actual:   $actual" >&2
+  rm -f "$DEST/cef.tar.bz2" "$DEST/cef.tar.bz2.sha256"
+  exit 1
+fi
+rm -f "$DEST/cef.tar.bz2.sha256"
+
 rm -rf "$DEST/dist"
 tar -xjf "$DEST/cef.tar.bz2" -C "$DEST"
 mv "$DEST"/cef_binary_* "$DEST/dist"

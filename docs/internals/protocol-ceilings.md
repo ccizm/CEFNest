@@ -40,7 +40,8 @@ zwp_linux_dmabuf_v1 5
 跑 A 里真 Chromium 绑定的全部：
 
 ```
-同上，外加 wl_output 3/4；dmabuf 绑的是 4（我们封顶 5，Chromium 取 min）
+同上，外加 wl_output 3/4（v4 的 name/description 随 bind 发出）；dmabuf 绑的是
+4（我们封顶 5，Chromium 取 min）；v4 起不发被废弃的 format，只发 modifier
 ```
 
 结论：
@@ -68,7 +69,7 @@ zwp_linux_dmabuf_v1 5
 | `wp_single_pixel_buffer_manager_v1` 1 | 不给 | GDK 用来画 1×1 纯色面；对我们没有任何客户端要过 |
 | `xdg_activation_v1` | 不给 | 跨窗口焦点传递令牌；我们只有一个 toplevel |
 | `xdg_system_bell_v1` / `xdg_dialog_v1` | 不给 | 桌面装饰类，嵌套 compositor 无从谈起 |
-| `zxdg_output_manager_v1` 3 | 不给 | 逻辑输出布局/缩放信息；`wl_output` 4 的 geometry 已覆盖客户端所需 |
+| `zxdg_output_manager_v1` 3 | 不给 | 逻辑输出布局/缩放信息；`wl_output` 4 的 geometry/name/description 已覆盖客户端所需 |
 | `zwp_idle_inhibit_manager_v1` | 不给 | 我们根本没有"空闲"可抑制——嵌套 compositor 不做任何屏保/锁屏管理，抑制一个不存在的东西没有意义 |
 | `zwp_keyboard_shortcuts_inhibit_manager_v1` | 不给 | 同上：我们没有快捷键系统可抑制 |
 | `zwp_pointer_gestures_v1` 3 | 暂不给 | 触控板捏合缩放。真 Chromium 会绑它，损失是页面里的捏合缩放不可用；补齐要捏合手势→Chromium 的整条链路，等有触控板需求再议 |

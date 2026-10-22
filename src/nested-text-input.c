@@ -422,14 +422,25 @@ text_input_manager_bind (struct wl_client *client, void *data, uint32_t version,
 static gsize
 text_input_offset_to_bytes (const char *text, gint offset)
 {
-  gsize size = text ? strlen (text) : 0;
+  gsize size;
+  glong chars;
   const char *p;
   gsize bytes;
 
   if (!text)
     return 0;
 
-  p = g_utf8_offset_to_pointer (text, MAX (offset, 0));
+  size = strlen (text);
+
+  /* g_utf8_offset_to_pointer() does not stop at the terminating NUL: it walks
+   * as many characters as it is asked for, through whatever follows the
+   * string. The client chooses both the string and the offset, so clamp the
+   * offset to the characters that are actually there before converting. */
+  chars = g_utf8_strlen (text, (gssize) size);
+  offset = (gint) CLAMP ((gint64) offset, (gint64) 0,
+                         (gint64) MIN (chars, (glong) G_MAXINT32));
+
+  p = g_utf8_offset_to_pointer (text, offset);
   bytes = (gsize) (p - text);
 
   return MIN (bytes, size);
@@ -589,10 +600,19 @@ nested_compositor_delete_surrounding_text (NestedCompositor *self, int offset,
     }
 
   /* @offset is where the range starts relative to the cursor and @n_chars how
-   * long it is; the protocol wants the two halves on either side of it. */
+   * long it is; the protocol wants the two halves on either side of it. Both
+   * are client-controlled ints, so the arithmetic is done in gint64: an
+   * offset + n_chars that wraps is a range the client never asked for. */
   cursor_chars = text_input_bytes_to_offset (text, input->current.cursor);
-  start_chars = MAX (cursor_chars + MIN (offset, 0), 0);
-  end_chars = MAX (cursor_chars + MAX (offset + n_chars, 0), start_chars);
+  {
+    gint64 start = (gint64) cursor_chars + MIN (offset, 0);
+    gint64 end = (gint64) cursor_chars +
+                 MAX ((gint64) offset + (gint64) n_chars, (gint64) 0);
+
+    start_chars = (gint) CLAMP (start, (gint64) 0, (gint64) G_MAXINT32);
+    end_chars = (gint) CLAMP (MAX (end, start), (gint64) 0,
+                              (gint64) G_MAXINT32);
+  }
 
   start_bytes = text_input_offset_to_bytes (text, start_chars);
   cursor_bytes = text_input_offset_to_bytes (text, cursor_chars);

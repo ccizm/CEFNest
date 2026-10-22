@@ -297,8 +297,12 @@ chromium_view_drop_got (GtkDropTarget *target, GValue *value,
       GString *uris = g_string_new (NULL);
 
       for (GSList *l = files; l; l = l->next)
-        g_string_append_printf (uris, "%s\r\n",
-                                g_file_get_uri (G_FILE (l->data)));
+        {
+          g_autofree char *uri = g_file_get_uri (G_FILE (l->data));
+
+          g_string_append_printf (uris, "%s\r\n", uri);
+        }
+      g_slist_free (files);
       uri_list = g_string_free (uris, FALSE);
       mime = "text/uri-list";
       payload = g_bytes_new_take (uri_list, strlen (uri_list));

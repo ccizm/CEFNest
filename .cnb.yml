@@ -5,9 +5,12 @@
 #
 # Prepare the runner once with:
 #   ./scripts/fetch-cef.sh
+#   cmake -S helper -B helper/build -DCMAKE_BUILD_TYPE=Release
+#   cmake --build helper/build -j
 #   meson setup builddir --wipe
 #   ninja -C builddir
 # After that a push to main runs the same release gate as a developer would.
+# ci-all.sh re-checks that the distribution still matches the pin on every run.
 main:
   push:
     - name: release-gate
@@ -16,4 +19,20 @@ main:
           - cefnest-gate
       stages:
         - name: ci-all
-          script: ./test/ci-all.sh
+          script: |
+            mkdir -p ci-logs
+            bash -o pipefail -c 'CI_LOG_DIR=ci-logs ./test/ci-all.sh 2>&1 | tee ci-logs/summary.txt'
+          # CNB has no pipeline-level timeout; the job timeout is the only
+          # bound. The whole battery measures around six minutes, so an hour
+          # leaves room for a slow runner without letting a hung job live for
+          # the default two hours.
+          timeout: 1h
+        # The verdict table and each run's transcript are ordinary files, and
+        # CNB has no generic artifact store. The attachments plugin puts them
+        # on the commit, where a failed run can still be read after the
+        # container is gone.
+        - name: upload gate logs
+          image: cnbcool/attachments:latest
+          settings:
+            attachments:
+              - "./ci-logs/*"

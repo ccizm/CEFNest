@@ -34,11 +34,11 @@ struct _XdgPositioner {
 /* Which edge or corner of the anchor rectangle the derived point is on. An
  * anchor that names no edge centres on that axis, as the request spells out. */
 static void
-anchor_point (uint32_t anchor, int32_t x, int32_t y, int32_t width, int32_t height,
-              int32_t *out_x, int32_t *out_y)
+anchor_point (uint32_t anchor, gint64 x, gint64 y, gint64 width, gint64 height,
+              gint64 *out_x, gint64 *out_y)
 {
-  int32_t centre_x = x + width / 2;
-  int32_t centre_y = y + height / 2;
+  gint64 centre_x = x + width / 2;
+  gint64 centre_y = y + height / 2;
 
   switch (anchor)
     {
@@ -77,8 +77,8 @@ anchor_point (uint32_t anchor, int32_t x, int32_t y, int32_t width, int32_t heig
  * puts the whole surface that way, an edge one centres the other axis, and
  * "none" centres both. */
 static void
-gravity_shift (uint32_t gravity, int32_t width, int32_t height,
-               int32_t *out_x, int32_t *out_y)
+gravity_shift (uint32_t gravity, gint64 width, gint64 height,
+               gint64 *out_x, gint64 *out_y)
 {
   switch (gravity)
     {
@@ -175,10 +175,10 @@ mirror_gravity_y (uint32_t gravity)
     }
 }
 
-static int32_t
-overflow (int32_t start, int32_t size, int32_t limit)
+static gint64
+overflow (gint64 start, gint64 size, gint64 limit)
 {
-  int32_t past = start + size - limit;
+  gint64 past = start + size - limit;
 
   return past > 0 ? past : 0;
 }
@@ -189,11 +189,17 @@ static void
 place_with (const int32_t *rules_rect, uint32_t anchor, uint32_t gravity,
             int32_t width, int32_t height,
             int32_t box_x, int32_t box_y, int32_t box_width, int32_t box_height,
-            uint32_t constraint, int32_t *out_x, int32_t *out_y)
+            uint32_t constraint, gint64 *out_x, gint64 *out_y)
 {
-  int32_t point_x, point_y, shift_x, shift_y;
+  gint64 point_x, point_y, shift_x, shift_y;
+  const gint64 box_right = (gint64) box_x + box_width;
+  const gint64 box_bottom = (gint64) box_y + box_height;
 
-  anchor_point (anchor, rules_rect[0] + box_x, rules_rect[1] + box_y,
+  /* Every value here comes from the client as an int32; the sums are what can
+   * leave that range, so they are all formed in gint64 and only clamped when
+   * they become a surface coordinate again. */
+  anchor_point (anchor, (gint64) rules_rect[0] + box_x,
+                (gint64) rules_rect[1] + box_y,
                 rules_rect[2], rules_rect[3], &point_x, &point_y);
 
   /* The offset belongs to the anchor point: the child is placed relative to it,
@@ -208,9 +214,9 @@ place_with (const int32_t *rules_rect, uint32_t anchor, uint32_t gravity,
   /* Precedence the protocol lays down: flip, then slide. Resize is left to the
    * client, which is the only one that can redraw at another size. */
   if ((constraint & XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_X) != 0 &&
-      (*out_x < box_x || *out_x + width > box_x + box_width))
+      (*out_x < box_x || *out_x + width > box_right))
     {
-      int32_t flipped_x, flipped_y;
+      gint64 flipped_x, flipped_y;
 
       place_with (rules_rect, mirror_anchor_x (anchor), mirror_gravity_x (gravity),
                   width, height, box_x, box_y, box_width, box_height,
@@ -219,9 +225,10 @@ place_with (const int32_t *rules_rect, uint32_t anchor, uint32_t gravity,
 
       /* Only take the flip when it is the better of the two: a popup wider than
        * the parent gains nothing by changing sides. */
-      if (overflow (flipped_x, width, box_x + box_width) +
-          (box_x - MIN (flipped_x, box_x)) <
-          overflow (*out_x, width, box_x + box_width) + (box_x - MIN (*out_x, box_x)))
+      if (overflow (flipped_x, width, box_right) +
+          ((gint64) box_x - MIN (flipped_x, (gint64) box_x)) <
+          overflow (*out_x, width, box_right) +
+          ((gint64) box_x - MIN (*out_x, (gint64) box_x)))
         {
           *out_x = flipped_x;
           *out_y = flipped_y;
@@ -229,9 +236,9 @@ place_with (const int32_t *rules_rect, uint32_t anchor, uint32_t gravity,
     }
 
   if ((constraint & XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_Y) != 0 &&
-      (*out_y < box_y || *out_y + height > box_y + box_height))
+      (*out_y < box_y || *out_y + height > box_bottom))
     {
-      int32_t flipped_x, flipped_y;
+      gint64 flipped_x, flipped_y;
 
       place_with (rules_rect, mirror_anchor_y (anchor), mirror_gravity_y (gravity),
                   width, height, box_x, box_y, box_width, box_height,
@@ -239,9 +246,10 @@ place_with (const int32_t *rules_rect, uint32_t anchor, uint32_t gravity,
                                  XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_Y),
                   &flipped_x, &flipped_y);
 
-      if (overflow (flipped_y, height, box_y + box_height) +
-          (box_y - MIN (flipped_y, box_y)) <
-          overflow (*out_y, height, box_y + box_height) + (box_y - MIN (*out_y, box_y)))
+      if (overflow (flipped_y, height, box_bottom) +
+          ((gint64) box_y - MIN (flipped_y, (gint64) box_y)) <
+          overflow (*out_y, height, box_bottom) +
+          ((gint64) box_y - MIN (*out_y, (gint64) box_y)))
         {
           *out_x = flipped_x;
           *out_y = flipped_y;
@@ -250,7 +258,7 @@ place_with (const int32_t *rules_rect, uint32_t anchor, uint32_t gravity,
 
   if ((constraint & XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_X) != 0)
     {
-      int32_t past = overflow (*out_x, width, box_x + box_width);
+      gint64 past = overflow (*out_x, width, box_right);
 
       if (past > 0)
         *out_x -= past;
@@ -260,7 +268,7 @@ place_with (const int32_t *rules_rect, uint32_t anchor, uint32_t gravity,
 
   if ((constraint & XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y) != 0)
     {
-      int32_t past = overflow (*out_y, height, box_y + box_height);
+      gint64 past = overflow (*out_y, height, box_bottom);
 
       if (past > 0)
         *out_y -= past;
@@ -279,7 +287,7 @@ xdg_popup_replace (NestedSurface *self)
   int32_t rules_rect[6];
   int32_t box_x, box_y, box_width, box_height;
   int32_t width, height;
-  int32_t x = 0, y = 0;
+  gint64 x = 0, y = 0;
 
   if (!parent)
     return;
@@ -314,9 +322,12 @@ xdg_popup_replace (NestedSurface *self)
               self->positioner.constraint, &x, &y);
 
   /* The popup's own window geometry is what sits at that point, so the surface
-   * itself starts a geometry offset earlier. */
-  self->popup_x = x - self->geom_x;
-  self->popup_y = y - self->geom_y;
+   * itself starts a geometry offset earlier. The difference is formed in
+   * gint64 and clamped where it becomes the int the paint path reads. */
+  self->popup_x = (int) CLAMP (x - self->geom_x,
+                               (gint64) G_MININT, (gint64) G_MAXINT);
+  self->popup_y = (int) CLAMP (y - self->geom_y,
+                               (gint64) G_MININT, (gint64) G_MAXINT);
 
   g_debug ("nested: popup %dx%d placed at %d,%d over %dx%d of its parent",
            width, height, self->popup_x, self->popup_y, box_width, box_height);
@@ -454,6 +465,18 @@ output_bind (struct wl_client *client, void *data, uint32_t version, uint32_t id
   if (version >= WL_OUTPUT_SCALE_SINCE_VERSION)
     wl_output_send_scale (resource, 1);
 
+  /* Both events are since version 4 and mandatory once a client binds at
+   * that version; the done below is what ends the batch. The ifdef keeps a
+   * build against a libwayland older than 1.20 working; such a build also
+   * advertises the global at version 4, but it cannot name the output. */
+#ifdef WL_OUTPUT_NAME_SINCE_VERSION
+  if (version >= WL_OUTPUT_NAME_SINCE_VERSION)
+    {
+      wl_output_send_name (resource, "nested-0");
+      wl_output_send_description (resource, "cefnest nested output");
+    }
+#endif
+
   output_send_state (output);
 }
 
@@ -476,6 +499,28 @@ find_output_for_client (NestedCompositor *self, struct wl_client *client)
 static void
 xdg_wm_base_destroy (struct wl_client *client, struct wl_resource *resource)
 {
+  NestedCompositor *self = wl_resource_get_user_data (resource);
+  NestedSurface *surface;
+
+  /* xdg-shell makes destroying the global while surfaces it created are still
+   * alive illegal. Post the error instead of letting those surfaces keep a
+   * pointer to a dead xdg_wm_base; the connection dies, which takes the
+   * resources with it. */
+  if (self)
+    {
+      wl_list_for_each (surface, &self->surfaces, nested_link)
+        {
+          if (surface->xdg_surface &&
+              wl_resource_get_client (surface->xdg_surface) == client)
+            {
+              wl_resource_post_error (resource, WL_DISPLAY_ERROR_INVALID_METHOD,
+                                      "xdg_wm_base destroyed while an xdg_surface "
+                                      "it created is still alive");
+              return;
+            }
+        }
+    }
+
   wl_resource_destroy (resource);
 }
 
@@ -749,7 +794,11 @@ xdg_surface_get_toplevel (struct wl_client *client, struct wl_resource *resource
   NestedSurface *self = wl_resource_get_user_data (resource);
   struct wl_resource *toplevel;
 
-  if (self->is_toplevel || self->is_popup)
+  /* A drag icon surface is owned by the data-device drag until that drag is
+   * destroyed; giving it a toplevel role would put the same wl_surface into
+   * two roles at once. The flag is cleared when the drag ends, so the surface
+   * can still be reused afterwards. */
+  if (self->is_toplevel || self->is_popup || self->is_drag_icon)
     {
       wl_resource_post_error (resource, XDG_WM_BASE_ERROR_ROLE,
                               "surface already has a role");
@@ -797,7 +846,7 @@ xdg_surface_get_popup (struct wl_client *client, struct wl_resource *resource,
       return;
     }
 
-  if (self->is_toplevel || self->is_popup)
+  if (self->is_toplevel || self->is_popup || self->is_drag_icon)
     {
       wl_resource_post_error (resource, XDG_WM_BASE_ERROR_ROLE,
                               "surface already has a role");
@@ -828,15 +877,33 @@ xdg_surface_get_popup (struct wl_client *client, struct wl_resource *resource,
   /* How far up this parent already hangs. Counting here, at the one place a
    * popup link is ever made, is what keeps every later walk of the tree — the
    * placement of a window's popups, the paint stack — inside a depth the host's
-   * stack can carry. */
-  for (depth = 0, ancestor = parent; ancestor->popup_parent; depth++)
-    ancestor = ancestor->popup_parent;
-  if (depth >= NESTED_POPUP_MAX_DEPTH)
+   * stack can carry.
+   *
+   * The same walk has to refuse a parent that already hangs off this surface:
+   * linking this popup to it would close the chain into a cycle, and every
+   * later walk would recurse until the host's stack or patience ran out. A
+   * cycle that does not pass through this surface cannot be made by this
+   * request, but the depth bound still stops the walk instead of trusting
+   * that, because a chain built by an older or broken peer is not something
+   * the next request should spin on. */
+  for (depth = 0, ancestor = parent; ancestor; depth++)
     {
-      wl_resource_post_error (resource, XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT,
-                              "a popup may not hang more than %d deep",
-                              NESTED_POPUP_MAX_DEPTH);
-      return;
+      if (ancestor == self)
+        {
+          wl_resource_post_error (resource,
+                                  XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT,
+                                  "a popup may not hang from its own descendant");
+          return;
+        }
+      if (depth >= NESTED_POPUP_MAX_DEPTH)
+        {
+          wl_resource_post_error (resource,
+                                  XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT,
+                                  "a popup may not hang more than %d deep",
+                                  NESTED_POPUP_MAX_DEPTH);
+          return;
+        }
+      ancestor = ancestor->popup_parent;
     }
 
   popup = resource_create (client, &xdg_popup_interface,

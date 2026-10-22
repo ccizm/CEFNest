@@ -294,10 +294,16 @@ cursor_apply_surface (NestedCompositor *self)
    * so a cursor drawn for a scaled surface has to be scaled up to match. */
   scale = self->cursor_pending->scale > 0 ? self->cursor_pending->scale : 1;
   fallback = cursor_named ("default");
-  cursor = gdk_cursor_new_from_texture (texture,
-                                        self->cursor_hotspot_x * scale,
-                                        self->cursor_hotspot_y * scale,
-                                        fallback);
+  /* Both the hotspot and the scale are client-chosen ints; their product is
+   * not. GDK takes an int, so clamp the widened product instead of letting
+   * the multiplication wrap. */
+  cursor = gdk_cursor_new_from_texture (
+    texture,
+    (int) CLAMP ((gint64) self->cursor_hotspot_x * scale,
+                 (gint64) G_MININT, (gint64) G_MAXINT),
+    (int) CLAMP ((gint64) self->cursor_hotspot_y * scale,
+                 (gint64) G_MININT, (gint64) G_MAXINT),
+    fallback);
   g_clear_object (&fallback);
   g_clear_object (&self->cursor_pending);
 

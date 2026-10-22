@@ -276,8 +276,17 @@ event_string (JsonObject *object, const char *key)
 {
   /* The helper is a separate process, and a signal that documents a const char *
    * must not be handed a NULL because one field went missing on the way. */
-  return json_object_has_member (object, key) ?
-           json_object_get_string_member (object, key) : "";
+  /* has_member() is true for an explicit JSON null, and the getter answers
+   * NULL for it. A signal documented as const char * must not receive that
+   * any more than it may receive a missing member. */
+  if (!json_object_has_member (object, key))
+    return "";
+
+  {
+    const char *value = json_object_get_string_member (object, key);
+
+    return value ? value : "";
+  }
 }
 
 /* The three below are the same rule as event_string, for the other field types a
@@ -756,6 +765,14 @@ read_chunk_done (GObject *source, GAsyncResult *result, gpointer data)
           !self->stopping)
         g_warning ("session: control read failed: %s", error->message);
       g_clear_error (&error);
+
+      /* A failed read is the end of this channel. Re-arming the read on a
+       * stream that is already dead would return EOF immediately and arm again,
+       * forever: the channel has to be dropped here, not left for the child to
+       * be reaped. */
+      keep_reading = FALSE;
+      drop_connection (self);
+      mark_closed (self, "control read failed");
     }
   else if (bytes)
     {
@@ -763,6 +780,8 @@ read_chunk_done (GObject *source, GAsyncResult *result, gpointer data)
 
       if (length == 0)
         {
+          keep_reading = FALSE;
+          drop_connection (self);
           mark_closed (self, "control channel closed");
         }
       else
@@ -779,6 +798,8 @@ read_chunk_done (GObject *source, GAsyncResult *result, gpointer data)
     }
   else
     {
+      keep_reading = FALSE;
+      drop_connection (self);
       mark_closed (self, "control channel closed");
     }
 
@@ -856,6 +877,22 @@ accepted (GObject *source, GAsyncResult *result, gpointer data)
   GSocketConnection *connection;
   GError *error = NULL;
 
+  /* A listener closed by stop() or by a restart completes its accept after the
+   * field has moved on. That result belongs to the old run; finishing it here
+   * is what releases the async operation, but it must not become this
+   * session's connection or close a listener started since. */
+  if (!self->listener || source != G_OBJECT (self->listener))
+    {
+      connection = g_socket_listener_accept_finish (G_SOCKET_LISTENER (source),
+                                                    result, NULL, &error);
+      if (connection)
+        g_object_unref (connection);
+      if (error)
+        g_clear_error (&error);
+      g_object_unref (self);
+      return;
+    }
+
   connection = g_socket_listener_accept_finish (G_SOCKET_LISTENER (source),
                                                 result, NULL, &error);
   if (!connection)
@@ -864,9 +901,25 @@ accepted (GObject *source, GAsyncResult *result, gpointer data)
           !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
         {
           g_warning ("session: accept failed: %s", error->message);
-          if (self->accept_retry_id == 0)
-            self->accept_retry_id =
-              g_timeout_add_once (ACCEPT_RETRY_DELAY, accept_retry_fired, self);
+
+          /* EMFILE/ENFILE is the one class worth another try: descriptors come
+           * back, and the listener is otherwise healthy. A permanent failure
+           * (the runtime directory removed, permissions changed) would just
+           * repeat every 200 ms and flood the log at 5 Hz, so it ends the
+           * session instead. */
+          if (g_error_matches (error, G_IO_ERROR,
+                               G_IO_ERROR_TOO_MANY_OPEN_FILES))
+            {
+              if (self->accept_retry_id == 0)
+                self->accept_retry_id =
+                  g_timeout_add_once (ACCEPT_RETRY_DELAY, accept_retry_fired,
+                                      self);
+            }
+          else
+            {
+              g_clear_handle_id (&self->accept_retry_id, g_source_remove);
+              mark_closed (self, "control listener failed");
+            }
         }
       g_clear_error (&error);
     }
@@ -933,12 +986,19 @@ send_json (ChromiumSession *self, JsonNode *root)
         {
           g_warning ("session: control write failed: %s", error->message);
           g_clear_error (&error);
+          /* Half a line is on the wire. The peer can no longer tell where the
+           * next command starts, so this channel is done: drop it and report
+           * the helper gone, exactly as a read-side framing failure does. */
+          drop_connection (self);
+          mark_closed (self, "control write failed");
           return;
         }
       if (written == 0)
         {
           g_warning ("session: control write stopped after %zu of %zu bytes",
                      done, total);
+          drop_connection (self);
+          mark_closed (self, "control write stalled");
           return;
         }
       done += (size_t) written;
@@ -948,6 +1008,8 @@ send_json (ChromiumSession *self, JsonNode *root)
     {
       g_warning ("session: control flush failed: %s", error->message);
       g_clear_error (&error);
+      drop_connection (self);
+      mark_closed (self, "control flush failed");
       return;
     }
 }
@@ -1455,6 +1517,14 @@ session_menu_show (ChromiumSession *self, int x, int y, GList *items)
   guint rows = 0;
   gboolean pending_separator = FALSE;
 
+  /* A second context-menu event can arrive while the previous popover is still
+   * up: the popdown only schedules its release for an idle, and a navigation
+   * can dismiss and re-open in the same dispatch. Put the old one down before
+   * replacing the field; otherwise the old idle frees the new popover and the
+   * old widget stays parented with no way to take it down. */
+  if (self->menu_popover)
+    menu_release (self);
+
   if (!self->view)
     {
       /* Nothing to draw over. Saying so with a dismissal is what keeps the
@@ -1842,9 +1912,15 @@ child_waited (GObject *source, GAsyncResult *result, gpointer data)
     g_message ("session: helper killed by signal %d",
                g_subprocess_get_term_sig (G_SUBPROCESS (source)));
 
-  mark_closed (self, "process exited");
-  g_clear_object (&self->child);
-  drop_connection (self);
+  /* A restart can replace self->child before the old process is reaped. Only
+   * the wait for the current child may close this session's channel; an old
+   * wait that did so would tear down the connection the new helper is using. */
+  if (self->child && source == G_OBJECT (self->child))
+    {
+      mark_closed (self, "process exited");
+      g_clear_object (&self->child);
+      drop_connection (self);
+    }
   g_object_unref (self);
 }
 
@@ -1882,6 +1958,9 @@ open_listener (ChromiumSession *self, GError **error)
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
                    "cannot listen on %s: %s", self->socket_path, local->message);
       g_clear_error (&local);
+      /* bind() has already created the inode; removing the socket object does
+       * not remove it from the runtime directory. */
+      g_unlink (self->socket_path);
       return FALSE;
     }
 
@@ -1899,6 +1978,7 @@ open_listener (ChromiumSession *self, GError **error)
                    "cannot listen on %s: %s", self->socket_path, local->message);
       g_clear_error (&local);
       g_clear_object (&self->listener);
+      g_unlink (self->socket_path);
       return FALSE;
     }
 
@@ -1937,9 +2017,25 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
 
   if (self->child)
     {
-      g_set_error (error, G_IO_ERROR, G_IO_ERROR_BUSY,
-                   "the helper is already running");
-      return FALSE;
+      if (self->running)
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_BUSY,
+                       "the helper is already running");
+          return FALSE;
+        }
+
+      /* ::closed has already told the host this run is over, but the process
+       * has not been reaped yet. Let it go and take its channel down so a
+       * start from the ::closed handler is not answered with BUSY forever;
+       * child_waited() compares against self->child, so the old wait callback
+       * will not touch the new session. */
+      if (self->cancellable)
+        g_cancellable_cancel (self->cancellable);
+      g_clear_handle_id (&self->accept_retry_id, g_source_remove);
+      g_subprocess_force_exit (self->child);
+      g_clear_object (&self->child);
+      close_listener (self);
+      drop_connection (self);
     }
   if (!self->view)
     {

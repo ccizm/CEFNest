@@ -35,7 +35,7 @@ client saw. Each mode asks for a different set of protocol objects:
 
 with `--dmabuf`, `--text-input`, `--cursor-shape`, `--popup`, `--refused`,
 `--pool-budget`, `--wrong-object`, `--pool-shrink`, `--empty-copy`,
-`--popup-depth`, `--damage-scale`, `--drag-fake-serial`, `--drag-no-source`,
+`--popup-depth`, `--popup-cycle`, `--popup-overflow`, `--damage-scale`, `--drag-fake-serial`, `--drag-no-source`,
 `--dnd-requests`, `--drag-out`, `--drag-in`, `--fullscreen`,
 `--second-window`, `--gtk-client`. On a machine with no display each one exits 77,
 which is what meson reads as SKIPPED — a skip on the same page as a pass is how a

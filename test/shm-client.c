@@ -287,6 +287,22 @@ static struct zwp_primary_selection_source_v1 *primary_source;
 static int use_popup_depth;
 static int popup_depth_done;
 
+/* --popup-cycle closes the parent chain instead of only making it deep: two
+ * xdg_surfaces each asking to be a popup of the other. The depth cap alone is
+ * no answer, because a cycle never reaches a root for the walk to stop at; the
+ * compositor has to refuse the link that would make it. The attacker lives on
+ * its own connection, and the refusal has to leave the painter running. */
+static int use_popup_cycle;
+static int popup_cycle_done;
+
+/* --popup-overflow drives the positioner arithmetic with every input at the
+ * top of its int32 range. The placement walk adds those values together; an
+ * int32 sum that leaves the range is undefined behaviour, not a wrong number.
+ * The compositor has to survive it and keep serving the connection that
+ * painted through the attack. */
+static int use_popup_overflow;
+static int popup_overflow_done;
+
 /* --drag-fake-serial asks for a drag with a serial no press ever carried.
  * wl_data_device.start_drag says the origin surface is one "the client must have
  * an active implicit grab that matches" — the one place in the drag protocol that
@@ -401,6 +417,8 @@ static void wrong_object_probe (void);
 static void pool_shrink_probe (void);
 static void empty_copy_probe (void);
 static void popup_depth_probe (void);
+static void popup_cycle_probe (void);
+static void popup_overflow_probe (void);
 static void damage_scale_probe (void);
 static void ns_drag_start (uint32_t serial);
 static void ns_check (void);
@@ -994,6 +1012,18 @@ frame_done (void *data, struct wl_callback *callback, uint32_t time)
     {
       popup_depth_done = 1;
       popup_depth_probe ();
+    }
+
+  if (use_popup_cycle && !popup_cycle_done && frames > 3)
+    {
+      popup_cycle_done = 1;
+      popup_cycle_probe ();
+    }
+
+  if (use_popup_overflow && !popup_overflow_done && frames > 3)
+    {
+      popup_overflow_done = 1;
+      popup_overflow_probe ();
     }
 
   /* Needs a seat and a data device, so it waits for the same settle the other
@@ -1824,6 +1854,14 @@ pointer_leave (void *data, struct wl_pointer *wl_pointer, uint32_t serial,
                struct wl_surface *wl_surface)
 {
   struct _Popup *popup = popup_for_surface (wl_surface);
+
+  /* The compositor clears a client's scroll_axes when the pointer leaves, so a
+   * gesture cannot continue across a re-enter. This client has to forget the
+   * same account: otherwise a stop after the re-enter is judged against axes
+   * that moved before the leave. */
+  axes_moved = 0;
+  axes_stopped = 0;
+  axis_in_frame = 0;
 
   if (popup)
     {
@@ -4196,6 +4234,220 @@ popup_depth_probe (void)
                    "still serving the client that painted it\n", __LINE__);
 }
 
+/* --------------------------------------------------------- --popup-cycle */
+
+/* Two xdg_surfaces, each asking to be a popup of the other, close the parent
+ * chain into a cycle. The compositor walks that chain to place popups and to
+ * build the paint stack, so the only answer that keeps the host alive is the
+ * one that refuses the second link. A depth cap does not help here: a cycle has
+ * no root, so the walk that counts depth never terminates either.
+ *
+ * As with --popup-depth, the attacker lives on a connection of its own and the
+ * wanted answer is the refusal. The client that painted through the attack has
+ * to keep working, because the compositor is expected to reject the request,
+ * not the process. */
+
+static void
+popup_cycle_probe (void)
+{
+  struct DepthConnection conn;
+  struct wl_surface *root_surface, *child_surface;
+  struct xdg_surface *root, *child;
+  struct xdg_positioner *positioner;
+  int refused;
+
+  memset (&conn, 0, sizeof conn);
+  conn.display = wl_display_connect (NULL);
+  if (!conn.display)
+    {
+      fprintf (stderr, "client: %d: no second connection for the popup-cycle "
+                       "probe\n", __LINE__);
+      exit (1);
+    }
+
+  conn.registry = wl_display_get_registry (conn.display);
+  wl_registry_add_listener (conn.registry, &depth_registry_listener, &conn);
+  wl_display_roundtrip (conn.display);
+
+  if (!conn.compositor || !conn.wm_base)
+    {
+      fprintf (stderr, "client: %d: popup-cycle probe globals compositor=%d "
+                       "xdg_wm_base=%d\n", __LINE__, !!conn.compositor,
+               !!conn.wm_base);
+      exit (1);
+    }
+
+  root_surface = wl_compositor_create_surface (conn.compositor);
+  root = xdg_wm_base_get_xdg_surface (conn.wm_base, root_surface);
+  xdg_surface_add_listener (root, &depth_surface_listener, NULL);
+
+  child_surface = wl_compositor_create_surface (conn.compositor);
+  child = xdg_wm_base_get_xdg_surface (conn.wm_base, child_surface);
+  xdg_surface_add_listener (child, &depth_surface_listener, NULL);
+
+  /* First edge: child hangs off root. Neither surface has a role yet, so this
+   * is the ordinary menu shape the compositor has to accept. */
+  positioner = xdg_wm_base_create_positioner (conn.wm_base);
+  xdg_positioner_set_size (positioner, 40, 20);
+  xdg_positioner_set_anchor_rect (positioner, 1, 1, 8, 8);
+  xdg_positioner_set_gravity (positioner, XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT);
+  xdg_surface_get_popup (child, root, positioner);
+  xdg_positioner_destroy (positioner);
+
+  if (wl_display_roundtrip (conn.display) < 0)
+    {
+      fprintf (stderr, "client: %d: popup-cycle gate FAILED: the compositor "
+                       "refused the plain first popup\n", __LINE__);
+      exit (1);
+    }
+
+  /* Second edge: root hangs off child. Linking this would make root its own
+   * ancestor, so the request has to be refused before the link is made. */
+  positioner = xdg_wm_base_create_positioner (conn.wm_base);
+  xdg_positioner_set_size (positioner, 40, 20);
+  xdg_positioner_set_anchor_rect (positioner, 2, 2, 8, 8);
+  xdg_positioner_set_gravity (positioner, XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT);
+  xdg_surface_get_popup (root, child, positioner);
+  xdg_positioner_destroy (positioner);
+
+  refused = wl_display_roundtrip (conn.display) < 0;
+  if (!refused)
+    {
+      fprintf (stderr, "client: %d: popup-cycle gate FAILED: the compositor "
+                       "linked a popup to its own descendant, so the parent "
+                       "chain is a cycle the next tree walk cannot finish\n",
+               __LINE__);
+      exit (1);
+    }
+
+  {
+    const struct wl_interface *interface = NULL;
+    uint32_t id = 0;
+    uint32_t code = wl_display_get_protocol_error (conn.display, &interface, &id);
+
+    if (interface != &xdg_surface_interface ||
+        code != XDG_WM_BASE_ERROR_INVALID_POPUP_PARENT)
+      {
+        fprintf (stderr, "client: %d: popup-cycle gate FAILED: refused for %s "
+                         "code %u on object %u, not invalid_popup_parent on "
+                         "xdg_surface\n", __LINE__,
+                 interface ? interface->name : "(no protocol error)", code, id);
+        exit (1);
+      }
+  }
+
+  fprintf (stderr, "client: %d: the cycle was refused as an invalid popup "
+                   "parent; the chain stayed a tree\n", __LINE__);
+
+  wl_display_disconnect (conn.display);
+
+  /* The attacker and its half-built chain are gone; the painting client never
+   * sent anything wrong and must still be served. */
+  if (wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: %d: popup-cycle gate FAILED: the compositor "
+                       "hung up on the client that painted through the attack\n",
+               __LINE__);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: %d: the compositor refused the cycle and is still "
+                   "serving the client that painted it\n", __LINE__);
+}
+
+/* ------------------------------------------------------ --popup-overflow */
+
+/* The positioner is a bag of int32s chosen by the client. Turning it into a
+ * placement adds the anchor rectangle, the offset, the size and the box
+ * together; an int32 sum that leaves its range is undefined behaviour, and the
+ * compiler is allowed to make that mean anything. This probe puts every input
+ * at the top of its range so the walk has to leave it, then checks that the
+ * compositor is still serving the client that painted through the attack. */
+
+static void
+popup_overflow_probe (void)
+{
+  struct DepthConnection conn;
+  struct wl_surface *root_surface, *child_surface;
+  struct xdg_surface *root, *child;
+  struct xdg_positioner *positioner;
+
+  memset (&conn, 0, sizeof conn);
+  conn.display = wl_display_connect (NULL);
+  if (!conn.display)
+    {
+      fprintf (stderr, "client: %d: no second connection for the popup-overflow "
+                       "probe\n", __LINE__);
+      exit (1);
+    }
+
+  conn.registry = wl_display_get_registry (conn.display);
+  wl_registry_add_listener (conn.registry, &depth_registry_listener, &conn);
+  wl_display_roundtrip (conn.display);
+
+  if (!conn.compositor || !conn.wm_base)
+    {
+      fprintf (stderr, "client: %d: popup-overflow probe globals compositor=%d "
+                       "xdg_wm_base=%d\n", __LINE__, !!conn.compositor,
+               !!conn.wm_base);
+      exit (1);
+    }
+
+  root_surface = wl_compositor_create_surface (conn.compositor);
+  root = xdg_wm_base_get_xdg_surface (conn.wm_base, root_surface);
+  xdg_surface_add_listener (root, &depth_surface_listener, NULL);
+  xdg_surface_get_toplevel (root);
+  wl_surface_commit (root_surface);
+
+  if (wl_display_roundtrip (conn.display) < 0)
+    {
+      fprintf (stderr, "client: %d: popup-overflow gate FAILED: the compositor "
+                       "refused the plain toplevel\n", __LINE__);
+      exit (1);
+    }
+
+  child_surface = wl_compositor_create_surface (conn.compositor);
+  child = xdg_wm_base_get_xdg_surface (conn.wm_base, child_surface);
+  xdg_surface_add_listener (child, &depth_surface_listener, NULL);
+
+  positioner = xdg_wm_base_create_positioner (conn.wm_base);
+  xdg_positioner_set_size (positioner, 40, 20);
+  /* x + width and x + offset both pass INT32_MAX once the placement walk adds
+   * them; the constraint set forces the flip and slide branches as well. */
+  xdg_positioner_set_anchor_rect (positioner, INT32_MAX - 1, INT32_MAX - 1, 8, 8);
+  xdg_positioner_set_offset (positioner, INT32_MAX, INT32_MAX);
+  xdg_positioner_set_constraint_adjustment (
+    positioner,
+    XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_X |
+    XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_Y |
+    XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_X |
+    XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y);
+  xdg_surface_get_popup (child, root, positioner);
+  xdg_positioner_destroy (positioner);
+
+  if (wl_display_roundtrip (conn.display) < 0)
+    {
+      fprintf (stderr, "client: %d: popup-overflow gate FAILED: the compositor "
+                       "died on a positioner at the int32 edge\n", __LINE__);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: %d: the compositor survived a positioner at the "
+                   "int32 edge\n", __LINE__);
+  wl_display_disconnect (conn.display);
+
+  if (wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: %d: popup-overflow gate FAILED: the compositor "
+                       "hung up on the client that painted through the attack\n",
+               __LINE__);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: %d: the compositor is still serving the client that "
+                   "painted through it\n", __LINE__);
+}
+
 /* --------------------------------------------------- --drag-fake-serial */
 
 /* Every slot a version 3 source can be answered with, because a compositor that
@@ -4516,6 +4768,10 @@ main (int argc, char *argv[])
         use_empty_copy = 1;
       else if (!strcmp (argv[i], "--popup-depth"))
         use_popup_depth = 1;
+      else if (!strcmp (argv[i], "--popup-cycle"))
+        use_popup_cycle = 1;
+      else if (!strcmp (argv[i], "--popup-overflow"))
+        use_popup_overflow = 1;
       else if (!strcmp (argv[i], "--damage-scale"))
         use_damage_scale = 1;
       else if (!strcmp (argv[i], "--drag-no-source"))

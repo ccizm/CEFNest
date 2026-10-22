@@ -175,6 +175,10 @@ void CloseEveryBrowser() {
       continue;
     closing.push_back({entry.second.browser, entry.second.view,
                        entry.second.window, entry.second.windowed});
+    /* The same rule as a single close-browser: the window and the slot must
+     * not be the last owners of the view when CloseBrowser runs, or Alloy
+     * treats the close as a window close and never reaches OnBeforeClose. */
+    entry.second.view = nullptr;
   }
 
   if (closing.empty()) {
@@ -185,6 +189,7 @@ void CloseEveryBrowser() {
   for (Closing& one : closing) {
     if (!one.windowed && one.view && one.window)
       one.window->RemoveChildView(one.view);
+    one.view = nullptr;
     one.browser->GetHost()->CloseBrowser(true);
   }
 }
@@ -1133,12 +1138,15 @@ class HelperPermissionHandler : public CefPermissionHandler {
     auto wire = g_prompt_wire.find(prompt_id);
     if (wire == g_prompt_wire.end())
       return;
+    /* The erase destroys the node `wire` points at: read the id it carries
+     * first. Reading wire->second afterwards is a use of a freed iterator,
+     * and the id it would return is whatever the allocator left there. */
+    const uint32_t id = wire->second;
     g_prompt_wire.erase(wire);
 
-    auto held = g_permissions.find(wire->second);
+    auto held = g_permissions.find(id);
     if (held == g_permissions.end())
       return;
-    const uint32_t id = held->first;
     g_permissions.erase(held);
 
     CefRefPtr<CefDictionaryValue> dict = NewEvent("permission-dismissed");
@@ -1278,12 +1286,21 @@ void HandleCommand(const std::string& line) {
       EmitStatus("no-such-browser");
       return;
     }
-    /* A tab is a child of the shared CefWindow. Closing the browser while its
-     * view is still attached makes CEF tear the window down, which would take
-     * every other tab with it; detach first, then close. */
-    if (!it->second.windowed && it->second.view)
-      it->second.window->RemoveChildView(it->second.view);
-    it->second.browser->GetHost()->CloseBrowser(true);
+    /* A tab is a child of the shared CefWindow. Alloy treats CloseBrowser on a
+     * browser whose view is still owned by the window as a request to close
+     * the window, which takes every other tab with it. Detaching the view and
+     * releasing the slot's reference first makes the browser the only owner of
+     * its lifetime, so CloseBrowser closes just that browser. The local
+     * reference keeps the browser alive across the callback, which erases the
+     * map entry this iterator points into. */
+    CefRefPtr<CefBrowser> browser = it->second.browser;
+    if (!it->second.windowed)
+      {
+        if (it->second.view && it->second.window)
+          it->second.window->RemoveChildView(it->second.view);
+        it->second.view = nullptr;
+      }
+    browser->GetHost()->CloseBrowser(true);
     return;
   }
 
@@ -1833,6 +1850,11 @@ class HelperClient : public CefClient,
         slot = &it->second;
       g_slot_to_browser.erase(pending);
     }
+    /* Compare the request-side slot with what the host asked to select before
+     * the entry is re-keyed: after the re-key, `slot->slot` is a CEF browser
+     * id, and the two counters only stay equal until the first creation
+     * failure. Reading it afterwards leaves every later browser unselected. */
+    bool select_this = slot && slot->slot == g_select_slot;
     if (slot) {
       /* The map starts under the request slot so commands can find the view
        * before CEF has finished creating the browser. Copy before erasing:
@@ -1844,8 +1866,6 @@ class HelperClient : public CefClient,
       g_browser_slots[entry.slot] = entry;
       slot = &g_browser_slots[entry.slot];
     }
-
-    const bool select_this = slot && slot->slot == g_select_slot;
     if (!g_browser || select_this)
       SelectBrowserById(browser->GetIdentifier());
     else if (slot && slot->view)
@@ -1918,10 +1938,21 @@ class HelperClient : public CefClient,
     dict->SetString("url", target_url);
     dict->SetInt("disposition", (int) target_disposition);
     dict->SetBool("gesture", user_gesture ? true : false);
+    /* NewEvent() names the active browser. A popup can be requested by a
+     * background one, and the host needs to know which tab opened it. */
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
     Emit(dict);
 
-    if (target_disposition != CEF_WOD_NEW_BACKGROUND_TAB)
-      g_browser->GetMainFrame()->LoadURL(target_url);
+    /* Navigate the browser that asked, not whichever browser is active: a
+     * window.open() in a background tab must not replace the page the user is
+     * looking at. The parameter is guaranteed by CEF, but its frame is not,
+     * and dereferencing a NULL frame here would take the helper down. */
+    if (target_disposition != CEF_WOD_NEW_BACKGROUND_TAB && browser) {
+      CefRefPtr<CefFrame> frame = browser->GetMainFrame();
+      if (frame)
+        frame->LoadURL(target_url);
+    }
 
     return true;
   }
@@ -1972,8 +2003,12 @@ class HelperClient : public CefClient,
   void OnFullscreenModeChange(CefRefPtr<CefBrowser> browser,
                               bool fullscreen) override {
     fprintf(stderr, "helper: page fullscreen mode = %d\n", fullscreen);
-    if (g_window)
-      g_window->SetFullscreen(fullscreen);
+    /* The browser that asked owns the window to move. Using the globally
+     * active browser here would fullscreen another tab's window when a
+     * background browser receives the request. */
+    auto it = g_browser_slots.find(browser->GetIdentifier());
+    if (it != g_browser_slots.end() && it->second.window)
+      it->second.window->SetFullscreen(fullscreen);
   }
 
   void OnTitleChange(CefRefPtr<CefBrowser> browser,
@@ -2146,10 +2181,18 @@ class HelperWindowDelegate : public CefWindowDelegate {
   // the window only if we ask it to.
   void OnWindowFullscreenTransition(CefRefPtr<CefWindow> window,
                                     bool is_completed) override {
-    if (!is_completed)
+    if (!is_completed || window->IsFullscreen())
       return;
-    if (!window->IsFullscreen() && g_browser && g_browser->GetHost())
-      g_browser->GetHost()->ExitFullscreen(true);
+    /* Exit fullscreen on the browser that lives in this window, not on the
+     * active one: the user may have left fullscreen in a window that is not
+     * the tab currently selected. */
+    for (auto& entry : g_browser_slots) {
+      if (entry.second.window.get() == window.get() && entry.second.browser &&
+          entry.second.browser->GetHost()) {
+        entry.second.browser->GetHost()->ExitFullscreen(true);
+        break;
+      }
+    }
   }
 
   // Ignored once the compositor configures us; the widget's size wins.

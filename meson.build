@@ -23,7 +23,11 @@ m_dep = meson.get_compiler('c').find_library('m', required: false)
 
 wayland_scanner = find_program('wayland-scanner')
 add_project_arguments ('-Wno-unused-parameter', language: 'c')
-protocols_dir = run_command('pkg-config', '--variable=pkgdatadir', 'wayland-protocols', check: true).stdout().strip()
+# The staging XML below (fractional-scale, cursor-shape) is 1.31/1.32 and up.
+# Ask for the version, so an older distribution fails here with a message about
+# wayland-protocols instead of a wayland-scanner error about a missing file.
+wayland_protocols_dep = dependency('wayland-protocols', version: '>=1.32')
+protocols_dir = wayland_protocols_dep.get_variable(pkgconfig: 'pkgdatadir')
 xdg_shell_xml = protocols_dir / 'stable/xdg-shell/xdg-shell.xml'
 
 # The helper is a CEF application, so it drags the whole Chromium runtime with

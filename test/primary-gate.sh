@@ -14,7 +14,7 @@ set -u -o pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DEMO="$ROOT/builddir/src/cefnest-demo"
-HELPER=${CHROMIUM_HELPER:-"$ROOT/helper/build/Release/cefnest-helper"}
+. "$ROOT/test/helper-path.sh"
 PAGE="file://$ROOT/test/primary-page.html"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT

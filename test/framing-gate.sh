@@ -135,6 +135,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] || [ ! -x "$DEMO" ]; then
   # open shows up in its table instead of vanishing from a passing line.
   printf '  skip burst: needs a wayland session and a built demo\n'
   printf '  skip flood: needs a wayland session and a built demo\n'
+  printf '  skip eof: needs a wayland session and a built demo\n'
   printf '%d failure(s)\n' "$fails"
   exit $(((fails > 0)))
 fi
@@ -257,6 +258,75 @@ if grep -qaE 'helper status: before' "$WORK/flood.log"; then
   bad "flood: the bytes before a NUL were read as an event"
   grep -anE 'helper status: before' "$WORK/flood.log" | cut -c1-120 | sed 's/^/         /'
 else ok "flood: nothing was handled out of the NUL line"; fi
+
+# ---------------------------------------------------------------------------
+# 4. A channel that has ended must not be read again.
+# ---------------------------------------------------------------------------
+
+# The read loop is asynchronous: its callback re-arms itself after every chunk.
+# A peer that closes the socket without exiting the process leaves the host with
+# an EOF that arrives immediately and forever — the child is still alive, so the
+# reaping path never runs to drop the connection. The assertion is the host's own
+# CPU time: re-arming a dead read burns a core, while a dropped channel idles.
+cat > "$WORK/eof-helper.py" <<'EOF'
+#!/usr/bin/env python3
+import json
+import os
+import socket
+import time
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ['CHROMIUM_HELPER_SOCKET'])
+sock.sendall((json.dumps({'event': 'ready', 'pid': os.getpid(),
+                          'cef': 'eof'}) + '\n').encode())
+time.sleep(0.2)
+# The channel ends; the process does not. This is the shape of a helper that
+# has given up on its control socket but is still running.
+sock.close()
+time.sleep(8)
+EOF
+chmod +x "$WORK/eof-helper.py"
+
+cat > "$WORK/eof.session" <<EOF
+# The wait is the last step on purpose: helper-gone only ends a run whose
+# script still has steps left, and the run has to stay alive while its CPU is
+# measured. The wait timer ends it.
+load http://gate.test/page
+wait 6000
+EOF
+
+printf '== eof\n'
+env GDK_BACKEND=wayland CHROMIUM_HELPER="$WORK/eof-helper.py" \
+  CHROMIUM_SESSION_SCRIPT="$WORK/eof.session" \
+  "$DEMO" >"$WORK/eof.out" 2>"$WORK/eof.log" &
+eof_pid=$!
+
+# Two seconds in, the channel has closed. Measure the next two seconds of CPU:
+# a read loop that re-arms on EOF spends them, a dropped channel does not.
+sleep 2
+before=$(awk '{ print $14 + $15 }' "/proc/$eof_pid/stat" 2>/dev/null || echo 0)
+sleep 2
+after=$(awk '{ print $14 + $15 }' "/proc/$eof_pid/stat" 2>/dev/null || echo 0)
+used=$((after - before))
+wait "$eof_pid"
+eof_status=$?
+
+if [ "$used" -lt 100 ]; then
+  ok "eof: the host used $used CPU tick(s) in two seconds after the peer closed"
+else
+  bad "eof: the host used $used CPU tick(s) in two seconds after the peer closed — the read loop is re-arming on EOF"
+  tail -8 "$WORK/eof.log" | sed 's/^/         /'
+fi
+# A helper that vanishes in the middle of a script ends the run by design; what
+# this run grades is that the host noticed, not which status the script chose.
+if grep -qaE 'the helper went away|helper stopped' "$WORK/eof.log" "$WORK/eof.out" 2>/dev/null; then
+  ok "eof: the host noticed the channel end"
+else
+  bad "eof: the host never reported the channel end — see $WORK/eof.log"
+  tail -8 "$WORK/eof.log" | sed 's/^/         /'
+fi
+[ "$eof_status" = 0 ] || [ "$eof_status" = 1 ] || \
+  bad "eof: the demo exited with $eof_status — see $WORK/eof.log"
 
 printf '%d failure(s)\n' "$fails"
 exit $(((fails > 0)))

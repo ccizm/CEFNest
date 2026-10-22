@@ -320,7 +320,14 @@ download_path (const char *dir, const char *suggested)
         return g_steal_pointer (&full);
     }
 
-  return g_build_filename (dir, name, NULL);
+  /* 999 candidates exhausted: the demo's names carry a timestamp rather than
+   * handing back a name that is already there and letting the write replace
+   * it. */
+  {
+    g_autofree char *candidate = g_strdup_printf ("%s-%" G_GINT64_FORMAT, name,
+                                                  g_get_real_time ());
+    return g_build_filename (dir, candidate, NULL);
+  }
 }
 
 static void

@@ -28,7 +28,7 @@ set -u -o pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DEMO="$ROOT/builddir/src/cefnest-demo"
-HELPER=${CHROMIUM_HELPER:-"$ROOT/helper/build/Release/cefnest-helper"}
+. "$ROOT/test/helper-path.sh"
 PAGE="file://$ROOT/test/dnd-page.html"
 # Nested display names are global on the outer compositor: a second
 # `gnome-shell --wayland-display=cefnest-ci` exits with "Nested session is
@@ -45,6 +45,7 @@ mkdir -p "$CHOME" "$RT"
 chmod 700 "$RT"
 
 fails=0
+payload_skipped=0
 ok()  { printf '  ok   %s\n' "$1"; }
 bad() { printf '  FAIL %s\n' "$1"; fails=$((fails + 1)); }
 
@@ -92,9 +93,17 @@ echo "== starting nested mutter (headless)"
 cat > "$RUN/gs.sh" <<EOF
 #!/usr/bin/env bash
 printf %s \$\$ > "$RUN/gs.pid"
-exec dbus-run-session -- gnome-shell --headless --wayland-display="$NAME"
+exec dbus-run-session -- bash "$RUN/in-session.sh"
 EOF
-chmod +x "$RUN/gs.sh"
+# The bus address is created by dbus-run-session for its child, so it is not in
+# the pid's own environ. The child writes it down before exec'ing gnome-shell;
+# ci-session.sh then hands the same address to the payload.
+cat > "$RUN/in-session.sh" <<EOF
+#!/usr/bin/env bash
+printf %s "\$DBUS_SESSION_BUS_ADDRESS" > "$RUN/bus.addr"
+exec gnome-shell --headless --wayland-display="$NAME"
+EOF
+chmod +x "$RUN/gs.sh" "$RUN/in-session.sh"
 setsid --fork env -u WAYLAND_DISPLAY -u DISPLAY "${gs_env[@]}" "$RUN/gs.sh" \
   >"$RUN/gs.log" 2>&1 < /dev/null
 
@@ -117,24 +126,19 @@ else
 fi
 
 # What the payload needs: the socket, the backend that reads it, and a runtime
-# directory it can put its own nested compositor's socket in. The bus address is
-# taken from the compositor's own environment so the payload reaches the portal
-# started inside this session rather than the host's.
+# directory it can put its own nested compositor's socket in.
+#
+# The nested session has a bus of its own (in-session.sh writes its address to
+# bus.addr), but no xdg-desktop-portal on it. Handing that address to the
+# payload was measured to stop real-CEF downloads before download-begin: the
+# browser waits on a portal that was never started. The payload therefore keeps
+# the host's bus, and the session's address stays in bus.addr for diagnosis.
 #
 # CEFNEST_HEADLESS tells a gate that no monitor is attached, which it has to know
 # before it can honestly report an assertion about what reaches the screen: this
 # mutter configures and lays out a toplevel — the demo's window gets its size and
 # Chromium paints into it — but never maps a popup surface, so a GtkPopover stays
 # mapped=0 size=0x0 forever. Gates skip exactly those checks and say so.
-bus=""
-if [ -n "$GS" ]; then
-  bus=$(tr '\0' '\n' < "/proc/$GS/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' || true)
-else
-  # /proc//environ is not a file: without the pid there is no session bus address
-  # to take, and the payload has to be told that rather than handed an empty
-  # variable and a green line.
-  echo "  note: no bus address, the process group id never arrived"
-fi
 cl_env=(
   "WAYLAND_DISPLAY=$NAME"
   "GDK_BACKEND=wayland"
@@ -144,7 +148,6 @@ cl_env=(
   "XDG_CONFIG_HOME=$CHOME/.config"
   "XDG_CACHE_HOME=$CHOME/.cache"
 )
-[ -n "$bus" ] && cl_env+=("$bus")
 
 if [ "$#" -gt 0 ]; then
   echo "== payload: $*"
@@ -154,6 +157,12 @@ if [ "$#" -gt 0 ]; then
   cat "$RUN/payload.out"
   cat "$RUN/payload.log" >&2
   if [ $rc = 0 ]; then ok "payload exited 0 inside the nested session"
+  elif [ $rc = 77 ]; then
+    # 77 is meson's "could not run here": the payload said so itself, and this
+    # run has to reach ci-all as SKIP rather than as a green line with no
+    # assertion behind it.
+    printf '  skip payload: it exited 77 and asserted nothing\n'
+    payload_skipped=1
   else bad "payload exited $rc — its output is above, the compositor's log is below"
        tail -20 "$RUN/gs.log" | sed 's/^/         /'; fi
 else
@@ -242,7 +251,9 @@ else
 fi
 
 echo
-if [ $fails = 0 ]; then printf 'ci session: passed\n'
+if [ $fails = 0 ]; then
+  printf 'ci session: passed\n'
+  if [ "$payload_skipped" = 1 ]; then exit 77; fi
 else
   printf 'ci session: %d check(s) failed\n' "$fails"
   for f in demo payload die exited quit nostart; do

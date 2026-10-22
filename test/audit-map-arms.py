@@ -118,6 +118,7 @@ def body_names (body):
 
 def main ():
     failures = []
+    handlers = 0
 
     for path in sorted (glob.glob (os.path.join (root, 'src', '*.c'))):
         with open (path, encoding = 'utf-8') as handle:
@@ -135,6 +136,7 @@ def main ():
                 functions[name] = found_body
 
         for body, offset in bodies (text, MAP_BODY):
+            handlers += 1
             problems = arms_unremovably (body, offset, text, released)
             for callee in sorted (body_names (body) & set (functions)):
                 callee_body, callee_offset = functions[callee]
@@ -142,6 +144,11 @@ def main ():
             for line, arm, why in problems:
                 failures.append ('%s:%d: %s from a map handler, and %s' %
                                  (os.path.relpath (path, root), line, arm, why))
+
+    if not handlers:
+        print ('no map handlers found in src/*.c: MAP_BODY no longer matches the '
+               'source, so this audit would be grading nothing')
+        return 1
 
     if failures:
         print ('map-handler arms that cannot be taken down:')
