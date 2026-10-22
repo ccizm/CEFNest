@@ -2092,7 +2092,7 @@ data_offer_destroy (struct wl_client *client, struct wl_resource *resource)
 /* These two are version 3 requests, so their slots had to be filled even before
  * a drag could make any use of them: a wl_resource implementation is indexed by
  * opcode and libwayland-server treats an empty slot as a bug in the compositor
- * rather than as a refusal. See docs/empty-request-slot.md. */
+ * rather than as a refusal. See docs/internals/empty-request-slot.md. */
 static void
 data_offer_finish (struct wl_client *client, struct wl_resource *resource)
 {

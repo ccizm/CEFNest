@@ -105,12 +105,12 @@ void               chromium_session_run_javascript_expression (ChromiumSession *
  * string back whole. The schema inside is the host's; this channel only carries a
  * string. Going back, there is no dedicated command: the host reaches the page
  * with chromium_session_run_javascript () and a dispatched MessageEvent
- * (docs/control-channel.md).
+ * (docs/guides/control-channel.md).
  *
  * Unlike the js-result relay, neither side of this path puts a size limit in its
  * own code, so a big message is a full-length line on the channel and the host's
  * 4 MiB ceiling applies to it as to any other event — over the line the session
- * closes instead of truncating (docs/control-channel.md "通道读这一侧"). What a
+ * closes instead of truncating (docs/guides/control-channel.md "通道读这一侧"). What a
  * very large payload does *inside* CEF's process-to-process message has never
  * been measured here, so treat delivery of an oversized one as unverified. */
 
@@ -119,10 +119,10 @@ void               chromium_session_run_javascript_expression (ChromiumSession *
  * gesture stay on the socket event, so the host cannot tell from here whether the
  * page wanted a background tab or a foreground window, and the helper has already
  * acted — foreground requests navigate this view in place, a background tab is
- * reported and left alone (docs/control-channel.md). */
+ * reported and left alone (docs/guides/control-channel.md). */
 
 /* The page's sound leaves the helper through its own audio process and lands on
- * the host's speakers (docs/audio-path.md), so this is the only switch the
+ * the host's speakers (docs/features/audio-path.md), so this is the only switch the
  * embedding app has. chromium_session_get_muted () reports what the helper read
  * back: it changes a round trip after the call, and moves ::changed with it.
  * A new helper always starts unmuted. */
@@ -176,7 +176,7 @@ void               chromium_session_resume_download (ChromiumSession *self,
  * next / previous match of this same search"), because the helper keeps no find
  * state and a step cannot be about a search the host has forgotten. The answer
  * is not this call but the signal: ::find-result (identifier, count,
- * active_ordinal, final). Measured against real Chromium (docs/find-path.md):
+ * active_ordinal, final). Measured against real Chromium (docs/features/find-path.md):
  * every request takes a fresh identifier, so it groups the replies to one
  * request rather than counting searches; a request that finds matches answers
  * twice, a counting update and then the same numbers with @final TRUE; a request
@@ -237,7 +237,7 @@ void               chromium_session_context_menu_dismiss (ChromiumSession *self)
 /* Permission requests. A page's ask for a microphone, a location or the clipboard
  * is a question CEF lets only the host answer, and leaving it unanswered costs
  * more than silence: the page's promise stays pending, and a second media ask
- * never arrives until the first is answered (docs/permission-prompt.md has the
+ * never arrives until the first is answered (docs/features/permission-prompt.md has the
  * measurements).
  *
  * ::permission-request (id, kind, origin, permissions) arrives first. @kind is

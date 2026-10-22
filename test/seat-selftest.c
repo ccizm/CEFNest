@@ -984,7 +984,7 @@ check_input (int expected)
  * because GDK asks for its wl_data_device while still inside gtk_init_check(),
  * and an offer answered in that same dispatch makes it build a clipboard for a
  * display that is not the default yet. See the walk-through in
- * docs/clipboard-offer-during-client-init.md. */
+ * docs/internals/clipboard-offer-during-client-init.md. */
 static void
 client_clipboard_read (GObject *clipboard, GAsyncResult *result, gpointer data)
 {

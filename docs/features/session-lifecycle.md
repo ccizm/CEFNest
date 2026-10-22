@@ -158,7 +158,7 @@ demo: the helper went away with 3 of 3 script step(s) still to run, so the run e
 ```
 
 它现在有门禁：proof 模式的第二跑就是这道题，钉的是退出码 1 和这行转录，见
-`docs/headless-ci.md` §4。
+`docs/testing/headless-ci.md` §4。
 
 共用 profile 那一跑里 A 侧的读数——这是"第一个实例会被带死"那条旧记录被否证的地方：
 helper ready 之后 `js` 三次读回页面里的 `requestAnimationFrame` 计数，**1 → 242 →
@@ -268,7 +268,7 @@ headless 显示器上重跑，全过、断言数不变。
 * 崩在 `kill -9` 下仍会留一个 helper socket——没机会执行任何清理。
 * `demo.exit_status` 管的是**这一跑做完没有**，不是**画对没有**。一条 `load` → `quit`
   的脚本，页面是白是红都是 0；看像素永远是 `test/pixel-gate.sh` 那条路的事
-  （`docs/frame-clock-pacing.md` §2 那条"CSS 不需要一帧"的教训）。别把 rc=0 读成"页面
+  （`docs/internals/frame-clock-pacing.md` §2 那条"CSS 不需要一帧"的教训）。别把 rc=0 读成"页面
   看着对"。
 * `::closed` 带的是话术而不是枚举，宿主只能整串比。真出现要按位判断的宿主，再包一层
   `chromium_session_get_close_reason()` 或者换 enum，现在不猜需求。

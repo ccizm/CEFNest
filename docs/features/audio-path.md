@@ -1,7 +1,7 @@
 # 音频：页面出的声走哪条路，以及静音开关
 
 日期：2026-10-20
-问题：任务 #33。`docs/control-channel.md` 第 4 节把「静音 / 音量」停在"待测"：先得确认
+问题：任务 #33。`docs/guides/control-channel.md` 第 4 节把「静音 / 音量」停在"待测"：先得确认
 这条路径到底会不会出声、音频在哪个进程里、嵌套合成器管不管得着。这一篇把三件事都量掉，
 然后给静音一个实现。
 
@@ -50,7 +50,7 @@
 ## 2. 决定：给静音一条命令，不给音量
 
 CEF 那边是 `CefBrowserHost::SetAudioMuted(bool)` / `IsAudioMuted()`（只能在 UI 线程调，
-`HandleCommand` 正好在）。它满足 `docs/control-channel.md` 的判据：一次请求、不需要
+`HandleCommand` 正好在）。它满足 `docs/guides/control-channel.md` 的判据：一次请求、不需要
 回答、没有进度、没有 id 空间。而 **音量不做**：那是桌面混音器已经管着的事，GNOME 里
 对这条流就能调；组件再做一个音量滑条只是把同一个旋钮画第二遍。
 
@@ -99,7 +99,7 @@ audio server 的输出上。`mute` 之后三个格子全是精确的 −inf：**
 
 ## 4. 顺带修正：子进程的类型标签其实读得出来
 
-`docs/sandbox-policy.md` 第 2 节写过「类型标签给不出，`/proc/PID/cmdline` 只剩 1 项」。
+`docs/internals/sandbox-policy.md` 第 2 节写过「类型标签给不出，`/proc/PID/cmdline` 只剩 1 项」。
 前半句对，后半句错：Chromium 把子进程 argv 重写成了**一个**以空格分隔的长字符串
 （`argc=1`，整条命令行都在 `argv[0]` 里）。按 NUL 切分确实什么也得不到，但按**空格**
 切那一项，`--type=` 和 `--utility-sub-type=` 都在——第 1 节那张表就是这么来的。
@@ -113,5 +113,5 @@ audio server 的输出上。`mute` 之后三个格子全是精确的 −inf：**
 * **音量没做**（第 2 节的决定），`SetAudioMuted` 之外的 `browser.set_volume` 之类
   不存在也没必要。
 * **audio utility 死了仍然没人报**。这次确认音频就住在那个 `Seccomp=0` 的 utility
-  里，它死掉的形状和 `docs/control-channel.md` 第 6 节记的一样：宿主什么都收不到，
+  里，它死掉的形状和 `docs/guides/control-channel.md` 第 6 节记的一样：宿主什么都收不到，
   只剩 `::closed` 兜底。

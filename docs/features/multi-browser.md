@@ -15,7 +15,7 @@
   `close-browser 2` 对一个 tab **什么都不会发生**（无 `OnBeforeClose`、无
   `browser-closed`），`close-browser 3` 对独立窗口则走完 `browser 3 closing` →
   `browser 3 closed` → `browser 1 selected`。见 `code-review-2026-10-22.md` M22 与
-  `docs/minimal-host.md` §5。
+  `docs/guides/minimal-host.md` §5。
 - demo 有标签条（`+` 新标签、`▣` 新窗口）；标签按钮调用 session API；
 - 所有页面事件带当前激活 browser 的 `browser` id；新增 `browser-created` /
   `browser-selected` / `browser-closed`；
@@ -85,7 +85,7 @@ settle → 数到两个 toplevel（app-id 认，尺寸打印）
 
 三层分别是：compositor 自己的 `keyboard_focus`/`pointer_focus`、`get_toplevels()` 的清单、
 以及 `gdk_texture_download` 读到的**客户端画出来的像素**。像素那层不是装饰：按这个项目的
-教训（`docs/empty-request-slot.md` 那种"状态对、线上错"），只断 state 不断 wire 的门禁不算
+教训（`docs/internals/empty-request-slot.md` 那种"状态对、线上错"），只断 state 不断 wire 的门禁不算
 门禁。任何一条不满足就 `second-window gate FAILED: …` 并以退出码 1 结束，和 drag-out /
 drag-in 同款。整套跑完约 3 秒，不需要浏览器，headless 可跑。
 
@@ -97,7 +97,7 @@ drag-in 同款。整套跑完约 3 秒，不需要浏览器，headless 可跑。
 ## 仍然存在的边界
 
 - **在独立窗口里发起拖拽**：出界移交的 `GdkDrag` 起在 demo 主窗口的 native surface 上
-  （`docs/drag-loop.md` §6），从独立 host 窗口里发起的拖拽会挂错窗口。罕见路径，这一轮
+  （`docs/features/drag-loop.md` §6），从独立 host 窗口里发起的拖拽会挂错窗口。罕见路径，这一轮
   不做，先记在这里。
 - `linuxarm64` 只有 fetch/install 路径，没有目标机实跑。
 
@@ -118,5 +118,5 @@ drag-in 同款。整套跑完约 3 秒，不需要浏览器，headless 可跑。
 {"event":"browser-closed","browser":7}
 ```
 
-其他命令/事件的可选 `browser` 字段见 `docs/control-channel.md`。缺省行为是当前激活
+其他命令/事件的可选 `browser` 字段见 `docs/guides/control-channel.md`。缺省行为是当前激活
 browser，避免把已有单 browser 调用全部改坏。

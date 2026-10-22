@@ -200,7 +200,7 @@ dismiss（`session: context menu dismissed by a navigation`），`real-nav` 门�
   compositor，绕开外层 grab。`fake-auto` 测的是同一段收尾代码的另一条入口。
 - `flags`（中键、修饰键）在 API 上没开；check / radio 的勾选标记没画；submenu 不展开。
 - 一条挂起的请求在 helper **退出**时会怎么样，没测：`context-menu-select` 发不出去，宿主那边
-  `menu_pending` 立着，但 session 已经关了。等 `docs/session-lifecycle.md` 那侧有结论时一起看。
+  `menu_pending` 立着，但 session 已经关了。等 `docs/features/session-lifecycle.md` 那侧有结论时一起看。
 
 ## 10. 拼写建议默认关闭；打开时菜单关掉后把光标收回来（2026-10-21）
 

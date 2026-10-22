@@ -12,7 +12,7 @@
 # test/ci-session.sh the buffer comes back 18,52,86 / 200,50,60 / 43,138,62 /
 # 232,232,232 — the same bytes the CSS says.
 #
-# What it would have caught: the whole-page freeze of docs/frame-clock-pacing.md
+# What it would have caught: the whole-page freeze of docs/internals/frame-clock-pacing.md
 # §8. That bug passed every log-based gate — the page scrolled, find answered, the
 # menu built — while the buffer held nothing but the colour Chromium had cleared it
 # to. A flat buffer is exactly what this gate refuses to accept.
@@ -28,7 +28,7 @@
 # client painted again, on this laptop and in CI alike. Measured the same day: the
 # page's own requestAnimationFrame counter stopped at 4 callbacks across 4.5 s, then
 # reached 252 with the callbacks fired from after-paint again, and the dump went from
-# #101828 to the page's own green. docs/headless-ci.md §5 keeps the numbers.
+# #101828 to the page's own green. docs/testing/headless-ci.md §5 keeps the numbers.
 #
 # The lesson is the reason there is no skip left here: a flat buffer is a statement
 # about the component, never about who is looking at it. If a future display really

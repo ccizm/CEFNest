@@ -67,7 +67,7 @@ kernel.apparmor_restrict_unprivileged_userns  不存在（没装那套限制）
 **叶子的类型标签读得出来，但要按空格切。** Chromium 给子进程重写了 argv：`/proc/PID/cmdline`
 只剩 **1 项**，但整条命令行——`--type=`、`--utility-sub-type=` 都在内——就挤在那一个
 `argv[0]` 字符串里，按 NUL 切分什么都得不到，按**空格**切那一项就全回来了
-（`docs/audio-path.md` 第 1 节那张带类型的表就是这么取的）。`/proc/PID/comm` 倒是真的
+（`docs/features/audio-path.md` 第 1 节那张带类型的表就是这么取的）。`/proc/PID/comm` 倒是真的
 全都是 `cefnest-helper`。后来补的一张带类型分布的表：浏览器进程、三个 zygote（gpu 的
 父进程带 `--no-zygote-sandbox`）、`gpu-process`、`network.mojom.NetworkService` 全是
 `Seccomp=0`；`storage.mojom.StorageService` 和两个 renderer 是 `Seccomp=2`；音频则住在一个
@@ -204,7 +204,7 @@ renderer**。renderer 是 zygote 的孩子，不是浏览器进程的孩子，�
 `zygote` / `gpu-process` / `network utility` 三个，打死一个 renderer 之后那个数字纹丝不动——
 第一版量出来的"children 恒等于 3"就是这么来的。要看全树得按**可执行文件**横切：命令行里跑的是
 `cefnest-helper` 的那个二进制（含 `--type=` 的和不含的都算），再各自读 `/proc/PID/cmdline` 切类型。
-`docs/audio-path.md` 那张进程表是同一件事的另一半：类型标签只在 cmdline 里，`comm` 给不出来。
+`docs/features/audio-path.md` 那张进程表是同一件事的另一半：类型标签只在 cmdline 里，`comm` 给不出来。
 
 ### 已经收进 `test/sandbox-soak.sh`
 
@@ -263,11 +263,11 @@ URL。第 7 节那两次击杀量的就是这个上限：宿主能确定"死了�
   不是我们量到的。
 * **renderer 崩了不报**这条已经做掉了：helper 实现了 `OnRenderProcessTerminated`，控制通道上新增
   `renderer-exited` 事件，宿主侧是 `ChromiumSession::renderer-exited`
-  （`docs/control-channel.md`）。实测 `kill -9` 掉最大的那个 `Seccomp=2` 子进程后，host 只多出
+  （`docs/guides/control-channel.md`）。实测 `kill -9` 掉最大的那个 `Seccomp=2` 子进程后，host 只多出
   `status=1 error=9` 这一行，其余一切照旧——正是本篇原本担心的「只表现为页面静止」。第 7 节把这条
   在同一次长跑里量了两次，并且量到了它给不出更多东西的原因：没有崩溃处理器（第 8 节）。
   反过来，**其它**沙箱子进程（utility、GPU、网络）死了仍然没有任何事件，CEF 那边没有对应的回调，
-  这条留在 `docs/control-channel.md` 的「还没做的」里。
+  这条留在 `docs/guides/control-channel.md` 的「还没做的」里。
 * **崩溃归因没做**：要给"为什么"就得往分发里加一个 handler 可执行文件、一个 reporter id 和一个上报端，
   那是产品决定，不是这里能顺手补的实现（第 8 节）。
 * 沙箱开着时的**逐帧渲染正确性**没比对过（截图、dmabuf 提交都发生在不沙箱的浏览器进程里，

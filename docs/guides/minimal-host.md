@@ -12,7 +12,7 @@ ninja -C builddir
 ./builddir/examples/cefnest-minimal
 ```
 
-helper 按 `docs/packaging.md` 的规则查找：`CEFNEST_HELPER` / `CHROMIUM_HELPER` /
+helper 按 `docs/guides/packaging.md` 的规则查找：`CEFNEST_HELPER` / `CHROMIUM_HELPER` /
 编译进去的安装路径 / 开发树。安装后的宿主不需要环境变量。
 
 起始页可以用 `CEFNEST_URL` 覆盖：
@@ -75,9 +75,9 @@ g_object_set_data_full (G_OBJECT (window), "session", session, g_object_unref);
 
 `chromium_view_get_compositor()` / `chromium_view_get_socket_name()` 在
 `src/chromium-view.h`——要自己起第二个 view（`chromium_view_new_shared()` +
-`set_target_surface()`，`docs/multi-browser.md` §2）时用。
+`set_target_surface()`，`docs/features/multi-browser.md` §2）时用。
 
-完整约定见 `src/chromium-session.h`、`src/chromium-view.h` 和 `docs/control-channel.md`。
+完整约定见 `src/chromium-session.h`、`src/chromium-view.h` 和 `docs/guides/control-channel.md`。
 
 ## 5. 中等示例 `examples/host.c`：把"问题"信号接完
 
@@ -114,7 +114,7 @@ host: download 3 refused
 host: download-end 3 state=cancelled path=(none) bytes=0
 ```
 `ls /tmp/host-dl` 里没有 `refused.bin`——**没答或答"不要"都不写文件**，这是
-`docs/download-path.md` 的模型，示例这边只是不复述它。
+`docs/features/download-path.md` 的模型，示例这边只是不复述它。
 
 名字是页面给的，所以清洗是宿主的活，这一段是专门为它跑的：`name=../escape.pdf` 落成
 `/tmp/host-dl/escape.pdf`，`/tmp/escape.pdf` 不存在；目录里已经有 `report.pdf` 和

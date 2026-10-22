@@ -10,7 +10,7 @@
 没有屏可上，于是它们报成 skip（§5）。新加的 `test/pixel-gate.sh` 是第一条不看日志、
 只看像素的门禁，它在两块显示器上量到同一串颜色；把它第一次在真桌面上读到的纯色当成
 "显示器的性质"是这次记录里的一个错，真相是组件自己的一条回归，§5.1 与
-`docs/frame-clock-pacing.md` §9 记的全套过程。
+`docs/internals/frame-clock-pacing.md` §9 记的全套过程。
 
 ## 1. 底座：这台机器上现成有什么
 
@@ -63,7 +63,7 @@ D-Bus，激活了 nautilus 与 Tracker3 文件索引器，还自动重排了应�
 libcef 子进程偶尔会 abort（strace 定位到是 zygote 的 fork-without-exec 子进程在自己
 namespace 里 `tgkill(1, 1, SIGABRT)`，而我们自己的缓冲区都有边界检查），它不影响
 前面三条，于是**报告而不失败**——这里没有崩溃处理器可以修或关，见
-`docs/sandbox-policy.md` §8。
+`docs/internals/sandbox-policy.md` §8。
 
 最后是"这一跑做不到它被要求做的事"那四跑（一条 `broken_run` 函数）：同一个脚本，helper
 分别换成①连上 socket 就 `exit(1)`、什么都不发的 `test/fake-helper.py`（`CefInitialize`
@@ -75,7 +75,7 @@ namespace 里 `tgkill(1, 1, SIGABRT)`，而我们自己的缓冲区都有边界�
 去看运气），所以钉的是二选一；②③④各有唯一答案。无人值守的一跑只有两种结局——退出码与
 超时——所以一个真失败如果只能以超时出现，它等于把自己伪装成"这一跑有点慢"：2 秒的事会被
 读成 900 秒；而比超时更糟的是**退出码 0**——④在修之前就是这个形状。修它们的三条见
-`docs/session-lifecycle.md` §4–§6。
+`docs/features/session-lifecycle.md` §4–§6。
 
 **payload**：`"$@"` 原样在会话里跑。注入的是 `WAYLAND_DISPLAY`、
 `GDK_BACKEND=wayland`、`CEFNEST_HEADLESS=1`、隔离的 HOME/XDG/runtime 目录，以及从
@@ -111,7 +111,7 @@ CI_ALL_REAL=1 ./test/ci-all.sh real
 ```
 
 `real` 这一行由 `test/real-sites.sh` 自己为每站起 `ci-session.sh`；`ci-all` 不再套外层
-session。产物和五站表见 `docs/real-sites.md`。
+session。产物和五站表见 `docs/testing/real-sites.md`。
 ```
 
 每个 run 单独起会话，是拿 ~10s/条换"挂掉的那条只烧自己那一行"：塞进同一块显示器时，
@@ -139,19 +139,19 @@ session。产物和五站表见 `docs/real-sites.md`。
 `backgroundColor=rgb(255, 0, 0)`、`innerWidth=1000`——但 CSS 不需要一帧，所以那条
 回答不能当"画对了"的证据。当时把纯色读成"这块显示器没有屏可上，所以没人看的窗口
 没有像素"，还为此给真桌面写了一条 skip。那个 skip 差一点把真凶盖住：
-**`#101828` 是组件自己的回归**——`bcbebc8`（`docs/frame-clock-pacing.md` §8 那轮
+**`#101828` 是组件自己的回归**——`bcbebc8`（`docs/internals/frame-clock-pacing.md` §8 那轮
 改动）把 `fire_pending_frame_callbacks()` 从 after-paint 里删掉了，于是时钟只要还
 回答，客户端的帧请求就永远没人答，真桌面整页冻住。把那一行加回去，同一台机器同一个
 页面：rAF 从 4/4.5s 变成 252/4.5s，`dump` 从 `#101828` 变成页面自己的绿色，
 `test/pixel-gate.sh` 两侧 12 条断言全过。
 顺带把 §8 那句"遮挡的窗口只停 100ms"也量实了：把 demo 最大化再用一个全屏窗口整个
 盖住，被盖住的那一侧 rAF 仍是 61.5/秒，缓冲 1829x982 照样出图、读回是画过的红。
-两条教训都写在 `docs/frame-clock-pacing.md` §9。
+两条教训都写在 `docs/internals/frame-clock-pacing.md` §9。
 
 ### 5.2 不证明
 
 - **帧节拍**。headless mutter 没有输出设备，宿主 GDK 不再产生显示周期，客户端的帧
-  由 `docs/frame-clock-pacing.md` §8 的兜底定时器驱动。时序类断言（回调延迟、
+  由 `docs/internals/frame-clock-pacing.md` §8 的兜底定时器驱动。时序类断言（回调延迟、
   p50/p99）在这里量的不是真实节奏。
 - **上屏**。没有输出设备就没有"上屏"这件事：toplevel 本身是活的（实测
   `dump: widget 1000x653 css, toplevel 1028x729`，布局与尺寸都拿得到），但
@@ -183,7 +183,7 @@ ok 行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 
 | `soak` | 通过 | 12 | 48s |
 
 \* 那 2 条是"弹层上了屏"，这块显示器没有屏可上（§5）。`pixel` 在会话里与在真桌面上
-都是 12 条全过、0 skip——它是 `docs/frame-clock-pacing.md` §9 那条回归的判据，两侧都得红得起来。
+都是 12 条全过、0 skip——它是 `docs/internals/frame-clock-pacing.md` §9 那条回归的判据，两侧都得红得起来。
 
 两条补充测量：
 

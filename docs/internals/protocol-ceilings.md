@@ -49,7 +49,7 @@ zwp_linux_dmabuf_v1 5
   全部落在我们广告的 11 个全局里。
 - 两边都没有任何 missing-global 抱怨；跑 B exit 0（GDK 客户端跑完整个脚本
   序列没崩），跑 A 的 Chromium 页面渲染、滚轮、剪贴板都是已验证的黄金路径
-  （`docs/wheel-resolution-and-key-repeat.md`、`docs/clipboard-bridge.md`）。
+  （`docs/features/wheel-resolution-and-key-repeat.md`、`docs/features/clipboard-bridge.md`）。
 - GDK 的设计是"有就绑、没有就不用"：它在 mutter 上绑的那一打协议（见 §3）
   到我们这里一行 bind 都没有发过——因为没广告，它连问都没问。缺协议不会
   让客户端失败，只会让它少一个增强。
@@ -57,14 +57,14 @@ zwp_linux_dmabuf_v1 5
 ## 3. 没广告的协议：逐个判掉
 
 跑 A 里 demo 的 GDK 连 mutter 时还绑了下面这些（我们从来没广告过它们）。
-按"广告了就要实现每个请求、发每个事件"的纪律（`docs/empty-request-slot.md`），
+按"广告了就要实现每个请求、发每个事件"的纪律（`docs/internals/empty-request-slot.md`），
 多广告一个就是要多养一份服务端实现，所以每项都要有理由：
 
 | 协议 | 判决 | 理由 |
 |---|---|---|
 | `gtk_shell1` 6 | 永不 | mutter 私有，规范上就不该出现在别的 compositor |
-| `wl_subcompositor` 1 | 不给 | 要整个 subsurface 树合成；Chromium 对我们从未绑它，弹窗需求已由 popup 合成路径（`docs/popup-compositing.md`）覆盖 |
-| `wp_presentation` 1 | 不给 | 帧时序反馈；我们自己控帧（`docs/frame-clock-pacing.md`），客户端没有可反馈的对象 |
+| `wl_subcompositor` 1 | 不给 | 要整个 subsurface 树合成；Chromium 对我们从未绑它，弹窗需求已由 popup 合成路径（`docs/internals/popup-compositing.md`）覆盖 |
+| `wp_presentation` 1 | 不给 | 帧时序反馈；我们自己控帧（`docs/internals/frame-clock-pacing.md`），客户端没有可反馈的对象 |
 | `wp_single_pixel_buffer_manager_v1` 1 | 不给 | GDK 用来画 1×1 纯色面；对我们没有任何客户端要过 |
 | `xdg_activation_v1` | 不给 | 跨窗口焦点传递令牌；我们只有一个 toplevel |
 | `xdg_system_bell_v1` / `xdg_dialog_v1` | 不给 | 桌面装饰类，嵌套 compositor 无从谈起 |
@@ -101,7 +101,7 @@ zwp_linux_dmabuf_v1 5
   maximize/fullscreen 时一起升。
 - **`wl_seat` 8 → 9？** 不升。9 新增 `wl_pointer.axis_relative_direction`
   事件（自然滚动方向逐事件标记）。我们封顶 8，Chromium 绑 8，
-  `axis_value120` 的高分辨率滚轮已验证（`docs/wheel-resolution-and-key-repeat.md`）。
+  `axis_value120` 的高分辨率滚轮已验证（`docs/features/wheel-resolution-and-key-repeat.md`）。
   发这个事件需要逐事件判断滚动方向，做错比不发更糟。
 
 ## 5. 怎么复核

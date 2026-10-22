@@ -7,7 +7,7 @@
 
 **决定（2026-10-21）**：单 helper、多 browser；标签和独立窗口都要支持。当前实现先落地
 helper 注册表、标签条、`new-window` 的 CEF toplevel，以及共享 compositor / 指定
-surface 的独立 host 窗口，见 `docs/multi-browser.md`。
+surface 的独立 host 窗口，见 `docs/features/multi-browser.md`。
 
 现状：一个 helper 进程创建一个 `CefBrowserView`/一个 browser；控制 socket 的命令和
 事件没有 browser 标识，`ChromiumSession` 也是一对一。

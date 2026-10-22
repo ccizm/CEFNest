@@ -615,14 +615,14 @@ class HelperFindHandler : public CefFindHandler {
     // Measured: the identifier goes up for every request, a step as much as a
     // new search, and both updates about one request carry the same number. So
     // it groups the replies a request can produce, not the searches a page has
-    // run (docs/find-path.md has the transcript).
+    // run (docs/features/find-path.md has the transcript).
     dict->SetInt("identifier", identifier);
     dict->SetInt("count", count);
     dict->SetInt("active_ordinal", activeMatchOrdinal);
     dict->SetBool("final", finalUpdate);
     // selectionRect is deliberately not on the wire: the browser scrolls the
     // match it selects into view on its own, and a host that cannot draw inside
-    // the page has no use for a window coordinate (docs/find-path.md has the
+    // the page has no use for a window coordinate (docs/features/find-path.md has the
     // measurement, including the part where a new search does not move at all).
     Emit(dict);
   }
@@ -937,7 +937,7 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
  * Permission prompts                                                  *
  * ------------------------------------------------------------------ *
  *
- * Measured against real Chromium (docs/permission-prompt.md): getUserMedia
+ * Measured against real Chromium (docs/features/permission-prompt.md): getUserMedia
  * arrives as OnRequestMediaAccessPermission, and geolocation, clipboard-read,
  * midi-sysex and notifications arrive as OnShowPermissionPrompt. The two kinds
  * run on queues of their own — a held media ask does not stop a prompt from
@@ -1362,7 +1362,7 @@ void HandleCommand(const std::string& line) {
         command->HasKey("on") ? command->GetBool("on") : !host->IsAudioMuted();
     host->SetAudioMuted(mute);
     // Reported back rather than assumed: the page's sound leaves this process
-    // through an unsandboxed audio service (docs/audio-path.md), and whether it
+    // through an unsandboxed audio service (docs/features/audio-path.md), and whether it
     // is silenced is a fact about that service, not about this call.
     CefRefPtr<CefDictionaryValue> dict = NewEvent("muted");
     dict->SetBool("muted", host->IsAudioMuted());
@@ -1731,7 +1731,7 @@ class HelperApp : public CefApp {
     // No --no-sandbox here on purpose. CefSettings.no_sandbox alone reaches the
     // whole process tree: with CHROMIUM_HELPER_NO_SANDBOX=1 all seven
     // subprocesses of a hosted run read Seccomp=0 in /proc
-    // (docs/sandbox-policy.md). Appending the switch a second time would only
+    // (docs/internals/sandbox-policy.md). Appending the switch a second time would only
     // give the two paths a chance to drift.
 
     // Native Wayland, unless the host picked a platform on purpose.
@@ -2036,7 +2036,7 @@ class HelperClient : public CefClient,
     Emit(dict);
   }
 
-  // The renderer is the process the sandbox exists for (docs/sandbox-policy.md),
+  // The renderer is the process the sandbox exists for (docs/internals/sandbox-policy.md),
   // and its death looks exactly like a page that stopped answering: the surface
   // keeps showing the last frame, every command after it goes unanswered. So it
   // has to reach the host as its own event rather than as a silent gap.

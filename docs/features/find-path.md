@@ -1,7 +1,7 @@
 # 查找：一次请求几条回答，和它什么时候动页面
 
 日期：2026-10-21
-问题：P2 的「查找栏（CefFindHandler + UI，1 天）」，任务 #40–#45。`docs/control-channel.md`
+问题：P2 的「查找栏（CefFindHandler + UI，1 天）」，任务 #40–#45。`docs/guides/control-channel.md`
 第 4 节以前把页内查找放在「没做」那一列。这一篇钉住 CEF 154 find 回调的形状——四条只有
 实测才知道的语义，其中一条推翻了我照着「一个搜索两条更新」写下的推断。
 
@@ -99,7 +99,7 @@ find-next         →           ordinal=1 → scrollTop 2751.199951171875
 
 - **Ctrl+F** 打开并聚焦，**Esc** 关闭并撤高亮。按键接在窗口 `GtkEventControllerKey` 的
   **capture 阶段**（`gtk_event_controller_set_propagation_phase`），因为 `GtkEntry` 会先吃掉
-  按键，而页内 Esc 又是 helper 读成「关窗口」的那一条（`docs/session-lifecycle.md`）。
+  按键，而页内 Esc 又是 helper 读成「关窗口」的那一条（`docs/features/session-lifecycle.md`）。
 - 「上一个」/「下一个」按钮、区分大小写勾选、输入框（回车 = 新搜索）、计数标签、关闭图标。
 - 文案五态：`查找中…`（非 final，还没数出）、`已找到 N 处…`（非 final，数到 N 了）、
   `已找到 N 处`（final、ordinal 0 —— §2.3 的新搜索不选中任何一条）、

@@ -176,7 +176,7 @@ else
     else bad "transcript lacks /$want/"; fi
   done
   # An abort in a sandboxed Chromium subprocess shows up here and nowhere else —
-  # there is no crash handler in this tree (docs/sandbox-policy.md §8). It is
+  # there is no crash handler in this tree (docs/internals/sandbox-policy.md §8). It is
   # reported, not failed: straced, the aborter is a fork-without-exec child of
   # the zygote that self-terminates with tgkill(1, 1, SIGABRT) — pid 1 of its own
   # namespace, so libcef's code, not ours, whose own buffers are bounds-checked.
@@ -233,7 +233,7 @@ stop_compositor
 if [ -z "$GS" ]; then
   # pgrep -g "" finds nothing, so the line below would have reported a clean
   # teardown for a session this script never had a handle on. An unrunnable check
-  # is a failure, not an ok: see docs/empty-request-slot.md.
+  # is a failure, not an ok: see docs/internals/empty-request-slot.md.
   bad "no process group id — the teardown could not be checked"
 else
   left=$(pgrep -g "$GS" 2>/dev/null | wc -l)

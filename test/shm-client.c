@@ -6,7 +6,7 @@
  * hit-testing and dismissal can be checked against the rules it chose. With
  * --dnd-requests it sends the three wl_data_device_manager version 3 requests
  * that abort a compositor whose implementation slots are empty — see
- * docs/empty-request-slot.md. With --drag-out it starts a drag from the left
+ * docs/internals/empty-request-slot.md. With --drag-out it starts a drag from the left
  * button press and offers the mime list a real page's text drag was measured
  * with, so the handover of a drag that leaves the window has a source to read
  * without a browser. With --drag-in it is the other half: the destination of a

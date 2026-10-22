@@ -341,7 +341,7 @@ EOF
   # the terminal complete 3.2-5.7 s later — measured three times on this
   # scenario — because the final state update goes out with Chromium's batched
   # download-database flush rather than with the move. A 4 s window lost the line
-  # while the file was there (docs/download-path.md).
+  # while the file was there (docs/features/download-path.md).
   script real-named <<EOF
 load http://127.0.0.1:$PORT/stream
 wait 1500

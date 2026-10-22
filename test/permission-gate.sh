@@ -20,7 +20,7 @@
 # Each real run gets its own XDG_CACHE_HOME so it starts on a profile nobody else
 # decided on: state left behind by the run before it would be a decision this run
 # asserts but never made. Measured, a permission the host denied is still asked of
-# the host the next time (docs/permission-prompt.md §7), so this is isolation
+# the host the next time (docs/features/permission-prompt.md §7), so this is isolation
 # between runs rather than a defence against a remembered answer.
 #
 #   ./test/permission-gate.sh            # fake + real

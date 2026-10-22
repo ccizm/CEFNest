@@ -161,7 +161,7 @@ client: popup-depth gate FAILED: the compositor took 128 nested popups,
 
 ## 7. 还没做的
 
-- shm 的 mmap + damage shadow 已落地（`docs/frame-metrics.md` §2）；纹理仍是完整
+- shm 的 mmap + damage shadow 已落地（`docs/internals/frame-metrics.md` §2）；纹理仍是完整
   `GdkMemoryTexture`，所以“零拷贝”还没有，damage 只省 pool 读取；
 - 无头 selftest 里 GDK 未初始化，所以 40 次失败都停在"没有 display"这一步，
   并没有真正走到 EGL 导入失败；等 #29 让 selftest 真的导入 dmabuf 之后，

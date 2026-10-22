@@ -5,7 +5,7 @@
 # against. Bumping it means: update VERSION, rebuild the helper, and re-run
 # the whole gate (meson test + audit + the session scripts) — Chromium
 # milestone jumps also change what Wayland protocols the client asks for,
-# so docs/protocol-ceilings.md gets re-measured too.
+# so docs/internals/protocol-ceilings.md gets re-measured too.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

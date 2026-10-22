@@ -11,7 +11,7 @@ Bail out! Gdk:ERROR:../../../gdk/gdk.c:490:gdk_display_should_use_portal: assert
 ** Message: session: helper killed by signal 6
 ```
 
-这条在 `docs/wheel-resolution-and-key-repeat.md` 第 8 节里被记成"环境问题"，并把 #24 的最后一环
+这条在 `docs/features/wheel-resolution-and-key-repeat.md` 第 8 节里被记成"环境问题"，并把 #24 的最后一环
 （真 Chromium 的滚轮复测）压到了后面。它不是环境问题，是我们 compositor 的问题。
 
 ## 2. 一个假的相关变量
@@ -139,4 +139,4 @@ default display 要等 `gdk_display_open()` **返回之后**才设得上，此�
   同帧的位移丢了。修法是 stop 单独占一帧，且滚轮刻度干脆不带 stop（GDK 也从不把一次刻度标成
   stop）——现在 `wheel 0 3` / `0 0.5` / `0 5` 之后是 360 / 420 / 1020。同一类形状从此由 shm-client
   的断言守着（`test/seat-selftest.c:136` 收它的退出码）。根因、三种发法的实测差别和第 7.4 节那条
-  "JS 监听丢掉注册后第一段手势"的 Blink 行为，都在 `docs/wheel-resolution-and-key-repeat.md` 第 7 节。
+  "JS 监听丢掉注册后第一段手势"的 Blink 行为，都在 `docs/features/wheel-resolution-and-key-repeat.md` 第 7 节。

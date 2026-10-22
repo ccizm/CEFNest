@@ -12,7 +12,7 @@
 ## 1. 形状：一端是页面，另一端也是页面
 
 `wl_data_device_manager` v3 的 `wl_data_device` 是双向中继。剪贴板那半边早就通了（见
-`docs/clipboard-bridge.md`），拖放这半边在 helper 里同样是**一个客户端的两端**：载荷从 Blink
+`docs/features/clipboard-bridge.md`），拖放这半边在 helper 里同样是**一个客户端的两端**：载荷从 Blink
 出去走 `wl_data_source.send`，回到 Blink 走 `wl_data_offer.receive`。
 
 | 谁 | 发什么 | 我们这里 |
@@ -151,7 +151,7 @@ title）。三件事必须同时成立它才画得出来：
 些发 `invalid_finish`/`invalid_action_mask`，但那会让 `meson test` 红，更糟的是真机上
 Chromium 在普通复制时也可能发这几条——为了一个不存在的赢家去杀渲染进程不值。所以这几条在
 非拖拽对象上只记日志。空 request 槽会让 compositor abort 这件事仍然成立，见
-`docs/empty-request-slot.md`，`audit-impl-slots.py` 覆盖它们。
+`docs/internals/empty-request-slot.md`，`audit-impl-slots.py` 覆盖它们。
 
 ## 5. 怎么验
 
@@ -266,7 +266,7 @@ listener function for opcode 0 of wl_data_source is NULL
 ```
 
 opcode 0 是 v3 的 `target`，而那个假客户端的 listener 表只填了 `send`/`cancelled`。libwayland 对
-没有槽的事件直接 abort——和 `docs/empty-request-slot.md` 里 compositor 那半边是同一件事，只是这次
+没有槽的事件直接 abort——和 `docs/internals/empty-request-slot.md` 里 compositor 那半边是同一件事，只是这次
 站在客户端。现在六个事件全填。反过来说这也是给我们自己的一个提醒：发 `target` 已经是对外走的一
 步，任何绑 v3 的源端客户端都必须处理它。
 

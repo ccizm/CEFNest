@@ -1176,7 +1176,7 @@ find_key_pressed (GtkEventControllerKey *controller, guint keyval,
     }
 
   /* Capture phase, on purpose: Esc inside the page is what the helper reads as
-   * "close the browser" (docs/session-lifecycle.md), so a find bar that wants
+   * "close the browser" (docs/features/session-lifecycle.md), so a find bar that wants
    * the key has to take it before the view forwards it. */
   if ((state & GDK_CONTROL_MASK) && (keyval == GDK_KEY_f || keyval == GDK_KEY_F))
     {
@@ -1259,7 +1259,7 @@ session_find_result (ChromiumSession *session, int identifier, int count,
     text = g_strdup ("无匹配");
   else if (!active_ordinal)
     /* Measured: a new search selects nothing, so the number to show here is the
-     * total, not "第 0 / N 处" (docs/find-path.md §2.3). */
+     * total, not "第 0 / N 处" (docs/features/find-path.md §2.3). */
     text = g_strdup_printf ("已找到 %d 处", count);
   else
     text = g_strdup_printf ("第 %d / %d 处", active_ordinal, count);
@@ -2274,7 +2274,7 @@ script_drop_in_motion (gpointer data)
  * GdkDrop: same three entry points a drop target would call, with the payload
  * named on the line. The outer leg — a pointer that has to be really pressed in
  * another window — is what a script cannot give, so this is how the direction
- * gets measured at all (docs/drag-loop.md). */
+ * gets measured at all (docs/features/drag-loop.md). */
 static void
 script_drop_in (double x0, double y0, double x1, double y1, const char *payload,
                 const char *mimes, gboolean let_go)

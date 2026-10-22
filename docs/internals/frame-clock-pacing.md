@@ -116,7 +116,7 @@ CHROMIUM_DUMP=/tmp/d.png CHROMIUM_DUMP_DELAY=4000 \
 
 - shm 路径的每帧全量 `pread` 回读（~4MB/帧）仍会阻塞主循环 1~3ms，是残余抖动的
   来源之一；CEF 走 dmabuf 不受影响。2026-10-21 已改为 pool `mmap` 常驻 + damage
-  shadow 复制（见 `docs/frame-metrics.md` §2）；纹理仍每帧上传一张完整 `GdkTexture`。
+  shadow 复制（见 `docs/internals/frame-metrics.md` §2）；纹理仍每帧上传一张完整 `GdkTexture`。
 - 长尾（max ~80ms）来自桌面侧偶发的时钟停顿（遮挡/负载），属合成器环境噪声，
   组件侧已无可做。
 
@@ -189,7 +189,7 @@ paint——**done → 上屏从 2 个周期变为 1 个周期**。对应到输�
 
 最后一行是定性的关键：主线程的即时滚动照样生效，说明 scroller、合成、提交链路都是
 好的，冻结的只有**需要 BeginFrame 节拍的那一半**——查找命中点的 reveal 和滚轮。所以
-这不是查找路径的问题，`docs/find-path.md` 的结论不动。
+这不是查找路径的问题，`docs/features/find-path.md` 的结论不动。
 
 ### 根因
 
@@ -230,7 +230,7 @@ mutter 没有输出设备，GDK 此后再不产生显示周期：我们请求的
 和页面自己通过 `js` 报回来的那四个颜色。整页冻在空白上时缓冲是纯色（`#101828`，Chromium
 清过但没画过），四条比对当场就红。它在 `./test/ci-all.sh` 里跑第 3 行（12 断言 / 14s），
 也是本项目第一条不看日志、只看像素的门禁；它在两块显示器上都做全量断言，为什么
-真桌面那侧曾经读回纯色、那条 skip 又为什么被删掉，见 §9 与 `docs/headless-ci.md` §5.1。
+真桌面那侧曾经读回纯色、那条 skip 又为什么被删掉，见 §9 与 `docs/testing/headless-ci.md` §5.1。
 
 ## 9. 第四轮：§8 把帧回答从时钟那一路删掉了（2026-10-21）
 

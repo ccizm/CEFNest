@@ -1705,7 +1705,7 @@ chromium_session_context_menu_dismiss (ChromiumSession *self)
  *
  * A page's ask for a microphone, a location or the clipboard is a question CEF
  * only lets the host answer, and — unlike a download or a search — the page is
- * standing on the answer. Measured against real Chromium (docs/permission-prompt.md):
+ * standing on the answer. Measured against real Chromium (docs/features/permission-prompt.md):
  * an unanswered media ask leaves getUserMedia pending *and* stops the next ask
  * from ever arriving, and a prompt left held is dismissed with "ignore" the
  * moment the page asks for anything else. So this side always answers: the host's
