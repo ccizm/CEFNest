@@ -1,54 +1,25 @@
 # CNB (cnb.cool) entry point.
 #
-# The branch pipeline compiles the library, the demo, the examples and the test
-# clients on a hosted Ubuntu 24.04 runner, fetches the verified stable CEF
-# (154.0.34), builds cefnest-helper against it, and uploads the build tarball plus
-# installable deb/rpm packages (including the helper and its CEF runtime) as
-# commit attachments.
-#
-# A tag push runs the same build and then creates the Release for that tag and
-# uploads the same files as Release assets. Push a version tag such as
-# v154.0.34 to publish one.
+# Builds happen on release only: a tag push compiles the library, the demo, the
+# examples and the test clients on a hosted Ubuntu 24.04 runner, fetches the
+# verified stable CEF (154.0.34), builds cefnest-helper against it, creates the
+# Release for that tag and uploads the build tarball plus installable deb/rpm
+# packages (including the helper and its CEF runtime) as Release assets.
+# Push a version tag such as v154.0.34 to publish one. Ordinary branch pushes
+# build nothing here — the full gate (test/ci-all.sh) runs locally or on a
+# prepared self-hosted runner; docs/testing/cnb-ci.md describes both paths.
 #
 # The asset names below are static (the attachment list cannot expand shell
 # variables), so they carry the version they pin: when the CEF package version
-# or CEFNEST_PACKAGE_RELEASE changes, update the names in BOTH lists to match
-# what scripts/build-packages.sh emits for those values.
-#
-# Neither pipeline runs test/ci-all.sh: the full gate needs
-# gnome-shell --headless and a prepared display/D-Bus session, which a hosted
-# runner does not have. That gate stays local or on a prepared self-hosted
-# runner; docs/testing/cnb-ci.md describes both paths.
-main:
-  push:
-    - name: build-artifacts
-      stages:
-        - name: build
-          image: ubuntu:24.04
-          script: CEFNEST_PACKAGE_RELEASE=3 ./scripts/ci-build.sh
-          timeout: 90m
-        - name: upload build
-          image: cnbcool/attachments:latest
-          settings:
-            attachments:
-              - "./cefnest-build.tar.gz"
-              - "./dist/libcefnest0_154.0.34-3_amd64.deb"
-              - "./dist/libcefnest-dev_154.0.34-3_amd64.deb"
-              - "./dist/cefnest-demo_154.0.34-3_amd64.deb"
-              - "./dist/cefnest-helper_154.0.34-3_amd64.deb"
-              - "./dist/cefnest-154.0.34-3.x86_64.rpm"
-              - "./dist/cefnest-devel-154.0.34-3.x86_64.rpm"
-              - "./dist/cefnest-demo-154.0.34-3.x86_64.rpm"
-              - "./dist/cefnest-helper-154.0.34-3.x86_64.rpm"
-              - "./dist/cefnest-packages-154.0.34-3.tar.gz"
-              - "./dist/SHA256SUMS"
+# or CEFNEST_PACKAGE_RELEASE changes, update the names to match what
+# scripts/build-packages.sh emits for those values.
 $:
   tag_push:
     - name: release
       stages:
         - name: build
           image: ubuntu:24.04
-          script: CEFNEST_PACKAGE_RELEASE=3 ./scripts/ci-build.sh
+          script: CEFNEST_PACKAGE_RELEASE=4 ./scripts/ci-build.sh
           timeout: 90m
         - name: create release
           type: git:release
@@ -61,13 +32,13 @@ $:
           settings:
             attachments:
               - "./cefnest-build.tar.gz"
-              - "./dist/libcefnest0_154.0.34-3_amd64.deb"
-              - "./dist/libcefnest-dev_154.0.34-3_amd64.deb"
-              - "./dist/cefnest-demo_154.0.34-3_amd64.deb"
-              - "./dist/cefnest-helper_154.0.34-3_amd64.deb"
-              - "./dist/cefnest-154.0.34-3.x86_64.rpm"
-              - "./dist/cefnest-devel-154.0.34-3.x86_64.rpm"
-              - "./dist/cefnest-demo-154.0.34-3.x86_64.rpm"
-              - "./dist/cefnest-helper-154.0.34-3.x86_64.rpm"
-              - "./dist/cefnest-packages-154.0.34-3.tar.gz"
+              - "./dist/libcefnest0_154.0.34-4_amd64.deb"
+              - "./dist/libcefnest-dev_154.0.34-4_amd64.deb"
+              - "./dist/cefnest-demo_154.0.34-4_amd64.deb"
+              - "./dist/cefnest-helper_154.0.34-4_amd64.deb"
+              - "./dist/cefnest-154.0.34-4.x86_64.rpm"
+              - "./dist/cefnest-devel-154.0.34-4.x86_64.rpm"
+              - "./dist/cefnest-demo-154.0.34-4.x86_64.rpm"
+              - "./dist/cefnest-helper-154.0.34-4.x86_64.rpm"
+              - "./dist/cefnest-packages-154.0.34-4.tar.gz"
               - "./dist/SHA256SUMS"

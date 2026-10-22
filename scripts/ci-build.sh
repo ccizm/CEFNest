@@ -167,9 +167,9 @@ Highlights of this release:
 | cefnest-packages-$V.tar.gz | Archive of the six packages except the helper |
 | SHA256SUMS | SHA-256 manifest for every artifact |
 
-The helper packages carry the CEF runtime; cefnest-demo depends on
-cefnest-helper, and libcefnest0 depends on it too — installing any one of the
-four pulls in the rest.
+The helper packages carry the CEF runtime. Dependencies are layered, never
+circular: install cefnest-helper first, libcefnest0 depends on it, and the
+-dev and demo packages pull in the library.
 EOF
 
 echo "== ci build done"

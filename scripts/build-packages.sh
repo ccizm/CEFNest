@@ -153,9 +153,9 @@ rm -rf "$SHLIBDEPS_DIR"
 if [ -z "$HELPER_DEPS" ]; then
   HELPER_DEPS="libasound2t64, libatk-bridge2.0-0t64, libatk1.0-0t64, libatspi2.0-0t64, libc6 (>= 2.39), libcairo2, libcups2t64, libdbus-1-3, libexpat1, libgbm1, libgcc-s1, libglib2.0-0t64, libnspr4, libnss3, libpango-1.0-0, libstdc++6 (>= 13), libudev1, libx11-6, libxcb1, libxcomposite1, libxdamage1, libxext6, libxfixes3, libxkbcommon0, libxrandr2"
 fi
-# The packages depend on each other: the library needs its helper to render,
-# and the helper package answers with the library it is built for.
-HELPER_DEPS="$HELPER_DEPS, libcefnest0 (= $VERSION-$RELEASE)"
+# The dependency graph is strictly layered, never circular: the helper (the CEF
+# runtime) is the bottom layer and installs first, the library depends on it,
+# and dev/demo depend on the library.
 
 # One writer for all four so the control fields cannot drift.
 deb_control() {
@@ -300,7 +300,6 @@ a host application against CEFNest.
 
 %package helper
 Summary: CEF runtime and cefnest-helper
-Requires: cefnest = %{version}-%{release}
 Requires: glibc >= 2.39
 
 %description helper

@@ -302,12 +302,14 @@ ninja -C builddir install`"
       </div>
       <p>
         架构位：deb 为 <code>_amd64</code> / <code>_arm64</code>，rpm 为
-        <code>.x86_64</code> / <code>.aarch64</code>。每个包同时生成一份
-        <strong>不带版本号的短名拷贝</strong>（<code>libcefnest0.deb</code>、
-        <code>cefnest.rpm</code> 等），本地安装不用抄版本；全部产物另打成
-        <code>cefnest-packages.tar.gz</code>，配 <code>SHA256SUMS</code> 校验。
-        两系依赖关系一致：demo 依赖运行库与 helper；helper 独立可装；运行库对
-        helper 只是 Recommends。
+        <code>.x86_64</code> / <code>.aarch64</code>。修订号（
+        <code>版本-修订</code>）随每次重新发版递增，包管理器据此识别升级；
+        全部产物另打成 <code>cefnest-packages-版本-修订.tar.gz</code>，配
+        <code>SHA256SUMS</code> 校验。
+        两系依赖关系一致，严格分层、无循环：<strong>先装
+        <code>cefnest-helper</code>（CEF 运行时），再装 <code>libcefnest0</code>
+        （依赖 helper）；<code>-dev</code> 与 demo 依赖运行库</strong>。
+        用包管理器装 demo 时四件会按序自动拉齐。
       </p>
       <CodeBlock label="bash" lang="bash" :code="`cc host.c -o host \$(pkg-config --cflags --libs cefnest)`" />
       <p>
