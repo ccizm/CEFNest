@@ -17,8 +17,20 @@ main:
           script: |
             set -eu
             export DEBIAN_FRONTEND=noninteractive
+            export TZ=Etc/UTC
             SUDO=""
             if [ "$(id -u)" != 0 ]; then SUDO=sudo; fi
+            # tzdata's postinst asks debconf for a zone even in a bare Ubuntu
+            # image. Preseed it as well as setting the frontend: a postinst that
+            # cannot answer aborts the whole apt transaction, and every package
+            # after it is left unpacked.
+            if command -v debconf-set-selections >/dev/null 2>&1; then
+              printf 'tzdata tzdata/Areas select Etc\n' |
+                $SUDO debconf-set-selections
+              printf 'tzdata tzdata/Zones/Etc select UTC\n' |
+                $SUDO debconf-set-selections
+            fi
+            $SUDO dpkg --configure -a
             $SUDO apt-get update
             $SUDO apt-get install -y --no-install-recommends \
               build-essential meson ninja-build pkg-config git linux-libc-dev \

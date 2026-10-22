@@ -18,6 +18,11 @@ build 流水线自己会拉 CEF（`third_party/cef/dist`，约 1.5 GB，不进 g
 helper；它缺的是可用的显示/D-Bus 会话和 `gnome-shell --headless`。所以默认流水线
 只编译和打包；完整门禁留在本地，或放在已经准备好的自托管 runner 上。
 
+apt 步骤在装包前设置 `DEBIAN_FRONTEND=noninteractive` 和 `TZ=Etc/UTC`，并向
+debconf preseed `tzdata/Areas=Etc`、`tzdata/Zones/Etc=UTC`，最后先跑一次
+`dpkg --configure -a`。容器镜像里 `tzdata` 的 postinst 一旦拿不到时区就会非零退出，
+后面所有包都会停在 unpacked；这三步就是把它变成无交互安装。
+
 ## 2. 产物里有什么
 
 `cefnest-build.tar.gz` 包含：
