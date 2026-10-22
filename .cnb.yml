@@ -30,8 +30,20 @@ main:
               printf 'tzdata tzdata/Zones/Etc select UTC\n' |
                 $SUDO debconf-set-selections
             fi
-            $SUDO dpkg --configure -a
+            # A previous failed run can leave packages unpacked. Let dpkg try,
+            # then let apt repair whatever it could not; the fresh list makes
+            # that repair possible. A failure here is reported, not hidden.
+            if ! $SUDO dpkg --configure -a; then
+              echo "cnb: dpkg left packages unconfigured; apt-get -f will retry" >&2
+            fi
             $SUDO apt-get update
+            $SUDO apt-get -f install -y
+            # Configure tzdata on its own before anything that depends on
+            # python3. This keeps a tzdata failure a one-package failure with
+            # its own stderr, instead of a cascade through the rest of the list.
+            $SUDO apt-get install -y --no-install-recommends tzdata
+            $SUDO ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime
+            printf '%s\n' "$TZ" | $SUDO tee /etc/timezone >/dev/null
             $SUDO apt-get install -y --no-install-recommends \
               build-essential meson ninja-build pkg-config git linux-libc-dev \
               libgtk-4-dev libwayland-dev libxkbcommon-dev libjson-glib-dev \

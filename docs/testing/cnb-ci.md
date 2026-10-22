@@ -19,9 +19,12 @@ helper；它缺的是可用的显示/D-Bus 会话和 `gnome-shell --headless`。
 只编译和打包；完整门禁留在本地，或放在已经准备好的自托管 runner 上。
 
 apt 步骤在装包前设置 `DEBIAN_FRONTEND=noninteractive` 和 `TZ=Etc/UTC`，并向
-debconf preseed `tzdata/Areas=Etc`、`tzdata/Zones/Etc=UTC`，最后先跑一次
-`dpkg --configure -a`。容器镜像里 `tzdata` 的 postinst 一旦拿不到时区就会非零退出，
-后面所有包都会停在 unpacked；这三步就是把它变成无交互安装。
+debconf preseed `tzdata/Areas=Etc`、`tzdata/Zones/Etc=UTC`。随后先跑
+`dpkg --configure -a`（失败只记录，不立刻退出）、`apt-get -f install -y` 修复可能
+存在的半安装状态，再**单独安装 `tzdata`**、写 `/etc/localtime` 和 `/etc/timezone`，
+最后才装其余依赖。容器镜像里 `tzdata` 的 postinst 一旦拿不到时区就会非零退出，后面
+所有包都会停在 unpacked；把 tzdata 提到最前面，失败时至少是一包失败、能拿到它自己的
+stderr，而不是整条 python3/GTK 依赖链一起报错。
 
 ## 2. 产物里有什么
 
