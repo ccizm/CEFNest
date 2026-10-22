@@ -19,12 +19,16 @@ helper；它缺的是可用的显示/D-Bus 会话和 `gnome-shell --headless`。
 只编译和打包；完整门禁留在本地，或放在已经准备好的自托管 runner 上。
 
 apt 步骤在装包前设置 `DEBIAN_FRONTEND=noninteractive` 和 `TZ=Etc/UTC`，并向
-debconf preseed `tzdata/Areas=Etc`、`tzdata/Zones/Etc=UTC`。随后先跑
-`dpkg --configure -a`（失败只记录，不立刻退出）、`apt-get -f install -y` 修复可能
-存在的半安装状态，再**单独安装 `tzdata`**、写 `/etc/localtime` 和 `/etc/timezone`，
-最后才装其余依赖。容器镜像里 `tzdata` 的 postinst 一旦拿不到时区就会非零退出，后面
-所有包都会停在 unpacked；把 tzdata 提到最前面，失败时至少是一包失败、能拿到它自己的
-stderr，而不是整条 python3/GTK 依赖链一起报错。
+debconf preseed `tzdata/Areas=Etc`、`tzdata/Zones/Etc=UTC`。随后**单独处理
+`tzdata`**，最后才装其余依赖；失败时是一包失败、能拿到它自己的 stderr，而不是整条
+python3/GTK 依赖链一起报错。
+
+容器里的 `/etc/localtime` 通常是宿主 bind mount，`tzdata` 的 postinst 会用
+`mv /etc/localtime.dpkg-new /etc/localtime` 覆盖它，而 rename 一个挂载点是
+`EBUSY`。流水线先尝试 `umount /etc/localtime`；如果 runner 不允许，就把 tzdata
+`dpkg --unpack`，只把 postinst 里那一段 rename 改成跳过，再 `dpkg --configure
+tzdata`。`/etc/timezone` 仍会被写入，后续命令用导出的 `TZ`，不依赖
+`/etc/localtime`。之后跑 `dpkg --configure -a` 和 `apt-get -f install -y` 收尾。
 
 ## 2. 产物里有什么
 

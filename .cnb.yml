@@ -30,20 +30,41 @@ main:
               printf 'tzdata tzdata/Zones/Etc select UTC\n' |
                 $SUDO debconf-set-selections
             fi
-            # A previous failed run can leave packages unpacked. Let dpkg try,
-            # then let apt repair whatever it could not; the fresh list makes
-            # that repair possible. A failure here is reported, not hidden.
-            if ! $SUDO dpkg --configure -a; then
-              echo "cnb: dpkg left packages unconfigured; apt-get -f will retry" >&2
+            # The runner bind-mounts /etc/localtime from the host. tzdata's
+            # postinst renames /etc/localtime.dpkg-new over it; rename(2) of a
+            # mount point is EBUSY and takes the whole apt transaction down.
+            # Try to unmount it first; if that is not permitted, unpack tzdata
+            # and skip only that rename. /etc/timezone still gets written and
+            # TZ is exported for every later command.
+            if awk '$2 == "/etc/localtime" { found = 1 } END { exit !found }' \
+                 /proc/mounts 2>/dev/null; then
+              $SUDO umount /etc/localtime 2>/dev/null || true
             fi
             $SUDO apt-get update
+            if awk '$2 == "/etc/localtime" { found = 1 } END { exit !found }' \
+                 /proc/mounts 2>/dev/null; then
+              TZ_TMP=$(mktemp -d)
+              (cd "$TZ_TMP" && apt-get download tzdata)
+              set -- "$TZ_TMP"/tzdata_*.deb
+              $SUDO dpkg --unpack "$1"
+              TZ_POSTINST=/var/lib/dpkg/info/tzdata.postinst
+              if ! $SUDO grep -q 'if test "$(get_timezone)" != "$TIMEZONE"; then' \
+                   "$TZ_POSTINST"; then
+                echo "cnb: unexpected tzdata postinst; refusing to guess" >&2
+                exit 1
+              fi
+              $SUDO sed -i \
+                's|if test "$(get_timezone)" != "$TIMEZONE"; then|if false; then|' \
+                "$TZ_POSTINST"
+              $SUDO dpkg --configure tzdata
+              rm -rf "$TZ_TMP"
+            else
+              $SUDO apt-get install -y --no-install-recommends tzdata
+            fi
+            # Repair anything the failed run left unpacked, now that tzdata can
+            # be configured without touching the mount.
+            $SUDO dpkg --configure -a
             $SUDO apt-get -f install -y
-            # Configure tzdata on its own before anything that depends on
-            # python3. This keeps a tzdata failure a one-package failure with
-            # its own stderr, instead of a cascade through the rest of the list.
-            $SUDO apt-get install -y --no-install-recommends tzdata
-            $SUDO ln -snf "/usr/share/zoneinfo/$TZ" /etc/localtime
-            printf '%s\n' "$TZ" | $SUDO tee /etc/timezone >/dev/null
             $SUDO apt-get install -y --no-install-recommends \
               build-essential meson ninja-build pkg-config git linux-libc-dev \
               libgtk-4-dev libwayland-dev libxkbcommon-dev libjson-glib-dev \
