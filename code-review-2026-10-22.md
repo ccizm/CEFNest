@@ -252,6 +252,37 @@ M12、M18、M21、M22、L2-L7、L9、L12-L17、L25 与存疑项：逐条核实�
   顺序，看哪条能出 `OnBeforeClose`。标签关不掉意味着多浏览器的 tab 生命周期只进不出，
   这是宿主层面无解的：`::browser-closed` 收不到，宿主就不能拆自己的 tab。
 
+### 二轮审查（2026-10-22，提交 `1a5ee7f` 之后对同一批改动的复核）
+
+对 M10/M11/M13/M14、L9、L11 这一轮改动整体复核：自切行读循环的每条边界（吐行后
+`line_pending` 的存活检查、逐 chunk 的上限判断、严格大于语义）逐路径核对无洞；空菜单
+popover 的 `ref_sink + unref` 对浮引用创建路径成立；`examples/host.c` 的"窗口先死"处理
+逐 handler 核对无 NULL 漏网；`map-cycle` 的 block/unblock 计数法成立。25 个可自动运行的
+测试全绿。**未发现正确性问题**，以下为新增记录（编号接 R 起，区别于首轮 M/L）：
+
+- **R1（中）`test/audit-map-arms.py` 没有反空跑保护。** `MAP_BODY` / `ARM` 正则一旦与
+  源码形状失配（`*_on_map` 改名、签名写成多行），`main()` 的循环跑 0 次直接打印 ok、
+  rc=0——静默绿。`event-shape-gate.sh` 有"少于 20 个事件名就红"的下限，这条没有；
+  而 `map-cycle` 在无 display 机器上 skip 时，它就是这条规则唯一的防线。另外
+  `FUNC_HEADER` 只匹配单行函数签名，多行签名的函数体进不了 `functions` 索引，同为一层
+  静默盲区。建议：加"至少找到 N 个 map 处理器，否则红"的下限。
+- **R2（轻）999 次同名碰撞，示例与 demo 给了两种答案。** `examples/host.c:323` 的
+  `download_path()` 循环耗尽后返回原名（理论上可覆盖已有文件），而 `src/main.c` 的
+  `download_target_path()` 同场景用时间戳落名（本轮刚修的）。示例是被人照抄的代码，
+  两条路应当一致——照抄 demo 的时间戳做法。
+- **R3（琐碎）`test/event-shape-gate.sh:53` 注释与代码不符。** 注释说事件名
+  "in the order the source lists them"，下一行 `sort -u` 排了序。删半句即可。
+- **R4（记录取舍，非 bug）accept 重试不区分错误种类。** EMFILE 之外**永久性**的失败
+  （如 socket 目录被删）会以 200 ms 一条的 warning 无限循环——比改前的热循环好得多，
+  `src/chromium-session.c` 的注释也承认这是折衷，但"对错误不分类"意味着某类永久失败
+  将来会以 5 Hz 刷日志的方式暴露。
+- **R5（可不修）`scroll_axes` 清了、对端的账没清。** `src/nested-seat.c` 在
+  `pointer_send_leave` 清 `scroll_axes`，但 `test/shm-client.c` 的 `axes_moved` 不随之清；
+  "滚动 → 离开 surface → 重进 → stop"的序列会让客户端拿上一次手势的旧账比这一次的
+  stop。selftest 不覆盖该序列，真实影响接近零——真要较真，是测试客户端自己欠的对称。
+
+R1–R5 均未修：R1/R2/R3 留下一轮，R4/R5 记录在此以免重查。
+
 
 ---
 

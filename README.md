@@ -1,5 +1,7 @@
 # CEFNest
 
+English | [简体中文](README.zh-CN.md)
+
 A GTK 4 widget that shows a web page rendered by **real Chromium**, composited
 into the widget through a Wayland compositor that runs inside the same process.
 
