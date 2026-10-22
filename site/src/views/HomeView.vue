@@ -192,8 +192,9 @@ const globalsList =
               </p>
               <CodeBlock :code="debCode" label="bash" lang="bash" />
               <p class="small text-secondary mb-0">
-                helper 与整个 CEF 运行时在独立的 <code>cefnest-helper</code> 包中（约 1.5 GB），
-                demo 依赖它——装齐即跑真 Chromium；只要库不跑浏览器时可不装 helper 包。
+                依赖严格分层：helper 包（约 1.5 GB，含整个 CEF 运行时）在底层，库精确依赖它，
+                demo 与 -dev 再依赖库——四个包同版本一起发布，装任何一个都按序自动拉齐，
+                装齐即跑真 Chromium。
               </p>
             </div>
           </div>

@@ -113,11 +113,13 @@ ninja -C builddir install
 随它一起安装，并从它所在目录解析，这是把整个 `third_party/cef/dist` 目录挪走之后实测过的
 （`docs/guides/packaging.md` §9）。
 
-CNB 的 build 流水线还会把安装树打成 `libcefnest0`、`libcefnest-dev`、`cefnest-demo`
+CNB 的发版流水线还会把安装树打成 `libcefnest0`、`libcefnest-dev`、`cefnest-demo`
 和 `cefnest-helper` 的 deb/rpm；装进系统后就能用
-`pkg-config --cflags --libs cefnest` 构建宿主。helper 包内含 `cefnest-helper` 和它
-加载的 CEF stable runtime，`cefnest-demo` 强依赖它，`libcefnest0` 推荐它。包版本跟随
-CEF stable 的 `X.Y.Z`，详见 `docs/testing/cnb-ci.md`。
+`pkg-config --cflags --libs cefnest` 构建宿主。依赖严格分层、无循环：
+`cefnest-helper`（CEF 运行时）在底层、最先安装，`libcefnest0` 精确依赖对应版本的
+helper，`libcefnest-dev` 与 `cefnest-demo` 精确依赖对应版本的库。四个包共用一个
+版本号——CEF stable `X.Y.Z` 加修订号（`154.0.34-4`）——同一次构建一起发布，
+升级时整体联动。流水线只在版本 tag 上构建，详见 `docs/testing/cnb-ci.md`。
 
 ## 运行
 

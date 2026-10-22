@@ -36,10 +36,10 @@ const section = computed(() => {
 
       <h2>方法一：安装 deb / rpm，调用 runtime</h2>
       <p>
-        流水线产出四个包：<code>libcefnest0</code>（共享库）、
+        发版流水线产出四个包：<code>libcefnest0</code>（共享库）、
         <code>libcefnest-dev</code>（头文件与 <code>cefnest.pc</code>）、
         <code>cefnest-helper</code>（helper 与整个 CEF 运行时，约 1.5 GB，版本号跟随其构建所用的
-        CEF 发行版）、<code>cefnest-demo</code>（演示程序，依赖 helper 包，含回退用的
+        CEF 发行版）、<code>cefnest-demo</code>（演示程序，含回退用的
         <code>shm-client</code>）。装好后宿主一行编译、直接调用 runtime：
       </p>
       <CodeBlock
@@ -55,9 +55,10 @@ cc host.c -o host \$(pkg-config --cflags --libs cefnest)
 cefnest-demo`"
       />
       <div class="doc-note">
-        helper 与 CEF 运行时都在 <code>cefnest-helper</code> 包里，随 demo 的依赖关系自动装上——
-        装齐即跑真 Chromium，不需要方法二。只做开发、不跑浏览器时可以只装
-        <code>libcefnest0</code> 与 <code>libcefnest-dev</code>，此时 demo 回退到
+        依赖严格分层、无循环：<code>cefnest-helper</code>（CEF 运行时）是底层包、最先安装，
+        <code>libcefnest0</code> 精确依赖对应版本的 helper，<code>-dev</code> 与 demo 再精确依赖
+        对应版本的库——四个包同版本（CEF 版本-修订号）一起发布、锁步升级，装任何一个都会由
+        包管理器按序拉齐。想在无 CEF 的环境演练合成器，走下面的方法二：demo 会回退到
         <code>shm-client</code>，合成器、seat、剪贴板桥照样可演练。
       </div>
 
@@ -264,12 +265,11 @@ ninja -C builddir install`"
 
       <h2>二进制包</h2>
       <p>
-        CNB 流水线把安装树打成 deb 与 rpm，共四个包：<code>libcefnest0</code>、
+        发版流水线把安装树打成 deb 与 rpm，共四个包：<code>libcefnest0</code>、
         <code>libcefnest-dev</code>、<code>cefnest-helper</code>、<code>cefnest-demo</code>。
         helper 与整个 CEF 运行时单独放在 <code>cefnest-helper</code> 包里——
-        树是硬链接进包目录的，约 1.5 GB，包版本号跟随其构建所用的 CEF 发行版；
-        <code>cefnest-demo</code> 依赖它。只要库的宿主可以不装 helper 包，
-        此时 demo 回退到自家包里的 <code>shm-client</code>。装好后宿主一行编译：
+        树是硬链接进包目录的，约 1.5 GB，包版本号跟随其构建所用的 CEF 发行版。
+        装好后宿主一行编译：
       </p>
       <div class="table-responsive mb-3">
         <table class="table table-sm table-bordered align-middle mb-0">
@@ -279,23 +279,23 @@ ninja -C builddir install`"
           <tbody>
             <tr>
               <td>运行库</td>
-              <td><code>libcefnest0_版本-1_架构.deb</code></td>
-              <td><code>cefnest-版本-1.架构.rpm</code></td>
+              <td><code>libcefnest0_版本-修订_架构.deb</code></td>
+              <td><code>cefnest-版本-修订.架构.rpm</code></td>
             </tr>
             <tr>
               <td>开发文件（头文件 + pkg-config）</td>
-              <td><code>libcefnest-dev_版本-1_架构.deb</code></td>
-              <td><code>cefnest-devel-版本-1.架构.rpm</code></td>
+              <td><code>libcefnest-dev_版本-修订_架构.deb</code></td>
+              <td><code>cefnest-devel-版本-修订.架构.rpm</code></td>
             </tr>
             <tr>
               <td>helper + CEF 运行时（约 1.5 GB）</td>
-              <td><code>cefnest-helper_版本-1_架构.deb</code></td>
-              <td><code>cefnest-helper-版本-1.架构.rpm</code></td>
+              <td><code>cefnest-helper_版本-修订_架构.deb</code></td>
+              <td><code>cefnest-helper-版本-修订.架构.rpm</code></td>
             </tr>
             <tr>
               <td>demo</td>
-              <td><code>cefnest-demo_版本-1_架构.deb</code></td>
-              <td><code>cefnest-demo-版本-1.架构.rpm</code></td>
+              <td><code>cefnest-demo_版本-修订_架构.deb</code></td>
+              <td><code>cefnest-demo-版本-修订.架构.rpm</code></td>
             </tr>
           </tbody>
         </table>

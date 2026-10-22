@@ -121,12 +121,16 @@ installed helper needs nothing from the tree it was built in — the CEF runtime
 travels next to it and is resolved from there, which is measured with the whole
 `third_party/cef/dist` directory moved aside (`docs/guides/packaging.md` §9).
 
-The CNB build pipeline also packs the install tree into `libcefnest0`,
+The CNB release pipeline also packs the install tree into `libcefnest0`,
 `libcefnest-dev`, `cefnest-demo` and `cefnest-helper` debs and rpms; once
-installed, a host builds with `pkg-config --cflags --libs cefnest`. The helper
-package carries `cefnest-helper` and the CEF stable runtime it loads, so
-`cefnest-demo` depends on it and `libcefnest0` recommends it. Package versions
-follow the CEF stable `X.Y.Z`; see `docs/testing/cnb-ci.md`.
+installed, a host builds with `pkg-config --cflags --libs cefnest`. The
+dependencies are strictly layered, never circular: `cefnest-helper` (the CEF
+runtime) sits at the bottom and installs first, `libcefnest0` depends on the
+exact helper version, and `libcefnest-dev` and `cefnest-demo` depend on the
+exact library version. All four share one version — CEF stable `X.Y.Z` plus a
+revision (`154.0.34-4`) — and are built and released together, so an upgrade
+moves all of them at once. The pipeline builds on version tags only; see
+`docs/testing/cnb-ci.md`.
 
 ## Run
 
