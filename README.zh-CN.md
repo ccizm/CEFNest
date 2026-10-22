@@ -110,6 +110,11 @@ ninja -C builddir install
 随它一起安装，并从它所在目录解析，这是把整个 `third_party/cef/dist` 目录挪走之后实测过的
 （`docs/guides/packaging.md` §9）。
 
+CNB 的 build 流水线还会把安装树打成 `libcefnest0`、`libcefnest-dev`、`cefnest-demo`
+的 deb 和 rpm；装进系统后就能用 `pkg-config --cflags --libs cefnest` 构建宿主。包不含
+helper 和 CEF runtime，demo 在没有 helper 时回退到包内的 `shm-client`，详见
+`docs/testing/cnb-ci.md`。
+
 ## 运行
 
 ```bash

@@ -117,6 +117,12 @@ installed helper needs nothing from the tree it was built in — the CEF runtime
 travels next to it and is resolved from there, which is measured with the whole
 `third_party/cef/dist` directory moved aside (`docs/guides/packaging.md` §9).
 
+The CNB build pipeline also packs the install tree into `libcefnest0`,
+`libcefnest-dev` and `cefnest-demo` debs and rpms; once installed, a host builds
+with `pkg-config --cflags --libs cefnest`. The packages contain no helper or CEF
+runtime; the demo falls back to the `shm-client` in its own package when no
+helper is present. See `docs/testing/cnb-ci.md`.
+
 ## Run
 
 ```bash

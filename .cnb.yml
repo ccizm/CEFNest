@@ -1,8 +1,9 @@
 # CNB (cnb.cool) entry point for a build-only run.
 #
 # This pipeline compiles the library, the demo, the examples and the test
-# clients on a hosted Ubuntu 24.04 runner, then uploads one tarball as a commit
-# attachment. It deliberately does not run test/ci-all.sh: the full gate needs
+# clients on a hosted Ubuntu 24.04 runner, then uploads the build tarball and
+# installable deb/rpm packages as commit attachments. It deliberately does not
+# run test/ci-all.sh: the full gate needs
 # GTK/Wayland/DRM, gnome-shell --headless and a 1.5 GB CEF distribution, which
 # a hosted runner does not have. That gate stays local or on a prepared
 # self-hosted runner; docs/testing/cnb-ci.md describes both paths.
@@ -21,7 +22,7 @@ main:
             $SUDO apt-get install -y --no-install-recommends \
               build-essential meson ninja-build pkg-config git linux-libc-dev \
               libgtk-4-dev libwayland-dev libxkbcommon-dev libjson-glib-dev \
-              libgbm-dev libdrm-dev wayland-protocols
+              libgbm-dev libdrm-dev wayland-protocols rpm
             rm -rf builddir
             meson setup builddir
             ninja -C builddir
@@ -35,9 +36,18 @@ main:
             cp -a builddir/test/shm-client artifact/
             cp -a builddir/test/seat-selftest artifact/
             tar -czf cefnest-build.tar.gz -C artifact .
+            ./scripts/build-packages.sh
           timeout: 30m
         - name: upload build
           image: cnbcool/attachments:latest
           settings:
             attachments:
               - "./cefnest-build.tar.gz"
+              - "./dist/libcefnest0.deb"
+              - "./dist/libcefnest-dev.deb"
+              - "./dist/cefnest-demo.deb"
+              - "./dist/cefnest.rpm"
+              - "./dist/cefnest-devel.rpm"
+              - "./dist/cefnest-demo.rpm"
+              - "./dist/cefnest-packages.tar.gz"
+              - "./dist/SHA256SUMS"
