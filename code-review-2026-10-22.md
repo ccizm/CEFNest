@@ -349,7 +349,7 @@ CEF 线程模型主干干净。薄弱点集中在"多浏览器 + 异常路径"�
 | L15 demo out-drag 临时文件 | 前一个 drag 未结束（`demo_out_drag != NULL`）时拒绝新的 handover，不再覆盖 `demo_out_temp_path` | 无门禁（需要真实拖放） |
 | R4 accept 重试不分类 | 只对 `G_IO_ERROR_TOO_MANY_OPEN_FILES` 重试；其他非取消错误 `mark_closed("control listener failed")`，不再 5 Hz 刷日志。旧 listener 的 accept 结果（stop/restart 后到达）直接丢弃 | 无门禁（需要构造 EMFILE/永久失败） |
 | R5 测试客户端轴记账 | `shm-client` 的 `pointer_leave` 清 `axes_moved`/`axes_stopped`/`axis_in_frame`，与合成器的 `scroll_axes` 对称 | 现有 `seat-selftest`（不覆盖 leave/re-enter 序列，真实影响为零） |
-| L25 CNB 流水线与产物 | `ci-all` job 显式 `timeout: 1h`；`CI_LOG_DIR=ci-logs` 保留判定表和每跑日志，`cnbcool/attachments` 上传到 commit 附件；`scripts/check-cef-pin.sh` 在构建 helper 前校验 runner 的 CEF 与 pin 一致 | 本地跑 `check-cef-pin.sh`、`CI_LOG_DIR=ci-logs ./test/ci-all.sh unit` |
+| L25 CNB 产物 | 默认流水线改为托管 Ubuntu 24.04 的 build-only：安装编译依赖、构建库/demo/示例/test 客户端，打包后由 `cnbcool/attachments` 上传到 commit 附件；完整 `ci-all` 仍走本地/自托管，`CI_LOG_DIR` 与 `check-cef-pin.sh` 保留给完整门禁 | 本地 `check-cef-pin.sh`、`CI_LOG_DIR=ci-logs ./test/ci-all.sh unit`；CNB build-only 待托管节点跑一次 |
 | 门禁基建 | `ci-all` 的 0 断言判 FAIL；内层 `timeout 90` 之和纳入外层预算；`audit-map-arms.py` / `audit-loop-sources.py` 加空跑下限；`ci-session.sh` 把 bus 地址落盘 | 直接运行 |
 | `fetch-cef.sh` 无校验和 | 下载并校验 CEF 构建服务发布的 `.sha256` | 手工核对 CDN 提供该文件 |
 
