@@ -13,6 +13,9 @@ deb-cefnest-demo/
 deb-cefnest-helper/
 rpmbuild/
 dist/
+/artifact/
+/cefnest-build.tar.gz
+/RELEASE-NOTES.md
 helper/build/
 compile_commands.json
 *.o

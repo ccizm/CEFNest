@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Downloads a CEF binary distribution into third_party/cef/dist.
 #
-# The default is the newest stable build published by the CEF build service.
-# CEF_VERSION can name an exact build instead, and CEF_CHANNEL=any takes the
-# first build in the index whatever its channel. The package build uses the
-# CEF X.Y.Z part as the CEFNest package version, so the three version files
-# written below travel with the distribution and are read by
+# The default is the stable build this tree is verified against, not whatever
+# the CEF index happens to call stable today: the index carries the same build
+# under more than one channel when a release is promoted, and a new major must
+# not move the verified baseline by itself. CEF_VERSION can name another exact
+# build, "latest" (or "stable") takes the newest stable entry in the index, and
+# CEF_CHANNEL=any takes the first build whatever its channel. The package build
+# uses the CEF X.Y.Z part as the CEFNest package version, so the three version
+# files written below travel with the distribution and are read by
 # scripts/build-packages.sh.
 #
 # Bumping the build changes what Wayland protocols Chromium asks for, so a new
@@ -29,7 +32,8 @@ case "${CEF_ARCH:-$(uname -m)}" in
     ;;
 esac
 
-REQUEST="${CEF_VERSION:-latest}"
+PINNED='154.0.34+g14c5a08+chromium-154.0.8037.98'
+REQUEST="${CEF_VERSION:-$PINNED}"
 if [ "$REQUEST" = 'latest' ] || [ "$REQUEST" = 'stable' ]; then
   CHANNEL="${CEF_CHANNEL:-stable}"
   resolved=$(

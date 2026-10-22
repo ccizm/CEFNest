@@ -60,7 +60,7 @@ compositor 通告的 globals 及版本见 `src/nested-internal.h`：`wl_composit
 | gbm / libdrm | 25.0.7 / 2.4.124 | — |
 | json-glib | 1.10.6 | — |
 | meson / ninja / cmake | 1.7 / 1.12 / 3.16+ | meson 1.3（demo 的 `$ORIGIN` rpath 用 `fs.relative_to` 构建） |
-| CEF（`cef_binary_*_linux64_minimal` / `linuxarm64_minimal`） | 最新 stable（实测 154.0.34+g14c5a08+chromium-154.0.8037.98） | 任何能用其自带 CMake helpers 构建的版本；arm64 的 URL 路径已接好，但尚未在 arm64 主机上测试 |
+| CEF（`cef_binary_*_linux64_minimal` / `linuxarm64_minimal`） | 已验证的 stable 154.0.34+g14c5a08+chromium-154.0.8037.98 | 任何能用其自带 CMake helpers 构建的版本；arm64 的 URL 路径已接好，但尚未在 arm64 主机上测试 |
 
 `wayland-scanner` 必须在 `PATH` 上（协议代码在构建期生成——仓库不提交生成产物）。
 
@@ -69,8 +69,8 @@ compositor 通告的 globals 及版本见 `src/nested-internal.h`：`wl_composit
 分两个阶段，第一阶段可选。
 
 ```bash
-# 1. 拉取最新 stable CEF 二进制发行包（gitignore，下载约 500 MB，
-#    解压后 1.5 GB）；用 CEF_VERSION=<完整 CEF 版本> 固定
+# 1. 拉取已验证的 stable CEF 二进制发行包（gitignore，下载约 500 MB，
+#    解压后 1.5 GB）；CEF_VERSION=latest 取最新 stable
 ./scripts/fetch-cef.sh
 
 # 2. Chromium 侧 —— 自动发现 third_party/cef/dist
@@ -82,11 +82,11 @@ meson setup builddir
 ninja -C builddir
 ```
 
-`scripts/fetch-cef.sh` 默认取最新的 stable CEF 构建；用
-`CEF_VERSION=<完整 CEF 版本>` 固定某次构建，`CEF_CHANNEL=any` 取任意 channel 的最新
-构建。换发行包也可用 `-DCEF_ROOT=…` 指定。一次 CEF 版本升级意味着要重跑整套门禁——
-一次 Chromium 里程碑升级会同时改变 client 请求哪些 Wayland 协议
-（`docs/internals/protocol-ceilings.md` 是重测记录）。
+`scripts/fetch-cef.sh` 默认取已验证的 stable 154.0.34；`CEF_VERSION=latest` 取 CEF
+index 当前标为 stable 的最新构建，`CEF_VERSION=<完整 CEF 版本>` 固定其它构建，
+`CEF_CHANNEL=any` 取任意 channel 的最新构建。换发行包也可用 `-DCEF_ROOT=…` 指定。
+一次 CEF 版本升级意味着要重跑整套门禁——一次 Chromium 里程碑升级会同时改变 client
+请求哪些 Wayland 协议（`docs/internals/protocol-ceilings.md` 是重测记录）。
 
 跳过第一阶段仍可正常构建：此时 demo 会改用 `test/shm-client` 而非 Chromium，这已足以覆盖
 compositor、seat、剪贴板桥和弹窗。

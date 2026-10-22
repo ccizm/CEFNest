@@ -1,7 +1,7 @@
 # CNB（cnb.cool）接入
 
 仓库根目录的 `.cnb.yml` 现在做**编译产物和安装包**：在 CNB 托管 Ubuntu 24.04 节点上
-安装编译依赖，拉取最新 stable CEF，构建 `cefnest-helper`，`meson setup` + `ninja`，
+安装编译依赖，拉取已验证的 stable CEF 154.0.34，构建 `cefnest-helper`，`meson setup` + `ninja`，
 把库、demo、示例和测试客户端打包成 `cefnest-build.tar.gz`，再由
 `scripts/build-packages.sh` 产出 deb 和 rpm，全部作为当前 commit 的附件上传。它不运行
 `test/ci-all.sh`。
@@ -54,8 +54,11 @@ tzdata`。`/etc/timezone` 仍会被写入，后续命令用导出的 `TZ`，不�
 
 包版本跟随构建时使用的 CEF stable 版本：`cefnest-version` = CEF 的 `X.Y.Z`
 （当前实测 `154.0.34`），完整 CEF/Chromium 版本写进 `cefnest-helper` 的
-`Description`。`scripts/fetch-cef.sh` 默认取最新 stable；要固定某个构建就设
-`CEF_VERSION`，要取任意 channel 的最新构建就设 `CEF_CHANNEL=any`。
+`Description`。`scripts/fetch-cef.sh` 默认取**已验证的** stable
+`154.0.34`；`CEF_VERSION=latest` 取 CEF index 当前标为 stable 的最新构建，
+`CEF_VERSION=<完整版本>` 固定其它构建，`CEF_CHANNEL=any` 取任意 channel 的最新构建。
+CEF index 会把同一个构建同时列在 beta 和 stable 下（156.0.7 就是这样），所以默认不
+盲目跟随“最新 stable”，避免未重跑门禁的新 major 自动改掉包版本。
 
 Debian 包按 `amd64`/`arm64` 的 multiarch 路径安装，RPM 包按 `/usr/lib64` 安装，
 两者都由 `meson install` 的安装树直接打包，不移动文件。helper 包把整个 CEF runtime
@@ -89,7 +92,7 @@ helper 包的系统 soname 依赖由 `rpmbuild` 自动生成；其它 RPM 发行
 sudo apt install build-essential meson ninja-build pkg-config \
   libgtk-4-dev libwayland-dev libxkbcommon-dev libjson-glib-dev \
   libgbm-dev libdrm-dev libvulkan-dev imagemagick gnome-shell
-./scripts/fetch-cef.sh                 # 默认最新 stable；arm64 用 CEF_ARCH=aarch64
+./scripts/fetch-cef.sh                 # 默认 154.0.34；CEF_VERSION=latest 取最新 stable
 cmake -S helper -B helper/build -DCMAKE_BUILD_TYPE=Release
 cmake --build helper/build -j"$(nproc)"
 meson setup builddir
@@ -97,8 +100,8 @@ ninja -C builddir
 ./test/ci-all.sh
 ```
 
-`fetch-cef.sh` 默认取 CEF build service 上最新的 stable；要复现某次构建就设
-`CEF_VERSION=<完整 CEF 版本>`。它把实际下载的版本写进
+`fetch-cef.sh` 默认取已验证的 stable 154.0.34；要试最新 stable 就设
+`CEF_VERSION=latest`，要复现某次构建就设 `CEF_VERSION=<完整 CEF 版本>`。它把实际下载的版本写进
 `third_party/cef/dist/.cef-version`，`scripts/check-cef-pin.sh` 用这个文件和
 `include/cef_version.h` 比对，runner 上的旧分发包不会冒充新构建。`ci-all.sh` 每次
 运行前会用 `cmake --build helper/build` 增量重建 helper。只想跑不依赖 helper 的检查
@@ -117,3 +120,20 @@ ninja -C builddir
 `cnbcool/attachments:latest` 把 `cefnest-build.tar.gz`、八个 deb/rpm、
 `cefnest-packages.tar.gz` 和 `SHA256SUMS` 放到当前 commit 的附件；上传失败会让
 流水线失败，但产物仍留在该次构建的工作区里。
+
+## 5. 发版（tag push）
+
+分支 push 只把文件挂到 commit 附件，不会创建 Release。发版要推 tag：
+
+```bash
+git tag v154.0.34
+git push origin v154.0.34
+```
+
+`.cnb.yml` 的 `$: tag_push` 会跑同一个 `scripts/ci-build.sh`，然后：
+
+- `git:release` 用该 tag 创建 Release，描述从 `RELEASE-NOTES.md` 读取；
+- `cnbcool/attachments` 在 `tag_push` 下自动把同一批文件上传到该 tag 的 Release。
+
+顺序不能反：附件插件要求 Release 已经存在。Release 附件与 commit 附件是同一批
+文件；tag 名建议写成包版本（`v154.0.34`），但包版本本身仍由 CEF 的 `X.Y.Z` 决定。

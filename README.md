@@ -62,7 +62,7 @@ Measured on the development machine (Debian 13, `linux 6.12`):
 | gbm / libdrm | 25.0.7 / 2.4.124 | — |
 | json-glib | 1.10.6 | — |
 | meson / ninja / cmake | 1.7 / 1.12 / 3.16+ | meson 1.3 (the demo's `$ORIGIN` rpath is built with `fs.relative_to`) |
-| CEF (`cef_binary_*_linux64_minimal` / `linuxarm64_minimal`) | latest stable (measured 154.0.34+g14c5a08+chromium-154.0.8037.98) | any that builds against its own CMake helpers; arm64 URL path is wired but not yet tested on an arm64 host |
+| CEF (`cef_binary_*_linux64_minimal` / `linuxarm64_minimal`) | verified stable 154.0.34+g14c5a08+chromium-154.0.8037.98 | any that builds against its own CMake helpers; arm64 URL path is wired but not yet tested on an arm64 host |
 
 `wayland-scanner` must be on `PATH` (it generates the protocol code at build
 time — nothing is checked in).
@@ -72,8 +72,8 @@ time — nothing is checked in).
 Two stages, and the first is optional.
 
 ```bash
-# 1. fetch the latest stable CEF binary distribution (gitignored, ~500 MB
-#    download, 1.5 GB unpacked); pin with CEF_VERSION=<full CEF version>
+# 1. fetch the verified stable CEF binary distribution (gitignored, ~500 MB
+#    download, 1.5 GB unpacked); CEF_VERSION=latest takes the newest stable
 ./scripts/fetch-cef.sh
 
 # 2. the Chromium side — picks up third_party/cef/dist automatically
@@ -85,9 +85,10 @@ meson setup builddir
 ninja -C builddir
 ```
 
-`scripts/fetch-cef.sh` fetches the newest stable CEF build by default; use
-`CEF_VERSION=<full CEF version>` to pin one, or `CEF_CHANNEL=any` for the newest
-build on any channel. A different distribution can be passed with
+`scripts/fetch-cef.sh` fetches the verified stable 154.0.34 by default. Use
+`CEF_VERSION=latest` for whatever the CEF index currently marks stable, or
+`CEF_VERSION=<full CEF version>` to pin another build; `CEF_CHANNEL=any` takes
+the newest build on any channel. A different distribution can be passed with
 `-DCEF_ROOT=…`. A CEF version bump means re-running the full gate — a Chromium
 milestone also changes what Wayland protocols the client asks for
 (docs/internals/protocol-ceilings.md is the re-measurement record).
