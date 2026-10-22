@@ -77,7 +77,7 @@ zwp_linux_dmabuf_v1 5
 | `zxdg_exporter_v1/v2`、`zxdg_importer_v1/v2` | 不给 | xdg-foreign，GDK 在 mutter 上做窗口定位/激活握手用；单一 toplevel 用不上 |
 | `wl_drm` 2 | 永不 | 遗留 dmabuf 协议，`zwp_linux_dmabuf_v1` 5 已是正身 |
 
-"暂不给"三项是真实的已知损失，都记在 README 的 Known limitations；
+"暂不给"三项是真实的已知损失，都记在 `docs/known-limitations.md`；
 判据写死：**有客户端对我们发出第一次 bind 请求（即我们先广告了才可能发生），
 或者用户报了对应场景不能用，再回来补。**
 

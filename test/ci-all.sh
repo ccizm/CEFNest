@@ -5,7 +5,7 @@
 # It runs every gate test/ci-session.sh can host, one after another, and prints a
 # verdict table. Nothing here opens a window on the desktop of whoever is sitting
 # at this machine, so the run can be left going: that is what makes it a release
-# gate rather than the manual gates README documents one by one.
+# gate rather than the manual gates docs/testing/overview.md documents one by one.
 #
 #   ./test/ci-all.sh                 # everything: measured 370 s on this laptop
 #   ./test/ci-all.sh find menu       # only the named ones

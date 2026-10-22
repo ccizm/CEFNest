@@ -177,8 +177,8 @@ host` / `helper closed the browser` / `control channel closed` / `process exited
 实测与取舍在 `docs/features/session-lifecycle.md` §5）。多浏览器那三条 `::browser-created`
 （id, url, windowed）、`::browser-selected`（id）、`::browser-closed`（id，tab 上
 永远不来——`close-browser` 的三方实测在 `docs/features/multi-browser.md` §1）和页面侧两条
-`::page-message`（json）、`::popup-requested`（url）在 README 的信号段和
-`src/chromium-session.h` 里各有一份带形状的说明。`::changed`
+`::page-message`（json）、`::popup-requested`（url）在 `src/chromium-session.h` 里
+各有一份带形状的说明。`::changed`
 现在也会随 `muted` 事件落地。
 
 `::context-menu` 和 `::permission-request` 是这套信号里**唯二有返回值的**：`gboolean`，handler 返回 TRUE 表示"这个问题我接了，答案我来负责"，返回 FALSE 表示"交给会话"（菜单→画 CEF 给的默认菜单，权限→直接 deny）。答案取的是 handler 的返回值
