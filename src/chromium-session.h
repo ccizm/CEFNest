@@ -39,7 +39,18 @@ uint64_t           chromium_session_get_frame_count (ChromiumSession *self);
  * @windowed FALSE puts the browser in the shared tab window, TRUE creates a
  * standalone CefWindow. ::browser-created (id, url, windowed),
  * ::browser-selected (id) and ::browser-closed (id) report the lifecycle; CEF
- * assigns @id, so a host should key its own tab/window map from the signal. */
+ * assigns @id, so a host should key its own tab/window map from the signal.
+ *
+ * @id is also what ::browser-selected names before ::browser-created does: the
+ * helper can report a selection for a browser whose created event is still on
+ * the way, so a host must be able to mark a tab it has not seen yet.
+ *
+ * chromium_session_close_browser () is only effective for a windowed browser
+ * today. For a tab the helper detaches the view and calls CloseBrowser, and
+ * nothing comes back: no OnBeforeClose, so no ::browser-closed either
+ * (code-review-2026-10-22.md M22). An unknown @id answers
+ * status: no-such-browser, which is how a host can tell "already gone" from
+ * "silently refused". */
 void               chromium_session_new_browser   (ChromiumSession *self,
                                                    const char *url,
                                                    gboolean windowed);
@@ -88,6 +99,27 @@ void               chromium_session_run_javascript_expression (ChromiumSession *
  * pushes the selected text here. The session writes it to the view's GTK primary
  * clipboard, which the compositor's own primary bridge offers to clients. An
  * empty @text is the page clearing its selection. */
+
+/* ::page-message (json) — the other direction of the same idea: the renderer
+ * registers cefnestPostMessage(jsonString) in every context and the host gets the
+ * string back whole. The schema inside is the host's; this channel only carries a
+ * string. Going back, there is no dedicated command: the host reaches the page
+ * with chromium_session_run_javascript () and a dispatched MessageEvent
+ * (docs/control-channel.md).
+ *
+ * Unlike the js-result relay, neither side of this path puts a size limit in its
+ * own code, so a big message is a full-length line on the channel and the host's
+ * 4 MiB ceiling applies to it as to any other event — over the line the session
+ * closes instead of truncating (docs/control-channel.md "通道读这一侧"). What a
+ * very large payload does *inside* CEF's process-to-process message has never
+ * been measured here, so treat delivery of an oversized one as unverified. */
+
+/* ::popup-requested (url) — a target=_blank, window.open or middle-click that
+ * asks for a new window. Only the URL is in the signal: the disposition and the
+ * gesture stay on the socket event, so the host cannot tell from here whether the
+ * page wanted a background tab or a foreground window, and the helper has already
+ * acted — foreground requests navigate this view in place, a background tab is
+ * reported and left alone (docs/control-channel.md). */
 
 /* The page's sound leaves the helper through its own audio process and lands on
  * the host's speakers (docs/audio-path.md), so this is the only switch the

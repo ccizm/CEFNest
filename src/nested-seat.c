@@ -44,6 +44,12 @@ struct _SeatClient {
    * going up that ends a grab, not the pointer wandering off the surface it
    * was pressed on, so this stays set across an enter or a leave. */
   uint32_t pointer_grab_serial;
+  /* The axes this client has been sent a wl_pointer.axis on since the last stop
+   * frame. wl_pointer.axis_stop stops a motion that was going on, so it is only
+   * ever owed for an axis that had one: a touchpad lift that names an axis nobody
+   * moved hands the client a scroll sequence it never started, and one that names
+   * none at all swallows the frame a real gesture ends. */
+  uint32_t scroll_axes;
   struct wl_list link;
 };
 
@@ -311,6 +317,7 @@ pointer_send_leave (NestedCompositor *self, struct wl_resource *pointer,
 
   sc->pointer_inside = FALSE;
   sc->pointer_enter_serial = 0;
+  sc->scroll_axes = 0;
 }
 
 static void
@@ -475,6 +482,7 @@ seat_clear_focus (NestedCompositor *self, NestedSurface *surface)
         {
           sc->pointer_inside = FALSE;
           sc->pointer_enter_serial = 0;
+          sc->scroll_axes = 0;
         }
       g_clear_object (&self->pointer_focus);
       cursor_reset (self);
@@ -833,11 +841,17 @@ nested_compositor_notify_pointer_axis (NestedCompositor *self, double dx, double
         wl_pointer_send_axis_source (sc->pointer, source);
 
       if (dy != 0.0)
-        axis_send_one (sc->pointer, version, time, WL_POINTER_AXIS_VERTICAL_SCROLL,
-                       dy, value120_y, framed);
+        {
+          sc->scroll_axes |= 1u << WL_POINTER_AXIS_VERTICAL_SCROLL;
+          axis_send_one (sc->pointer, version, time, WL_POINTER_AXIS_VERTICAL_SCROLL,
+                         dy, value120_y, framed);
+        }
       if (dx != 0.0)
-        axis_send_one (sc->pointer, version, time, WL_POINTER_AXIS_HORIZONTAL_SCROLL,
-                       dx, value120_x, framed);
+        {
+          sc->scroll_axes |= 1u << WL_POINTER_AXIS_HORIZONTAL_SCROLL;
+          axis_send_one (sc->pointer, version, time, WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+                         dx, value120_x, framed);
+        }
 
       if (!framed)
         continue;
@@ -851,15 +865,26 @@ nested_compositor_notify_pointer_axis (NestedCompositor *self, double dx, double
        * delta away — a wheel click sent this way scrolls nothing at all, on any
        * page. GDK hands a stop over as an event carrying no distance, so a
        * caller that passes both gets the step and the end in the two frames a
-       * real device would have used. */
-      if (stop)
+       * real device would have used.
+       *
+       * Only the axes that were moved get one: wayland.xml describes
+       * wl_pointer.axis_stop as stopping the motion of the axis named by the
+       * events before it, so a stop for an axis that never moved is a scroll
+       * sequence the client is told ended that it never saw begin — and a wheel
+       * that only ever turns vertically turns that way on every frame. */
+      if (stop && sc->scroll_axes != 0)
         {
           wl_pointer_send_axis_source (sc->pointer, source);
-          wl_pointer_send_axis_stop (sc->pointer, time,
-                                     WL_POINTER_AXIS_VERTICAL_SCROLL);
-          wl_pointer_send_axis_stop (sc->pointer, time,
-                                     WL_POINTER_AXIS_HORIZONTAL_SCROLL);
+
+          if (sc->scroll_axes & (1u << WL_POINTER_AXIS_VERTICAL_SCROLL))
+            wl_pointer_send_axis_stop (sc->pointer, time,
+                                       WL_POINTER_AXIS_VERTICAL_SCROLL);
+          if (sc->scroll_axes & (1u << WL_POINTER_AXIS_HORIZONTAL_SCROLL))
+            wl_pointer_send_axis_stop (sc->pointer, time,
+                                       WL_POINTER_AXIS_HORIZONTAL_SCROLL);
+
           wl_pointer_send_frame (sc->pointer);
+          sc->scroll_axes = 0;
         }
     }
 

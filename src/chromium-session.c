@@ -20,6 +20,16 @@
 #define HELPER_DEVELOPMENT ""
 #endif
 
+/* The helper numbers its own lines: a control event is one JSON object and a
+ * newline, and a stream that has lost its newline is not a control stream any
+ * more. read_line_async() on GDataInputStream grows its buffer until a newline
+ * arrives, which makes the size of a peer's imagination the size of an allocation
+ * here; framing the same rule over fixed chunks puts a ceiling on it. The ceiling
+ * has to sit above the largest line worth having, and that is a `js` result — as
+ * big as whatever the page's script returned. */
+#define CONTROL_LINE_MAX (4u << 20)
+#define CONTROL_CHUNK 8192u
+
 /* The session is the host half of the control channel. It listens on a private
  * unix socket, hands the path to the helper through the environment, and keeps
  * the page state the helper reports: URL, title, loading, history. The widget
@@ -75,10 +85,15 @@ struct _ChromiumSession {
 
   GSocketListener *listener;
   GSocketConnection *connection;
-  GDataInputStream *input;
+  GInputStream *input;
   GOutputStream *output;
   GCancellable *cancellable;
   GSubprocess *child;
+
+  /* Bytes arrived and not yet carried by a newline, and the accept retry armed
+   * when the listener said no for a reason that saying no again will fix. */
+  GString *line_pending;
+  guint accept_retry_id;
 
   char *uri;
   char *title;
@@ -265,6 +280,33 @@ event_string (JsonObject *object, const char *key)
            json_object_get_string_member (object, key) : "";
 }
 
+/* The three below are the same rule as event_string, for the other field types a
+ * helper of a different version can leave out: json-glib answers a missing member
+ * with a critical and a zero, and a zero is a value — an id of 0, a 0 % progress,
+ * a menu at 0,0 — that goes on to be believed. Measured (test/event-shape-gate.sh,
+ * 2026-10-22): 28 name-only events through the unguarded shape give 18 criticals
+ * and then a SIGSEGV in the host. */
+static int
+event_int (JsonObject *object, const char *key)
+{
+  return json_object_has_member (object, key) ?
+           (int) json_object_get_int_member (object, key) : 0;
+}
+
+static gboolean
+event_flag (JsonObject *object, const char *key)
+{
+  return json_object_has_member (object, key) ?
+           json_object_get_boolean_member (object, key) : FALSE;
+}
+
+static double
+event_number (JsonObject *object, const char *key)
+{
+  return json_object_has_member (object, key) ?
+           json_object_get_double_member (object, key) : 0.0;
+}
+
 static gint64
 event_bytes (JsonObject *object, const char *key)
 {
@@ -310,8 +352,8 @@ handle_event (ChromiumSession *self, const char *line)
   if (!strcmp (event, "ready"))
     {
       g_message ("session: helper ready, pid=%d cef=%s",
-                 (int) json_object_get_int_member (object, "pid"),
-                 json_object_get_string_member (object, "cef"));
+                 (int) event_int (object, "pid"),
+                 event_string (object, "cef"));
 
       /* The first navigation goes through the channel, not the command line:
        * Chromium rewrites its own argv during start-up, so a URL handed over
@@ -332,7 +374,7 @@ handle_event (ChromiumSession *self, const char *line)
       /* Keep whatever the helper last reported as loading state: address and
        * loading arrive independently and either may come first. */
       chromium_session_set_state (self,
-                                  json_object_get_string_member (object, "url"),
+                                  event_string (object, "url"),
                                   NULL, self->loading, self->can_go_back,
                                   self->can_go_forward);
       return;
@@ -341,7 +383,7 @@ handle_event (ChromiumSession *self, const char *line)
   if (!strcmp (event, "title"))
     {
       chromium_session_set_state (self, NULL,
-                                  json_object_get_string_member (object, "title"),
+                                  event_string (object, "title"),
                                   self->loading, self->can_go_back,
                                   self->can_go_forward);
       return;
@@ -349,9 +391,9 @@ handle_event (ChromiumSession *self, const char *line)
 
   if (!strcmp (event, "loading"))
     {
-      gboolean loading = json_object_get_boolean_member (object, "loading");
-      gboolean can_go_back = json_object_get_boolean_member (object, "can_go_back");
-      gboolean can_go_forward = json_object_get_boolean_member (object, "can_go_forward");
+      gboolean loading = event_flag (object, "loading");
+      gboolean can_go_back = event_flag (object, "can_go_back");
+      gboolean can_go_forward = event_flag (object, "can_go_forward");
 
       /* Measured: a menu this side owns is not closed when the page navigates —
        * no context-menu-dismissed arrives, the popover stays up over the new
@@ -370,23 +412,23 @@ handle_event (ChromiumSession *self, const char *line)
 
   if (!strcmp (event, "browser-created"))
     {
-      int id = (int) json_object_get_int_member (object, "browser");
+      int id = (int) event_int (object, "browser");
       g_signal_emit (self, signals[SIG_BROWSER_CREATED], 0, id,
-                     json_object_get_string_member (object, "url"),
-                     json_object_get_boolean_member (object, "windowed"));
+                     event_string (object, "url"),
+                     event_flag (object, "windowed"));
       return;
     }
 
   if (!strcmp (event, "browser-selected"))
     {
-      int id = (int) json_object_get_int_member (object, "browser");
+      int id = (int) event_int (object, "browser");
       g_signal_emit (self, signals[SIG_BROWSER_SELECTED], 0, id);
       return;
     }
 
   if (!strcmp (event, "browser-closed"))
     {
-      int id = (int) json_object_get_int_member (object, "browser");
+      int id = (int) event_int (object, "browser");
       g_signal_emit (self, signals[SIG_BROWSER_CLOSED], 0, id);
       return;
     }
@@ -394,25 +436,25 @@ handle_event (ChromiumSession *self, const char *line)
   if (!strcmp (event, "load-end"))
     {
       g_signal_emit (self, signals[SIG_LOAD_END], 0,
-                     json_object_get_string_member (object, "url"),
-                     (int) json_object_get_int_member (object, "http_code"));
+                     event_string (object, "url"),
+                     (int) event_int (object, "http_code"));
       return;
     }
 
   if (!strcmp (event, "load-error"))
     {
       g_warning ("session: load error %d for %s: %s",
-                 (int) json_object_get_int_member (object, "error_code"),
-                 json_object_get_string_member (object, "url"),
-                 json_object_get_string_member (object, "message"));
+                 (int) event_int (object, "error_code"),
+                 event_string (object, "url"),
+                 event_string (object, "message"));
 
       /* A failed navigation also arrives as ::load-end with HTTP code 0, so a
        * host that only listens there cannot tell "loaded" from "did not": this
        * signal is the only place the reason is. */
       g_signal_emit (self, signals[SIG_LOAD_ERROR], 0,
-                     (int) json_object_get_int_member (object, "error_code"),
-                     json_object_get_string_member (object, "url"),
-                     json_object_get_string_member (object, "message"));
+                     (int) event_int (object, "error_code"),
+                     event_string (object, "url"),
+                     event_string (object, "message"));
       return;
     }
 
@@ -422,9 +464,9 @@ handle_event (ChromiumSession *self, const char *line)
        * every command after it goes unanswered, so a host that does not listen
        * here sees a page that stopped moving rather than a dead process. */
       g_signal_emit (self, signals[SIG_RENDERER_EXITED], 0,
-                     (int) json_object_get_int_member (object, "status"),
-                     (int) json_object_get_int_member (object, "error_code"),
-                     json_object_get_string_member (object, "message"));
+                     (int) event_int (object, "status"),
+                     (int) event_int (object, "error_code"),
+                     event_string (object, "message"));
       return;
     }
 
@@ -435,7 +477,7 @@ handle_event (ChromiumSession *self, const char *line)
        * it. Oversized payloads were already dropped renderer-side (the same
        * 64 KiB cap the js result relay uses). */
       g_signal_emit (self, signals[SIG_PAGE_MESSAGE], 0,
-                     json_object_get_string_member (object, "json"));
+                     event_string (object, "json"));
       return;
     }
 
@@ -445,7 +487,7 @@ handle_event (ChromiumSession *self, const char *line)
        * for a page selection. The injected renderer listener pushes the text,
        * and the host owns the Gtk primary selection instead; the compositor's
        * primary bridge then offers it to other clients. */
-      const char *text = json_object_get_string_member (object, "text");
+      const char *text = event_string (object, "text");
       if (self->view)
         {
           GdkClipboard *primary =
@@ -463,27 +505,27 @@ handle_event (ChromiumSession *self, const char *line)
       /* The helper navigates its single view in place for every foreground
        * request; background tabs are reported and left to the host. */
       g_signal_emit (self, signals[SIG_POPUP_REQUESTED], 0,
-                     json_object_get_string_member (object, "url"));
+                     event_string (object, "url"));
       return;
     }
 
   if (!strcmp (event, "copy-text"))
     {
       g_signal_emit (self, signals[SIG_COPY_TEXT], 0,
-                     json_object_get_string_member (object, "text"));
+                     event_string (object, "text"));
       return;
     }
 
   if (!strcmp (event, "open-url"))
     {
       g_signal_emit (self, signals[SIG_OPEN_URL], 0,
-                     json_object_get_string_member (object, "url"));
+                     event_string (object, "url"));
       return;
     }
 
   if (!strcmp (event, "zoom"))
     {
-      self->zoom_level = json_object_get_double_member (object, "level");
+      self->zoom_level = event_number (object, "level");
       g_signal_emit (self, signals[SIG_ZOOM_CHANGED], 0, self->zoom_level);
       return;
     }
@@ -493,7 +535,7 @@ handle_event (ChromiumSession *self, const char *line)
       /* The helper, not the caller, is the one that read CefBrowserHost back.
        * Nothing about the page changes when this happens, so ::changed is the
        * only place a host can see it land. */
-      gboolean muted = json_object_get_boolean_member (object, "muted");
+      gboolean muted = event_flag (object, "muted");
 
       if (muted != self->muted)
         {
@@ -514,8 +556,8 @@ handle_event (ChromiumSession *self, const char *line)
           value ? json_to_string (value, FALSE) : g_strdup ("null");
 
       g_signal_emit (self, signals[SIG_SCRIPT_RESULT], 0,
-                     (int) json_object_get_int_member (object, "id"),
-                     json_object_get_boolean_member (object, "ok"),
+                     (int) event_int (object, "id"),
+                     event_flag (object, "ok"),
                      json_text,
                      json_object_has_member (object, "message") ?
                        json_object_get_string_member (object, "message") : "");
@@ -528,7 +570,7 @@ handle_event (ChromiumSession *self, const char *line)
        * disk until a host names a path with chromium_session_accept_download(),
        * and a download that is never answered stays parked with no file. */
       g_signal_emit (self, signals[SIG_DOWNLOAD_BEGIN], 0,
-                     (int) json_object_get_int_member (object, "id"),
+                     (int) event_int (object, "id"),
                      event_string (object, "url"),
                      event_string (object, "suggested_name"),
                      event_string (object, "mime_type"),
@@ -542,10 +584,10 @@ handle_event (ChromiumSession *self, const char *line)
        * not a firehose. @percent is -1 while the length is unknown, in which
        * case only the byte counts move. */
       g_signal_emit (self, signals[SIG_DOWNLOAD_PROGRESS], 0,
-                     (int) json_object_get_int_member (object, "id"),
+                     (int) event_int (object, "id"),
                      event_bytes (object, "received_bytes"),
                      event_bytes (object, "total_bytes"),
-                     (int) json_object_get_int_member (object, "percent"),
+                     (int) event_int (object, "percent"),
                      event_bytes (object, "speed"));
       return;
     }
@@ -557,7 +599,7 @@ handle_event (ChromiumSession *self, const char *line)
        * only way a host learns the name got uniquified on the way to disk. A
        * download refused before it started ends here too, with an empty path. */
       g_signal_emit (self, signals[SIG_DOWNLOAD_END], 0,
-                     (int) json_object_get_int_member (object, "id"),
+                     (int) event_int (object, "id"),
                      event_string (object, "state"),
                      event_string (object, "path"),
                      event_bytes (object, "received_bytes"));
@@ -572,10 +614,10 @@ handle_event (ChromiumSession *self, const char *line)
        * separate no-match flag. @identifier is fresh for every request, so it
        * pairs the two updates of one request rather than naming a search. */
       g_signal_emit (self, signals[SIG_FIND_RESULT], 0,
-                     (int) json_object_get_int_member (object, "identifier"),
-                     (int) json_object_get_int_member (object, "count"),
-                     (int) json_object_get_int_member (object, "active_ordinal"),
-                     json_object_get_boolean_member (object, "final"));
+                     (int) event_int (object, "identifier"),
+                     (int) event_int (object, "count"),
+                     (int) event_int (object, "active_ordinal"),
+                     event_flag (object, "final"));
       return;
     }
 
@@ -617,7 +659,7 @@ handle_event (ChromiumSession *self, const char *line)
   if (!strcmp (event, "status"))
     {
       g_message ("session: helper status: %s",
-                 json_object_get_string_member (object, "message"));
+                 event_string (object, "message"));
       return;
     }
 
@@ -633,16 +675,80 @@ handle_event (ChromiumSession *self, const char *line)
   g_warning ("session: unknown event: %s", line);
 }
 
+static void drop_connection (ChromiumSession *self);
+
 static void
-read_line_done (GObject *source, GAsyncResult *result, gpointer data)
+line_arrived (ChromiumSession *self, const char *line, gsize length)
+{
+  /* A NUL in the middle of a line is not a line with a NUL in it: JSON has no
+   * way to carry one, so whatever wrote this is not speaking this protocol.
+   * Handing it to a string-based parser would answer with the bytes before the
+   * NUL and call that an event, which is the one outcome worse than refusing —
+   * it is wrong and it looks right. The boundary is known, so this line goes and
+   * the stream after it stays. */
+  if (length != strlen (line))
+    {
+      g_warning ("session: control line holds a NUL at %zu of %zu, which JSON "
+                 "cannot carry: the line is dropped, not truncated",
+                 (size_t) strnlen (line, length), length);
+      return;
+    }
+
+  handle_event (self, line);
+}
+
+/* Append what just arrived and take every whole line out of it. Returns FALSE
+ * only if the partial line passed the ceiling, which means the far side is not
+ * framing anything and reading more of it is not worth the memory. */
+static gboolean
+feed_control_bytes (ChromiumSession *self, const guint8 *data, gsize length)
+{
+  g_string_append_len (self->line_pending, (const char *) data, length);
+
+  for (;;)
+    {
+      const char *nl = memchr (self->line_pending->str, '\n', self->line_pending->len);
+      g_autofree char *line = NULL;
+      gsize consumed;
+
+      if (!nl)
+        break;
+
+      consumed = (gsize) (nl - self->line_pending->str);
+      line = g_strndup (self->line_pending->str, consumed);
+      g_string_erase (self->line_pending, 0, consumed + 1);
+      line_arrived (self, line, consumed);
+
+      /* handle_event() can close the channel from under this — a "shutdown"
+       * event, or anything it sends that fails — so the buffer it owns cannot be
+       * touched again without asking whether it is still there. */
+      if (!self->line_pending)
+        return TRUE;
+    }
+
+  if (self->line_pending->len > CONTROL_LINE_MAX)
+    {
+      g_warning ("session: %zu bytes with no newline, over the %u byte ceiling: "
+                 "the helper is not framing control events",
+                 self->line_pending->len, CONTROL_LINE_MAX);
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+static void read_chunk (ChromiumSession *self);
+
+static void
+read_chunk_done (GObject *source, GAsyncResult *result, gpointer data)
 {
   ChromiumSession *self = data;
-  g_autofree char *line = NULL;
   gsize length = 0;
   GError *error = NULL;
+  GBytes *bytes;
+  gboolean keep_reading = TRUE;
 
-  line = g_data_input_stream_read_line_finish (G_DATA_INPUT_STREAM (source),
-                                               result, &length, &error);
+  bytes = g_input_stream_read_bytes_finish (G_INPUT_STREAM (source), result, &error);
 
   if (error)
     {
@@ -651,21 +757,43 @@ read_line_done (GObject *source, GAsyncResult *result, gpointer data)
         g_warning ("session: control read failed: %s", error->message);
       g_clear_error (&error);
     }
-  else if (line)
+  else if (bytes)
     {
-      handle_event (self, line);
-      if (self->input)
-        g_data_input_stream_read_line_async (self->input, G_PRIORITY_DEFAULT,
-                                             self->cancellable,
-                                             read_line_done,
-                                             g_object_ref (self));
+      const guint8 *data = g_bytes_get_data (bytes, &length);
+
+      if (length == 0)
+        {
+          mark_closed (self, "control channel closed");
+        }
+      else
+        {
+          keep_reading = feed_control_bytes (self, data, length);
+          if (!keep_reading)
+            {
+              drop_connection (self);
+              mark_closed (self, "control line too long");
+            }
+        }
+
+      g_bytes_unref (bytes);
     }
   else
     {
       mark_closed (self, "control channel closed");
     }
 
+  if (keep_reading && self->input)
+    read_chunk (self);
+
   g_object_unref (self);
+}
+
+static void
+read_chunk (ChromiumSession *self)
+{
+  g_input_stream_read_bytes_async (self->input, CONTROL_CHUNK, G_PRIORITY_DEFAULT,
+                                   self->cancellable, read_chunk_done,
+                                   g_object_ref (self));
 }
 
 static void
@@ -679,6 +807,12 @@ drop_connection (ChromiumSession *self)
     g_object_unref (self->output);
   self->output = NULL;
 
+  /* Anything still unframed belongs to the channel that just went away: a
+   * helper that replaces this one starts its own lines from the beginning. */
+  if (self->line_pending)
+    g_string_free (self->line_pending, TRUE);
+  self->line_pending = NULL;
+
   g_clear_object (&self->connection);
 }
 
@@ -687,18 +821,33 @@ attach_connection (ChromiumSession *self, GSocketConnection *connection)
 {
   self->connection = g_object_ref (connection);
   self->output = g_object_ref (g_io_stream_get_output_stream (G_IO_STREAM (connection)));
-  self->input = g_data_input_stream_new (g_io_stream_get_input_stream (G_IO_STREAM (connection)));
+  self->input = g_object_ref (g_io_stream_get_input_stream (G_IO_STREAM (connection)));
+  self->line_pending = g_string_new (NULL);
 
   /* The helper numbers its permission requests from one again, so an id left over
    * from a previous helper would answer a different request than it belongs to. */
   g_hash_table_remove_all (self->permission_held);
 
-  g_data_input_stream_read_line_async (self->input, G_PRIORITY_DEFAULT,
-                                       self->cancellable, read_line_done,
-                                       g_object_ref (self));
+  read_chunk (self);
 }
 
 static void accept_one (ChromiumSession *self);
+
+/* EMFILE is the failure this is for: the listener is still listening, the socket
+ * is still there, and the next accept will say no again for the same reason until
+ * a descriptor comes free. Armed straight away, that is a loop that never sleeps,
+ * and it is the one main loop everything in this process shares — so the visible
+ * symptom of running out of descriptors is a page that stops drawing. */
+#define ACCEPT_RETRY_DELAY 200u
+
+static void
+accept_retry_fired (gpointer data)
+{
+  ChromiumSession *self = data;
+
+  self->accept_retry_id = 0;
+  accept_one (self);
+}
 
 static void
 accepted (GObject *source, GAsyncResult *result, gpointer data)
@@ -713,7 +862,12 @@ accepted (GObject *source, GAsyncResult *result, gpointer data)
     {
       if (!self->stopping &&
           !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-        g_warning ("session: accept failed: %s", error->message);
+        {
+          g_warning ("session: accept failed: %s", error->message);
+          if (self->accept_retry_id == 0)
+            self->accept_retry_id =
+              g_timeout_add_once (ACCEPT_RETRY_DELAY, accept_retry_fired, self);
+        }
       g_clear_error (&error);
     }
   else if (self->connection)
@@ -723,11 +877,14 @@ accepted (GObject *source, GAsyncResult *result, gpointer data)
       g_warning ("session: ignoring a second control connection");
       g_io_stream_close (G_IO_STREAM (connection), NULL, NULL);
       g_object_unref (connection);
+      accept_one (self);
     }
   else
-    attach_connection (self, connection);
+    {
+      attach_connection (self, connection);
+      accept_one (self);
+    }
 
-  accept_one (self);
   g_object_unref (self);
 }
 
@@ -1371,8 +1528,16 @@ session_menu_show (ChromiumSession *self, int x, int y, GList *items)
 
   if (rows == 0)
     {
-      /* An empty menu is not a menu; dismissing is what frees the request. */
-      gtk_widget_unparent (popover);
+      /* An empty menu is not a menu; dismissing is what frees the request.
+       *
+       * This popover was built with gtk_popover_new() and has no parent — the
+       * set_parent that would sink its floating reference is below, on the path
+       * that has rows to show. Measured on GTK 4.18: gtk_widget_unparent() on a
+       * parentless widget says nothing at all and leaves the reference exactly
+       * where it was, so every empty menu costs a popover, its box and the rows
+       * that were built and then skipped. Sink it and put it down. */
+      g_object_ref_sink (popover);
+      g_object_unref (popover);
       chromium_session_context_menu_dismiss (self);
       menu_release (self);
       return;
@@ -1429,8 +1594,8 @@ handle_context_menu (ChromiumSession *self, JsonObject *object)
       menu_release (self);
     }
 
-  x = (int) json_object_get_int_member (object, "x");
-  y = (int) json_object_get_int_member (object, "y");
+  x = (int) event_int (object, "x");
+  y = (int) event_int (object, "y");
 
   if (json_object_has_member (object, "items") &&
       json_node_get_node_type (json_object_get_member (object, "items")) == JSON_NODE_ARRAY)
@@ -1447,7 +1612,7 @@ handle_context_menu (ChromiumSession *self, JsonObject *object)
             continue;
 
           item = g_new0 (ChromiumMenuItem, 1);
-          item->id = (int) json_object_get_int_member (row, "id");
+          item->id = (int) event_int (row, "id");
           item->label = g_strdup (event_string (row, "label"));
           item->type = g_strdup (event_string (row, "type"));
           item->enabled = json_object_has_member (row, "enabled") ?
@@ -1590,7 +1755,7 @@ handle_permission_request (ChromiumSession *self, JsonObject *object)
   const char *origin;
   gsize i;
 
-  id = (int) json_object_get_int_member (object, "id");
+  id = (int) event_int (object, "id");
   kind = event_string (object, "kind");
   origin = event_string (object, "origin");
   if (json_object_has_member (object, "raw"))
@@ -1629,7 +1794,7 @@ handle_permission_request (ChromiumSession *self, JsonObject *object)
 static void
 handle_permission_dismissed (ChromiumSession *self, JsonObject *object)
 {
-  int id = (int) json_object_get_int_member (object, "id");
+  int id = (int) event_int (object, "id");
   const char *result = event_string (object, "result");
 
   /* An id this side already answered is Chromium closing up shop on the way out,
@@ -1782,6 +1947,13 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
                    "no view set: the helper would have no compositor to draw on");
       return FALSE;
     }
+
+  /* Armed here, not in init: g_dbus_proxy_new_for_bus_sync() blocks this thread
+   * on a round trip to the session bus, and building a session to ask it what its
+   * helper path is — which is what the demo does before deciding whether a
+   * browser is even available — must not pay for that. It is idempotent, so a
+   * stop and a second start keep the one proxy. */
+  chromium_session_watch_a11y (self);
 
   socket_name = chromium_view_get_socket_name (self->view);
   if (!socket_name)
@@ -2423,7 +2595,6 @@ chromium_session_init (ChromiumSession *self)
   /* Nothing has started, so there is nothing to report as closed yet. */
   self->closed_emitted = TRUE;
   self->a11y_forced = g_strcmp0 (g_getenv ("CHROMIUM_A11Y"), "1") == 0;
-  chromium_session_watch_a11y (self);
 }
 
 static void
@@ -2448,6 +2619,11 @@ chromium_session_dispose (GObject *object)
 
   close_listener (self);
   drop_connection (self);
+
+  /* The retry is armed against a descriptor shortage that outlives this object,
+   * and it holds no reference of its own: it goes here rather than firing into a
+   * session that has already been finalized. */
+  g_clear_handle_id (&self->accept_retry_id, g_source_remove);
 
   /* The menu is the view's child, so it goes with the view; asking is already
    * off, and its ::closed must not answer a helper that is going away. */

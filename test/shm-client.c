@@ -359,6 +359,18 @@ static int32_t scroll120_y;
 static int axis_stops;
 /* Which axes sent a wl_pointer.axis in the frame being filled, one bit each. */
 static unsigned int axis_in_frame;
+/* wl_pointer.axis_stop stops a motion, so the frame that ends a gesture has to
+ * name exactly the axes that moved in it: one more is a sequence that never
+ * began, one fewer is a sequence that never ends. These two are the moved set
+ * accumulated since the last stop and the stopped set of the frame in progress,
+ * compared when the stop's own frame closes it. */
+static unsigned int axes_moved;
+static unsigned int axes_stopped;
+/* How many stop frames this run actually judged, and the draw the first delta of
+ * an unstopped scroll came in: a rule that was never given the chance to be
+ * broken is not a pass. */
+static int stop_frames_judged;
+static uint32_t moved_at_frame;
 /* Which wl_pointer.frame we are in. An axis event and the stop that ends its
  * gesture have to land in different ones, and this counter is how the log of a
  * run shows whether they did. */
@@ -1917,6 +1929,9 @@ pointer_axis (void *data, struct wl_pointer *wl_pointer, uint32_t time,
   double v = wl_fixed_to_double (value);
 
   axis_in_frame |= 1u << axis;
+  if (!axes_moved)
+    moved_at_frame = frames;
+  axes_moved |= 1u << axis;
 
   if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
     scroll_y += v;
@@ -1932,6 +1947,32 @@ static void
 pointer_frame (void *data, struct wl_pointer *wl_pointer)
 {
   pointer_frames++;
+
+  /* A frame that carried stops closes a gesture, and this is the only moment its
+   * stopped set is complete. Compared against the axes that moved, never against
+   * a fixed answer: the compositor decides which gestures end, this only says
+   * that an axis nobody moved cannot stop. */
+  if (axes_stopped)
+    {
+      if (axes_stopped != axes_moved)
+        {
+          fprintf (stderr,
+                   "client: %d: axis-stop gate FAILED: the stop frame named axes "
+                   "0x%x but only 0x%x ever sent an axis event, so the compositor "
+                   "ended a scroll sequence that never started\n",
+                   __LINE__, axes_stopped, axes_moved);
+          exit (1);
+        }
+      stop_frames_judged++;
+      /* Said out loud, because the green run has to show which rule it graded: a
+       * comparison that never happened and one that passed look the same from the
+       * exit status alone. */
+      fprintf (stderr, "client: axis-stop gate ok: stop frame #%d named exactly the "
+                       "axes 0x%x that moved\n", stop_frames_judged, axes_stopped);
+      axes_moved = 0;
+    }
+
+  axes_stopped = 0;
   axis_in_frame = 0;
 
   if (mapped)
@@ -1955,6 +1996,7 @@ pointer_axis_stop (void *data, struct wl_pointer *wl_pointer, uint32_t time,
                    uint32_t axis)
 {
   axis_stops++;
+  axes_stopped |= 1u << axis;
 
   /* This one is an assertion, not a note in a log: a stop says the sequence has
    * ended, and Chromium settles the sequence when it reads one, so a delta in
@@ -4655,6 +4697,22 @@ main (int argc, char *argv[])
           drag_in_read_pending = 0;
           do_drag_in_read ("after the pointer let go,");
           do_drag_in_conclude ();
+        }
+
+      /* The stop frame pointer_frame judges has to arrive as well as the wrong
+       * one has to be absent: a scroll that is never stopped leaves every
+       * comparison above unmade, and a green that graded nothing is the worse
+       * answer of the two. Forty draws is comfortably longer than the 60ms the
+       * script leaves between a scroll and the lift that ends it, and the frame
+       * callback draw() re-arms means draws keep coming whether the seat is busy
+       * or not. */
+      if (axes_moved && frames - moved_at_frame > 40)
+        {
+          fprintf (stderr, "client: %d: axis-stop gate FAILED: a scroll arrived and "
+                           "no stop frame has followed it in %u draws, so the rule "
+                           "this client watches was never given anything to judge\n",
+                   __LINE__, frames - moved_at_frame);
+          exit (1);
         }
     }
 

@@ -335,6 +335,15 @@ struct _NestedCompositor {
   double pointer_y;
   unsigned int pointer_wanted : 1;
   unsigned int keyboard_wanted : 1;
+  /* Set before dispose() drops the clients. wl_display_destroy_clients() runs
+   * every wl_resource destroy callback, and those callbacks all report through
+   * the functions that emit ::frame, ::toplevels-changed and
+   * ::text-input-state — so without this the embedding widget is handed a paint
+   * request out of an object that has already lost its frame clock, its GSource
+   * and half of its surface list, and its handler reads the state that is gone.
+   * The state updates still happen; only the calls out to the host stop, because
+   * there is no host left to show a picture to. */
+  unsigned int disposing : 1;
 };
 
 /* ------------------------------------------------------------------ *

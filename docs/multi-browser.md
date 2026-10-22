@@ -10,7 +10,12 @@
   view 可见；`mode: "window"` 创建独立 `CefWindow`；
 - `select-browser` 切换激活 view、`g_browser`/`g_window` 和焦点；
 - `close-browser` 先 `RemoveChildView` 再 `CloseBrowser`，避免 CEF 把整个 tab 窗口一起
-  销毁；关掉最后一个 browser 才结束 helper；
+  销毁；关掉最后一个 browser 才结束 helper。**2026-10-22 实测只对 windowed 成立**：
+  同一个 helper，`close-browser 99` 回 `no-such-browser`（命令确实分发到了），
+  `close-browser 2` 对一个 tab **什么都不会发生**（无 `OnBeforeClose`、无
+  `browser-closed`），`close-browser 3` 对独立窗口则走完 `browser 3 closing` →
+  `browser 3 closed` → `browser 1 selected`。见 `code-review-2026-10-22.md` M22 与
+  `docs/minimal-host.md` §5。
 - demo 有标签条（`+` 新标签、`▣` 新窗口）；标签按钮调用 session API；
 - 所有页面事件带当前激活 browser 的 `browser` id；新增 `browser-created` /
   `browser-selected` / `browser-closed`；

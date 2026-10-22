@@ -22,6 +22,10 @@
 > 右键坏掉，权限不答是页面的 promise 挂住、**而且页面紧接着的下一次问法会凭空消失**（实测两次，
 > `docs/permission-prompt.md` §3）。它还带来一个菜单没有的结构问题：media 和 prompt 是**两条互不相干的
 > 队列、各自一个槽**，所以 session 这边握的是一张表而不是一个布尔。§3、§4、§5、§6 第四次跟着改。
+>
+> 2026-10-22 更新（M10、M14）：**读这一侧也立了规矩**。以前只有写侧有（S4 补的部分写循环）。这条通道
+> 对"对端是另一个版本"的态度一直是"整条打出来看看"——那等于承认了事件的**名字**可以不同，却没有承认
+> **字段可以缺席**。现在缺字段有各自类型的答法，一条没有换行的流有上限。写在"通道读这一侧"那一节。
 
 ## 1. 缺的那一条为什么必须是一条信号
 
@@ -170,7 +174,11 @@ prompt IGNORE，而 IGNORE 传到你手上就是一条永远不 settle 的 promi
 `::download-end`、`::find-result`、`::context-menu`、`::permission-request`、
 `::permission-dismissed`（最后三条新）、`::closed`（带一个原因字符串：`stopped by the
 host` / `helper closed the browser` / `control channel closed` / `process exited`，
-实测与取舍在 `docs/session-lifecycle.md` §5）。`::changed`
+实测与取舍在 `docs/session-lifecycle.md` §5）。多浏览器那三条 `::browser-created`
+（id, url, windowed）、`::browser-selected`（id）、`::browser-closed`（id，tab 上
+永远不来——`close-browser` 的三方实测在 `docs/multi-browser.md` §1）和页面侧两条
+`::page-message`（json）、`::popup-requested`（url）在 README 的信号段和
+`src/chromium-session.h` 里各有一份带形状的说明。`::changed`
 现在也会随 `muted` 事件落地。
 
 `::context-menu` 和 `::permission-request` 是这套信号里**唯二有返回值的**：`gboolean`，handler 返回 TRUE 表示"这个问题我接了，答案我来负责"，返回 FALSE 表示"交给会话"（菜单→画 CEF 给的默认菜单，权限→直接 deny）。答案取的是 handler 的返回值
@@ -182,6 +190,23 @@ host` / `helper closed the browser` / `control channel closed` / `process exited
 `load-error` 和 `renderer-exited` 都是 3 个参数，`renderer-exited` 那两个 int 一个是 CEF 的
 枚举、一个是平台错误码——刻意不合并成一条"出错了"信号：一个是"这一页没来"，另一个是
 "这一页没了"，宿主对两者的处理不一样（前者换个地址，后者重载或者报进程问题）。
+
+### helper 进程拿到的环境
+
+自写 helper 的人在说话之前得先满足这些——宿主在起子进程时替它设好的
+（`src/chromium-session.c:1999-2005`，`GSubprocessLauncher`）：
+
+| 变量 | 值 | 为什么 |
+| --- | --- | --- |
+| `WAYLAND_DISPLAY` | 这个 `ChromiumView` 自己的 compositor socket 名 | helper 的 CEF 直接连到嵌套 compositor，页面才有地方上屏 |
+| `GDK_BACKEND` | `wayland` | 不许 GTK 在 helper 里挑别的后端 |
+| `XDG_SESSION_TYPE` | `wayland` | 同上，Chromium 自己也读这个 |
+| `CHROMIUM_HELPER_SOCKET` | 控制通道 socket 的全路径 | 这条文档说的 NDJSON 就走它 |
+
+同时被**撤掉**的：`DISPLAY`（helper 只许走 Wayland，掉回 X11 是路线 B 明令禁止的）
+和 `WAYLAND_SOCKET`（防止外面的 fd 被当成自己的 compositor）。别的变量是谁起
+helper 谁管：demo 会往里放 `CHROMIUM_URL`、顺手清掉自己那几个脚本/转储变量
+（`src/main.c:525-529`），但那不是这条通道的握手，自写宿主不需要模仿。
 
 ## 4. 决定：剩下的命令先不加
 
@@ -326,6 +351,178 @@ host` / `helper closed the browser` / `control channel closed` / `process exited
   `OnRequestMediaAccessPermission` **不会被调用**，它等于对摄像头和麦克风全部放行。现在 helper 没加它，
   将来谁加开关时应当先看 `real-park` 有没有变红。
 
+## 通道读这一侧：缺字段和没有换行的流
+
+日期：2026-10-22。来源：`code-review-2026-10-22.md` **M14**、**M10**。
+
+### 1. 缺一个字段不是"这条事件坏了"，是"这个字段没有值"
+
+helper 是另一个二进制，而且是**另一个版本**——这在一条 unix socket 上是常态，不是事故。§3 那句
+"unknown event 整条打出来"早就承认了事件的名字可以陌生；可字段一旦被直接
+`json_object_get_*_member` 取，就等于假设了字段一定在。json-glib 对不在的 member 的回答是
+**一条 critical 加一个值**：字符串给 NULL，数字和布尔给 0。NULL 会一路走进宿主自己声明为
+`const char *` 的信号参数；0 更麻烦，因为它是一个**会被下游相信的值**——`id=0` 的下载、0 % 的进度、
+`(0,0)` 的菜单，每一个都有代码在替它做决定。
+
+把 `src/chromium-session.c` 里那五个包装退回直接 getter（就是改造前的形状），一条只说事件名的流
+（28 行）之后宿主是这样的：
+
+```
+FAIL no-fields: the demo died on signal 11 (124 = it had to be killed)
+FAIL no-fields: 18 critical(s) — a missing member was met as if it were present
+             8 json_object_get_string_member: assertion 'node != NULL' failed
+             7 json_object_get_int_member: assertion 'node != NULL' failed
+             2 json_object_get_double_member: assertion 'node != NULL' failed
+             1 json_object_get_boolean_member: assertion 'node != NULL' failed
+FAIL no-fields: a NULL reached a signal the host documents as a string
+      39:demo: download 0 begin name=download mime=(null) bytes=0 url=(null)
+      49:demo: download 0 end state=(null) path=(null) bytes=0
+```
+
+所以这一条不是代码卫生，是**对端少发一个字段就能把宿主打死**：18 条 critical 之后是 SIGSEGV。
+`test/download-gate.sh` 那套断言里 `mime=` 是拿来判断"是不是我们认识的那个类型"的，`(null)` 进去
+它只会当成未知——错的形状不会报错，只会安静地变成另一个结论。
+
+现在的答法是五个包装，缺字段各自折成该类型的空值：`event_string` → `""`、`event_int` → `0`、
+`event_flag` → `FALSE`、`event_number` → `0.0`、`event_bytes` → `-1`。最后那个不是随手选的：
+`-1` 是 CEF 自己"长度从来没人告诉过我"的写法，`docs/download-path.md` 里 `percent=-1` 用的同一个
+约定，宿主已经在处理它了。
+
+判据写在这里，免得下次再争：**缺字段折成空值，不发警告、不拒收**——helper 有权少发一个字段，那是
+它的自由，宿主没有理由为它记一笔；真正算错误的是**整条不像 JSON**，那走 §3 那条 unknown event 的
+日志，形状早就定了。
+
+### 2. 门禁一：`test/event-shape-gate.sh`
+
+它不开浏览器：`CHROMIUM_HELPER` 指着一段现写的 python，连上通道，每条事件只发 `{"event": 名字}`。
+
+* **名单从源码里读**，不是手抄：`grep -oE 'strcmp \(event, "[a-z0-9-]+"\)' src/chromium-session.c`。
+  库里加一条事件，门禁就多发一条；漏发就是这道门失效的方式，所以它反过来也有下限——不足 20 条
+  直接红，并且说清"this gate would be grading nothing"。
+* **它覆盖的是宿主读的那一侧，不是 helper 发的那一侧**，这个差别值得记下来：helper 的
+  `NewEvent` 一共发 24 个**字面量**名字，全部命中；名单里另外 4 个（`copy-text`、`open-url`、
+  `page-message`、`primary-selection`）也是同一个 `NewEvent` 发的，只是名字写在变量或常量里
+  （`helper/src/main.cpp:907`、`1804`、`1813`，常量在 `81`、`86`），所以按字面量 grep 抓不到。
+  也就是说"事件表里加了名字但忘了接线"这种事，这道门会替你发出去。
+* 三条断言：宿主自己回来（不是被 `kill`）、**一条 critical 也不许有**、`(null)` 一个也不许出现。
+  最后一条抓的是 NULL 已经流进信号之后**宿主自己的打印**，所以它不需要宿主改代码就能测到。
+
+跑（它开真窗口，按 `test/framing-gate.sh` 同一个约定算手跑门禁）：
+
+```
+./test/ci-session.sh ./test/event-shape-gate.sh
+  ok   event-shape: 28 event name(s) read out of the dispatch
+== no-fields
+  ok   no-fields: the demo came back with status 1 after being told the browser closed
+  ok   no-fields: no critical from 28 event(s) with no fields
+  ok   no-fields: nothing was (null) on the way to the demo
+0 failure(s), 0 skip(s)
+```
+
+第一条 `ok` 报的是名单里有多少条——它是这道门自己的体检。最后一条是**只有名字**的流走完之后宿主
+还活着；`status 1` 是那条 `closed` 该产生的结果（会话被关掉，脚本还剩一步），不是错。
+
+变异就是 §1 抄的那段转录：18 条 critical、两条 `(null)`、外加 SIGSEGV，三条断言一起红。同一天
+15:21 又复跑了一次（把五个包装的 `json_object_has_member` 判断替换成 `TRUE`），逐字相同：
+`died on signal 11`、`18 critical(s)`、8/7/2/1 的分布。这里要订正门禁注释里先前写下的一句
+"十五事件 22 critical"——那是更早的一次数出来的，现在的 28 条只数到 18 条 critical，但**多了那次
+没有的段错误**；`test/event-shape-gate.sh` 的注释和 `src/chromium-session.c:283-288` 的那句现在都
+按最新一次改过了。
+
+### 3. 一条没有换行的流：读侧的 framing
+
+`g_data_input_stream_read_line_async` 会把 buffer 长到对端给出换行为止。这句话翻译过来是：**对端
+的想象力有多大，这里就分配多大**。S4 那次把写侧的部分写补成了循环，读侧一直还是原样。
+
+现在宿主自己按 8 KiB 一块读（`CONTROL_CHUNK`），自己切行，未凑齐一整行的字节留在
+`self->line_pending` 里，越线就拒收：
+
+* 上限 `CONTROL_LINE_MAX = 4 MiB`（`4u << 20` = 4194304，`src/chromium-session.c:30`）。挑这个数
+  不是为了"给合法行留余量"——helper 那边**有上限的那几条**里最大的是 `js-result`，序列化出来超过
+  65536 字节就整条丢掉（`helper/src/main.cpp:91` 的 `kMaxResultBytes`、`1221-1226`），可 `title`
+  和 `address` 那边一个字节上限都没有（`1979-1994` 直接 `SetString`），页面写多少字节的标题就有
+  多少字节过线。所以这个数的含义是"到这里为止我不再相信这条流"，不是"到这里为止还能忍"。
+* 撞线 = 一条 warning + 拆连接 + `mark_closed ("control line too long")`。比较是**严格大于**
+  （`line_pending->len > CONTROL_LINE_MAX`，`src/chromium-session.c:728`）：恰好 4 194 304 字节还不
+  撞线，多一个字节才撞。为什么不学 helper 那样丢掉
+  buffer 继续服务：宿主这边 `mark_closed` 是公开 API 里**唯一**能表达"通道不可信"的词，而拆掉之后
+  状态机会自己把页面报成没了；留着连接等于让 `ready` 继续立着、后面每一个事件都没人解析。
+* **NUL 单独处理**。`{"event": "status", "message": "before"}\0after\n` 是这条最阴的形状：前半段是
+  一个**完整**的 JSON 对象，任何一个按字符串读的解析器都会把它当成一条事件、把 `after` 扔掉——于是
+  宿主报告了一件 helper 从没发过的事，而且哪里都不报错。所以 `length != strlen (line)` 就把**整行**
+  丢掉（不截断），warning 里点名 NUL 在第几字节（这一条形状下是 `at 40 of 46`：`before` 那个对象
+  40 字节、NUL 在第 41 个字节、`after` 再 5 字节，都不算换行），之后的流照常。
+* `feed_control_bytes()` 每吐出一行都要回头看一眼 `line_pending` 还在不在：`handle_event()` 里面
+  一条 `shutdown`、任何一次发送失败都可能把通道拆掉，而那个 buffer 是被拆掉的那一半 free 的。
+
+**helper 那一侧早就有同一道规矩**（1 MiB 就丢弃 buffer），所以这条通道两端的上限并不对称——1 MiB
+配丢弃、4 MiB 配拆连接，两边各自说得通，但只有宿主这一半有门禁，helper 那一半没有。列在 §5。
+
+### 4. 门禁二：`test/framing-gate.sh` 的 `flood` 段
+
+一次运行同时量三件事：一条**合法的大行必须整条读到**、一条带 NUL 的行必须**丢掉而不是半信**、
+一条没有换行的流必须**撞上限**。第一条是这个改动最大的风险所在——真把那条一百万字的合法行
+（整个 1 000 034 字节，`test/framing-gate.sh:207`）误杀，比放过一个洪水攻击严重得多，所以它和
+另外两条一样是一条断言，不是一句承诺。
+
+绿（`./test/ci-session.sh ./test/framing-gate.sh`）：
+
+```
+  ok   flood: the demo came back on its own (status 1)
+  ok   flood: /over the [0-9]+ byte ceiling/
+  ok   flood: /helper stopped \(control line too long\)/
+  ok   flood: the 1000000-byte legal line was read whole
+  ok   flood: /control line holds a NUL at [0-9]+ of [0-9]+/
+  ok   flood: nothing was handled out of the NUL line
+```
+
+**变异 B**（删掉 `line_arrived()` 里那句 NUL 判断，回到"按字符串读"的形状）→ rc=1，两条红：
+
+```
+  FAIL flood: wanted /control line holds a NUL at [0-9]+ of [0-9]+/
+  FAIL flood: the bytes before a NUL were read as an event
+         9:** Message: 10:54:39.134: session: helper status: before
+```
+
+`helper status: before` 就是那个"看起来完全合理、helper 却从没发过"的事件：warning 没了，宿主照样
+把它当成一条 `status` 报了。NUL 之后的 `after` 则并进后面那段洪水里，一起被上限拦掉。
+
+**变异 A**（删掉 `feed_control_bytes()` 里的上限判断，就是 `read_line_async` 的原样）→ rc=1，那两条
+关于上限的断言红：
+
+```
+  ok   flood: the demo came back on its own (status 0)
+  FAIL flood: wanted /over the [0-9]+ byte ceiling/
+  FAIL flood: wanted /helper stopped \(control line too long\)/
+  ok   flood: the 1000000-byte legal line was read whole
+  ok   flood: /control line holds a NUL at [0-9]+ of [0-9]+/
+  ok   flood: nothing was handled out of the NUL line
+```
+
+红的方式很安静，而这正是这条要抓的：5 242 880 个没有换行的字节照单收下，宿主一声不响，`status` 从 1 变回
+0——会话不是被上限关掉的，是脚本自己跑到 `close` 关掉的。**这段运行里宿主唯一的"症状"是它把那 5 MiB
+全存进了 `line_pending`——这一步是代码形状给的，RSS 没有量过；有没有真的多占几兆、占多少，没人测**。
+同一份运行里合法大行、NUL 两条仍然是绿的，所以这两条断言不是顺带过的，它们各自只对应一个能删掉的东西。
+
+### 5. 各拦什么，以及还没做的
+
+| | `event-shape` | `flood` |
+| --- | --- | --- |
+| 缺字段 → critical / NULL / 0 | **红**（18 条 critical + 段错误） | 不管这个方向 |
+| 无换行的流 → 内存无界 | 看不见（每条都短） | **红**（变异 A：宿主不响，`status` 变回 0） |
+| 行内 NUL → 半条被当成一条 | 看不见（不发 NUL） | **红**（`helper status: before`） |
+| 合法大行被误杀 | 不管 | 那条断言就是反过来用的：变异里它**必须**保持绿 |
+
+* **helper 那一半的 1 MiB 上限没有门禁**。它连丢弃之后是否还能接住下一条完整命令都没人验过。两端
+  不对称本身是决定，不是 bug，但"只有半边有门"这件事得记着。
+* **上限之后没有"重新同步"**。撞线就拆连接，是干脆的；但 helper 那边丢弃 buffer 之后继续收，如果它
+  丢的正好是半条命令，剩下那半会被当成新命令的开头。真实形状是没测过的。
+* **`js` 结果那 64 KiB 是**丢掉整条 value**，不是截断**（`truncated=true` + `value=null`）。
+  宿主现在不会收到半条结果，但也不会知道少了什么——`message` 里那句"result exceeded 64 KiB and was
+  dropped"是唯一线索。
+* **缺字段一律折成空值之后，宿主没法区分"页面标题真的是空"和"helper 没发 title"**。这是这条判据
+  的价格，现在没人抱怨；真要区分得给通道加"字段在不在"的表达，那是协议改动，不是这条的门禁能定的。
+
 ## 页面 ↔ 宿主消息通道
 
 控制通道原本只有"宿主 ↔ helper"两条腿；页面要和宿主说话得穿过两层。现在
@@ -334,8 +531,14 @@ host` / `helper closed the browser` / `control channel closed` / `process exited
 **页面 → 宿主（推送）**：renderer 在每个 context 注册
 `cefnestPostMessage(jsonString)`（READONLY|DONTENUM|DONTDELETE，页面遍历
 自己的 globals 不会踩到）。参数是**一个 JSON 字符串**——payload 内的 schema
-由宿主自定，通道只保证字符串完整送达。超过 64 KiB 的调用会在 renderer 侧
-丢弃（与 js 结果回传同一上限），宿主收到的是 `status: page-message-dropped`。
+由宿主自定，通道只保证字符串完整送达。**这条路两端都没有大小上限**：js 结果
+回传的 64 KiB 上限（`kMaxResultBytes`，`helper/src/main.cpp:91`）只用在
+`EmitJsResult`（`:1222`）那一条路上，`PostMessageHandler`（`:1642`）→
+browser 进程转发（`:1802-1808`）→ `page-message` 事件原样透传，没有 cap、
+没有 `page-message-dropped` 事件（早先的文档写过这个事件，代码里从未实现，
+2026-10-22 全源码检索确认）。后果是一条超长的页面消息就是一条超长的通道事件，
+归宿主侧 4 MiB 行上限管——越线是整条会话拆掉，不是消息截断。一个很大
+payload 在 CEF 进程间消息内部的形状没测过，照原样送达属于未验证。
 
 **宿主 → 页面**：用现成的 `run_js`——约定俗成的接收方式是页面自己挂
 `window.addEventListener('cefnest-message', e => …)`，宿主侧

@@ -171,14 +171,52 @@ CEFNEST_URL=https://example.com ./builddir/examples/cefnest-minimal
 The required order, the lifecycle, and the API map for navigation/JS/downloads/
 menus/primary/a11y are in `docs/minimal-host.md`.
 
+`examples/host.c` is the next step up on the same three objects: the four signals
+a page stands on an answer for. It names the path for `::download-begin` (and so
+owns the whole of where a page's file lands), answers `::permission-request` with
+an allow/deny row, reads `::script-result` back into a log pane, and keys a tab
+row off `::browser-created`. `::context-menu` is deliberately *not* connected
+there, so the menu that works for free is visible next to the ones a host owns.
+It takes a script file so it can be tested with no keyboard:
+
+```bash
+printf 'load http://gate.test/download?name=report.pdf&bytes=4096\nwait 800\nsave /tmp/dl\nwait 1600\nquit\n' > /tmp/steps
+CEFNEST_HOST_SCRIPT=/tmp/steps CEFNEST_HELPER=$PWD/test/fake-helper.py \
+  ./test/ci-session.sh ./builddir/examples/cefnest-host http://gate.test/start
+```
+
+Verbs: `load tab select close js save drop allow deny wait quit`. What those runs
+measured — including a tab that cannot be closed at all — is written down in
+`docs/minimal-host.md` §5.
+
+Both examples read their own two environment variables (the demo's table above
+does not cover them — they belong to the examples, not to the demo):
+
+| Variable | What it does |
+| --- | --- |
+| `CEFNEST_URL` | the page `chromium_session_start()` opens; unset or empty, both examples fall back to `https://example.com` (`examples/minimal.c:34`, `examples/host.c:1039`) |
+| `CEFNEST_HOST_SCRIPT` | (`examples/host.c` only) a file of one verb per line, driven from `::ready`, so the example can be tested with no keyboard |
+
 ## Test
 
 ```bash
-meson test -C builddir                       # 23 tests
-meson test -C builddir --suite selftest      # the twenty seat selftests
-meson test -C builddir --suite protocol      # the implementation-slot audit
+meson test -C builddir                       # 25 tests
+meson test -C builddir --suite selftest      # the twenty seat selftests + map-cycle
+meson test -C builddir --suite protocol      # the three source audits
 meson test -C builddir --suite unit          # the helper-path resolution rule
 ```
+
+`test/ci-all.sh` is the unattended battery: every gate below that a nested
+session can host, one nested compositor per gate, verdict table at the end —
+`event-shape-gate.sh` is the one control-channel gate it does not host. The
+remaining scripts in `test/` are documented manual gates, which is why none of
+them is a `meson test`: they open real windows on whoever's desktop is in front
+of them — `download-gate.sh`, `find-gate.sh`, `dnd-gate.sh`, `menu-gate.sh`,
+`permission-gate.sh`, `primary-gate.sh`, `pixel-gate.sh`,
+`multi-browser-gate.sh`, `sandbox-soak.sh`, `event-shape-gate.sh`,
+`framing-gate.sh`, the opt-in real-page batch `real-sites.sh`, and
+`real-site-run.sh`, the one-site runner that batch calls per site.
+`test/ci-session.sh` is how any of them runs with nobody's desktop touched.
 
 `seat-selftest` starts the nested compositor, launches `shm-client` against it,
 runs the scripted pointer/keyboard/text-input sequence and prints what the
@@ -192,8 +230,16 @@ with `--dmabuf`, `--text-input`, `--cursor-shape`, `--popup`, `--refused`,
 `--pool-budget`, `--wrong-object`, `--pool-shrink`, `--empty-copy`,
 `--popup-depth`, `--damage-scale`, `--drag-fake-serial`, `--drag-no-source`,
 `--dnd-requests`, `--drag-out`, `--drag-in`, `--fullscreen`,
-`--second-window`, `--gtk-client`. On a machine with no display they report
-`skipping` and exit 0.
+`--second-window`, `--gtk-client`. On a machine with no display each one exits 77,
+which is what meson reads as SKIPPED — a skip on the same page as a pass is how a
+display-dependent run hides an untested rule.
+
+`map-cycle` is the other display-dependent run: it hides and shows the widget and
+counts the signal slots GLib is left holding, so a handler armed on every `map`
+without a take-down cannot pass it. The static half of the same rule,
+`map-arms-audit`, reads the sources and catches what a program cannot count —
+a `GtkEventController` has no public list. `docs/map-cycle.md` is the write-up of
+both, with the mutation each one is proven against.
 
 `--pool-budget` is the one where the client is the attacker: it hands over sixteen
 100 MB pools — each of them legal on its own — and keeps them all alive, and the
@@ -387,6 +433,21 @@ seconds to report `ready` on a profile nobody has used before, and a session
 script that starts on a fixed timer loses its first `load` on the floor. Session
 mode now starts the script from `::ready`.
 
+Two gates watch the control channel from the peer's side. `test/event-shape-gate.sh`
+sends every event name the dispatch compares against — read out of
+`src/chromium-session.c`, not copied into the script, and a run that finds fewer than
+20 names fails rather than grades nothing — with every field absent, which is the
+shape of a helper from another version. It asserts no critical is printed and nothing
+reaches the demo as `(null)`: with the field guards taken back out, the same stream
+costs the host 18 criticals and then a SIGSEGV. `test/framing-gate.sh` gained a
+`flood` half for the other rule — a line has to end. One run grades three things: a
+legal 1 MB event must be read whole, a line holding a NUL must be dropped rather than
+half-believed, and bytes with no newline must hit the 4 MiB ceiling and stop the
+channel. Both open a real window, so both are documented manual gates on the same
+convention as `menu-gate.sh`; `./test/ci-session.sh ./test/event-shape-gate.sh` runs
+either one with nobody's desktop touched. `docs/control-channel.md` "通道读这一侧" is
+the write-up, with the mutation each assertion is proven against.
+
 `test/sandbox-soak.sh` is the sandbox half, and it asserts on the process tree
 rather than on pixels: one session, 20 navigations over four local pages with a
 hard reload every seventh, and a deliberate `kill -9` of every renderer at two
@@ -518,7 +579,20 @@ step), `::primary-selection` (the selected page text pushed to the host, which
 writes it to Gtk's primary clipboard), `::copy-text` (a URL chosen from a link/image/media menu row — the host
 owns the clipboard), `::open-url` (a URL chosen from a new-window menu row — the
 demo asks the shared helper for a standalone browser, which gets its own GTK
-window; a library host can route it however it likes), `::closed`
+window; a library host can route it however it likes), `::page-message`
+(the page's `cefnestPostMessage()` payload as one opaque JSON string — the host
+owns whatever schema is inside it; neither side of this relay caps the size, so a
+very large payload is an ordinary event line under the host's 4 MiB ceiling —
+docs/control-channel.md), `::popup-requested`
+(the target URL of a `target=_blank`, `window.open` or middle-click — **the URL
+is all the signal carries**: the disposition and the gesture stay on the socket
+event, so a host cannot tell a background tab from a foreground one from the
+callback, and the helper has already decided what to do with it),
+`::browser-created` (id, url, and `windowed`: TRUE means this browser got its own
+host window instead of another tab in the shared view), `::browser-selected`
+(the id that now owns the shared view), `::browser-closed` (the id that is gone —
+it arrives for a windowed browser and **never for a tab**, because the helper's
+close is a silent no-op there, see Known limitations), `::closed`
 (the helper is gone and will not come back, with which of the four reasons: the
 host stopped it, the helper closed the browser, its channel hung up, or the
 process was reaped — a death reports either of the last two, which is why an
@@ -590,7 +664,7 @@ They are the record of *why* the code is shaped like this:
 | `cnb-ci.md` | the cnb.cool entry point, the self-hosted runner it expects, and the one-time native/CEF prerequisites |
 | `structural-decisions.md` | the two items intentionally left for a product decision: browser routing for tabs/windows, and arm64/loong64 CEF supply |
 | `frame-metrics.md` | the compositor frame counter / script/env export and the software-path pool mmap + damage shadow copy |
-| `minimal-host.md` | the three-object host, the required order, and a map of which API/signal to add for navigation, JS, downloads, menus, primary selection and a11y |
+| `minimal-host.md` | the three-object host, the required order, a map of which API/signal to add for navigation, JS, downloads, menus, primary selection and a11y, and §5: the medium host example, what its scripted runs measured, and the tab that cannot be closed |
 | `audio-path.md` | where the page's sound actually goes: an unsandboxed audio service, straight to the host's speakers, and what muting it measures |
 | `protocol-ceilings.md` | what real clients bind against the nested compositor, and the measured verdict on every protocol and version ceiling left un-advertised |
 | `download-path.md` | the parked `OnBeforeDownload` gate, who decides the path, and the four CEF download behaviours only a measurement can tell you |
@@ -600,6 +674,10 @@ They are the record of *why* the code is shaped like this:
 | `permission-prompt.md` | which asks never reach the host at all, the two queues that make an unanswered request cost the page its next question too, and why `accept` can only ever mean "the whole mask" |
 | `packaging.md` | what installs where, the five-step rule by which a session finds its helper, why `get_option('libexecdir')` must be joined to the prefix before it is compiled in, and the two fallbacks that deliberately run in opposite directions |
 | `headless-ci.md` | running the gates against a nested mutter nobody can see: why the session needs its own HOME and bus, how one signal reaps the whole tree, and what a display with no output device can and cannot prove |
+| `a11y.md` | whether a screen reader can reach the page inside the nested architecture: it can, because Alloy's windowed browser in `STATE_ENABLED` is Chromium's own Complete AT-SPI mode; the session-bus watcher that switches it, and what ORCA saw |
+| `dmabuf-formats.md` | the feedback format table decided by what this process can import — GDK's advertised set — instead of the static four-format advertisement, with the measured consequence for CEF's all-linear buffers |
+| `fullscreen.md` | Alloy only *notifies* on `requestFullscreen()` — the client must trigger the transition; the wiring from `OnFullscreenModeChange` down to `xdg_toplevel.set_fullscreen`, and the measured before |
+| `map-cycle.md` | everything armed on every `map` needs a take-down path (the M11 finding: N map cycles, N copies of a handler); the two gates that hold the rule and the mutation each is proven against |
 
 ## Known limitations
 
@@ -633,6 +711,19 @@ They are the record of *why* the code is shaped like this:
   outside that guarantee: a drag **started** in an independent window. The
   out-of-bounds handover creates its `GdkDrag` on the demo's main toplevel
   (`docs/drag-loop.md` §6), so such a drag leaves from the wrong surface.
+- **A tab-mode browser cannot be closed, and the request is dropped in
+  silence.** `chromium_session_close_browser()` on a windowed browser runs the
+  whole measured sequence (`browser N closing` → `browser N closed` →
+  `browser 1 selected`); on a tab the helper detaches the view and calls
+  `CloseBrowser`, and nothing comes back — no `OnBeforeClose`, so no
+  `::browser-closed` either. An id that does not exist answers
+  `status: no-such-browser`, which is how a host tells "already gone" from
+  "silently refused" (code-review-2026-10-22.md M22; the three-way probe is in
+  `docs/multi-browser.md` §1 and `docs/minimal-host.md` §5). The same asymmetry
+  shows up one signal earlier: `::popup-requested` carries only the URL, so a
+  host cannot see whether the page asked for a background tab or a foreground
+  window — that lives on the socket event's `disposition`, which the signal
+  does not forward.
 - **H.264/MP4 is absent from this CEF distribution.** Real YouTube reports
   `videoReady=4` but `canPlayType('video/mp4; codecs="avc1.42E01E"')` is empty;
   VP9 WebM answers `probably`, and YouTube still plays through VP9. MP4/H.264-only

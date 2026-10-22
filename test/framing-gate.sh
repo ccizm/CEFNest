@@ -68,6 +68,16 @@ expect_count() { # expect_count <pattern> <logfile> <count> <tag>
   else bad "$4: $n line(s) match /$1/, wanted $3"; fi
 }
 
+# The flood log carries a legal line of a megabyte of 'm' on one line, which is
+# not something to paste into a terminal or into a report: the diagnosis is the
+# pattern, and the payload can stay in the file.
+expect_q() { # expect_q <pattern> <logfile> <tag>
+  if grep -qE "$1" "$2"; then ok "$3: /$1/"; else
+    bad "$3: wanted /$1/ — see $2"
+    grep -aE 'session:|demo:|nested' "$2" | cut -c1-120 | tail -4 | sed 's/^/         /'
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # 1. The fake is watching.
 # ---------------------------------------------------------------------------
@@ -124,6 +134,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] || [ ! -x "$DEMO" ]; then
   # The `  skip ` prefix is what ci-all.sh counts, so a burst this machine cannot
   # open shows up in its table instead of vanishing from a passing line.
   printf '  skip burst: needs a wayland session and a built demo\n'
+  printf '  skip flood: needs a wayland session and a built demo\n'
   printf '%d failure(s)\n' "$fails"
   exit $(((fails > 0)))
 fi
@@ -132,12 +143,18 @@ fi
 # to be carried by more than one transfer and drained as the reader takes it.
 BURST=300000
 
+# 1.5 s rather than the 250 ms this started with. The two reds at 250 ms were first
+# blamed on a slow machine and that was the wrong answer: the fake was stranding the
+# command *behind* the burst in Python's own read buffer while select() watched the
+# kernel's (fixed in test/fake-helper.py, which now drains one buffer by hand). The
+# width stays because this half asserts that the far side answers, and an answer
+# that arrives in one dispatch is still an answer that has to be waited for.
 cat > "$WORK/burst.session" <<EOF
 load http://gate.test/page
 wait 700
 js $(head -c $BURST /dev/zero | tr '\0' 'a')
 find e
-wait 250
+wait 1500
 close
 EOF
 
@@ -159,6 +176,87 @@ expect_count "framing cmd=js line=[0-9]+ code=$BURST" "$WORK/burst.log" 1 burst
 # find result only appears if the fake parsed the line the host wrote.
 expect 'find result id=[0-9]+ count=6 ordinal=[0-9]+ final=1' "$WORK/burst.log" burst
 expect_no 'unparsable' "$WORK/burst.log" burst
+
+# ---------------------------------------------------------------------------
+# 3. The host's half of the same rule: a line has to end.
+# ---------------------------------------------------------------------------
+
+# src/chromium-session.c frames what it *reads* the same way it frames what it
+# writes, and a peer that stops sending newlines is asking for an allocation the
+# size of its own imagination unless the host says stop. One run grades both
+# directions of the ceiling: a legal big line that has to survive, and a line with
+# no end that must not be allowed to grow.
+cat > "$WORK/flood-helper.py" <<'EOF'
+#!/usr/bin/env python3
+import json
+import os
+import socket
+import time
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ['CHROMIUM_HELPER_SOCKET'])
+
+
+def send(obj):
+    sock.sendall((json.dumps(obj) + '\n').encode())
+
+
+send({'event': 'ready', 'pid': os.getpid(), 'cef': 'flood'})
+# A js result is as big as whatever the page returned, so a line this size is
+# ordinary traffic and has to be taken whole.
+send({'event': 'status', 'message': 'm' * 1000000})
+# A NUL is not a character in this protocol: JSON has no way to carry one, so a
+# line holding it is not an event with something odd in it. The shape that hurts is
+# a *complete* object in front of the NUL — every string-based reader then answers
+# with that object and throws away everything after it, which is a plausible event
+# the helper never sent and no complaint anywhere.
+sock.sendall(b'{"event": "status", "message": "before"}\x00after\n')
+# And this one never ends.
+sock.sendall(b'x' * (5 * 1024 * 1024))
+time.sleep (3)
+EOF
+chmod +x "$WORK/flood-helper.py"
+
+cat > "$WORK/flood.session" <<EOF
+load http://gate.test/page
+wait 1500
+close
+EOF
+
+printf '== flood\n'
+timeout 90 env GDK_BACKEND=wayland CHROMIUM_HELPER="$WORK/flood-helper.py" \
+  CHROMIUM_SESSION_SCRIPT="$WORK/flood.session" \
+  "$DEMO" >"$WORK/flood.out" 2>"$WORK/flood.log"
+status=$?
+# The exit status is not the assertion — which of the two ways this run can end is
+# told by what is in the log — but a demo that had to be killed is worth seeing.
+if [ "$status" = 0 ] || [ "$status" = 1 ]; then
+  ok "flood: the demo came back on its own (status $status)"
+else
+  bad "flood: the demo exited with $status (124 = it had to be killed) — see $WORK/flood.log"
+  grep -acE '.' "$WORK/flood.log" | sed 's/^/         lines in the log: /'
+fi
+
+expect_q 'over the [0-9]+ byte ceiling' "$WORK/flood.log" flood
+expect_q 'helper stopped \(control line too long\)' "$WORK/flood.log" flood
+
+# The big legal line has to arrive whole: 1 000 000 characters after "helper
+# status: ", not a truncation of it and not a ceiling complaint about it.
+big=$(grep -o 'helper status: m*' "$WORK/flood.log" | awk '{ print length($0) - 15 }' | head -1)
+if [ "${big:-0}" = "1000000" ]; then
+  ok "flood: the 1000000-byte legal line was read whole"
+else
+  bad "flood: the legal line came back ${big:-nothing}, wanted 1000000 characters"
+fi
+
+# The NUL line has to be refused *and* not half-believed: "before" is a complete
+# JSON object on its own, so a host that truncates at the NUL reports an event the
+# helper never sent.
+expect_q 'control line holds a NUL at [0-9]+ of [0-9]+' "$WORK/flood.log" flood
+if grep -qaE 'helper status: before' "$WORK/flood.log"; then
+  bad "flood: the bytes before a NUL were read as an event"
+  grep -anE 'helper status: before' "$WORK/flood.log" | cut -c1-120 | sed 's/^/         /'
+else ok "flood: nothing was handled out of the NUL line"; fi
 
 printf '%d failure(s)\n' "$fails"
 exit $(((fails > 0)))

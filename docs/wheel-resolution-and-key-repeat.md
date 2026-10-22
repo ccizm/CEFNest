@@ -177,12 +177,61 @@ widget 里同一套算术。
 
 这两块合起来说明了关键点：单帧的修复跟版本无关（5 也修好了），分辨率的修复必须抬 seat。
 
-## 6. 一个刻意的取舍：stop 时两个轴都发
+## 6. stop 现在只发给动过的那根轴（2026-10-22 改，先前这里是「两个都发」）
 
-GDK 的手势结束事件**本身不带距离**（`dx = dy = 0`，只有 `is_stop` 为真），从这一个事件里看不出刚
-才滚的是哪个轴。所以现在 `stop` 为真就给两个轴各发一条 `axis_stop`。协议没禁止给没动过的轴发
-stop，客户端收到的是"这个方向现在不在滚"这个陈述，不会多出位移。要更讲究就得在 `SeatClient` 里
-记住本次手势动过哪些轴再挑着发——留作可选。
+**改前的取舍**：GDK 的手势结束事件本身不带距离（`dx = dy = 0`，只有 `is_stop` 为真），从这一个
+事件里看不出刚才滚的是哪个轴，所以 `stop` 为真就给两个轴各发一条 `axis_stop`，并把"记住本次手势
+动过哪些轴再挑着发"记成了可选优化。
+
+**这条取舍是错的**（`code-review-2026-10-22.md` **L9**）。wayland.xml 对 `axis_stop` 的说法是
+"stop motion on the given axis"，它结束的是**这根轴上正在进行的那次滚动**；而滚轮只有一个方向，
+于是每一格滚轮都附带一条"水平方向现在不在滚"——一条从没开始过的序列被告知结束了。Chromium
+把手势序列记在 `ScrollController` 上，多余的 stop 会把刚建起来的序列提前结掉。
+
+**改法**（`src/nested-seat.c`）：`SeatClient` 里加 `uint32_t scroll_axes` 位图，`axis` 发哪根就置
+哪根；`stop` 帧只对置了的轴发 `axis_stop`，发完清零。指针离开 surface（`pointer_send_leave`）和
+焦点清除（`seat_clear_focus`）时一并清零——不然下一根手指进来会带着上一根没滚完的账。
+
+**线级形状（`seat-selftest` 默认脚本，现在跑三种手势）**：
+
+```
+client: axis 0 +100.00 (total +100.0) in frame #4          ← 只有竖直动
+client: axis 0 stop (#1) in frame #5
+client: axis-stop gate ok: stop frame #1 named exactly the axes 0x1 that moved
+client: axis 1 +40.00 (total +40.0) in frame #6            ← 只有水平动
+client: axis 1 stop (#2) in frame #7
+client: axis-stop gate ok: stop frame #2 named exactly the axes 0x2 that moved
+client: axis 0 +100.00 (total +200.0) in frame #8          ← 斜着滚：同一对帧里两根都动
+client: axis 1 +40.00 (total +80.0) in frame #9
+client: axis 0 stop (#3) in frame #10
+client: axis 1 stop (#4) in frame #10
+client: axis-stop gate ok: stop frame #3 named exactly the axes 0x3 that moved
+```
+
+判据在客户端（`test/shm-client.c` 的 `pointer_frame`）：把"stop 帧点名的轴集合"和"自上次 stop
+以来真正动过的轴集合"比较，**不相等就 `exit (1)`**——比的是集合而不是固定答案，所以合成器想结束
+哪种手势都由它决定，客户端只说"没人动过的轴不能被结束"、"动过的轴不能被漏掉"。
+`client_exited()` 把它变成 `meson test` 的红。
+
+反空跑也有一条：动了轴却 40 帧等不到 stop 帧，客户端同样 `exit (1)`，免得一次"没人被判定"的绿被
+当成通过。每条判定还在成功时也打一行 `axis-stop gate ok:`，绿跑自己带着"判了几次"。
+
+**变异（把两条 stop 改回无条件各发一条）**：
+
+```
+client: 1963: axis-stop gate FAILED: the stop frame named axes 0x3 but only 0x1 ever sent an axis event, so the compositor ended a scroll sequence that never started
+selftest: the client exited with status 1
+```
+
+`meson test --suite selftest`（当时 21 条：20 个 seat 模式 + `map-cycle`）里 **16 条红**，改回来
+21/21 绿。剩下 5 条报不出来，原因值得记：`map-cycle` 不碰 seat；`--refused`、`--pool-budget`、
+`--pool-shrink`、`--second-window` 这四条**本来就指望客户端自己提前挂断**，客户端的退出码在那几条
+里不是判据（`client_exited()` 先看 `run_finished`），所以这条断言在它们身上是盲区——它们的绿不能
+当成"stop 形状对"的证据，16 条才是覆盖面。
+
+> 第 7.5 节贴的那段日志写于本节改前，里面的 `axis 0 stop (#1)` + `axis 1 stop (#2)` 是"两轴无条件
+> 各一条"的形状；现在同一格竖直滚轮只发 `axis 0 stop`，两轴的那一行出现在斜向手势里。7.5 的不变式
+> （stop 不能挤在位移那一帧）本身没变，判据也没变。
 
 ## 7. #31：stop 挤在位移那一帧里，Chromium 把这一步整个丢掉
 

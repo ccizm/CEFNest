@@ -122,6 +122,7 @@ helper 侧对称缺陷：`helper/src/main.cpp:279-291` 的 `Send()` 靠 SO_SNDTI
 - **M19** `test/pixel-gate.sh:89-93` — 缺 ImageMagick 时整门 `exit 0` 放行，`ci-all.sh:95-97` 按 rc 判 PASS → 像素校验完全未执行仍绿，违背 ci-all.sh:22-23"绿行不得隐藏 skip"的自述。
 - **M20** `test/shm-client.c:3371-3397` — 合成器发协议错误时客户端打印后 `return 0`，plain 模式无帧导入/存活断言 → `meson test` 假绿。
 - **M21** `scripts/fetch-cef.sh:37` — 百 MB CEF 发行包无 sha256 校验，与"pinned"承诺不匹配。
+- **M22** `helper/src/main.cpp:1272-1287` — `close-browser` 对**标签模式**的 browser 是静默空操作：命令分发到了（同一个 id 换成不存在的 99 会回 `no-such-browser`），但 `CloseBrowser(true)` 之后没有 `OnBeforeClose`，既没有 `browser-closed` 事件，标签也留在宿主上。windowed 那条路正常。见「仍在处理」的实测记录。
 
 ## 轻微问题
 
@@ -190,6 +191,10 @@ helper 侧对称缺陷：`helper/src/main.cpp:279-291` 的 `Send()` 靠 SO_SNDTI
 | M8 | `start_drag` 必须引一次还按着的按下 | `--drag-fake-serial`（`docs/drag-loop.md` §6.7 附两次变异） |
 | M3 / L1 | scale 与 damage 都改 commit 时生效，换算走 gint64 并 CLAMP | `--damage-scale`（三个采样点，`docs/frame-metrics.md` §2.1-2.2 附两次变异） |
 | M7 | `drag_drop` 里给「永远等不到 finish 的那条 drag」就地退休 | `--drag-no-source`（`docs/drag-loop.md` §6.8 附变异） |
+| M10 | 读侧自己切行 + 8 KiB chunk + 4 MiB 上限；行内 NUL 丢整行不截断 | `test/framing-gate.sh` 的 `flood` 段（一次跑三个方向：1 MiB 合法行必须整条读到、NUL 行必须不半信、无换行必须撞线；`docs/control-channel.md` "通道读这一侧" §4 附两次变异） |
+| M11 | 两处挂接改回 `init`，共享 view 不再重连；`dispose` 断开设下来的 handler | `map-cycle`（运行，数 GLib 的槽位数，含反空跑的映射计数）+ `map-arms-audit`（静态，读 `*_on_map` 里挂出去又拆不回来的东西）；`docs/map-cycle.md` 附四次变异 |
+| M13 | accept 失败改 200 ms 一次性重试，`dispose` 里 `g_clear_handle_id` | **没有门禁**：要造 EMFILE 得先把进程的 fd 塞满，而塞满之后先炸的是别的东西。忙旋这件事只能由源码形状拦 |
+| M14 | 五个 `event_*` 包装：缺字段折成该类型的空值（`""`/`0`/`FALSE`/`0.0`/`-1`） | `test/event-shape-gate.sh`（28 条只有名字的事件，零 critical、零 `(null)`；变异把包装退回直接 getter → 18 critical + SIGSEGV） |
 | 其余 S/M 严重度相邻项 | 空 selection payload、dnd v3 请求、每连接 pool 预算 | `--empty-copy`、`--dnd-requests`、`--pool-budget` |
 
 ### 复核后对报告的订正
@@ -218,11 +223,34 @@ helper 侧对称缺陷：`helper/src/main.cpp:279-291` 的 `Send()` 靠 SO_SNDTI
   `SO_PEERCRED` 在这个前提下只能证明同 uid，而同 uid 的攻击者与合法 peer 逐字节相同。
 - **M15 已修**：`Shutdown()` 在锁内 swap `fd_`、`shutdown()` 唤醒阻塞的 `read`、`join` 读线程，
   之后才 `close`，没有描述符复用的窗口（残留的只是无同步的 `fd_` 读，最坏 `EBADF`）。
+- **M14 的严重度报低了**：报告写的是「NULL 流入信号参数」，实测把五个包装退回直接 getter 之后，
+  一条只说事件名的流不止打印 18 条 critical，**还把宿主打死（SIGSEGV）**。按后果它够 S 级，按
+  可达性（对端是版本不同的 helper 就算，不需要敌意）也够。已按 M 级修好并进门禁。
+- **M10 只中了宿主这一半**：报告那句「写路径部分写与读路径无上限假设理想流」里，无上限那半在宿主
+  成立，helper 那边 `ReadLoop()` 早就按 4 KiB chunk 自己切行、1 MiB 撞线就丢弃 buffer
+  （`helper/src/main.cpp:390`）。两端现在各自有上限，但**不对称**：helper 1 MiB 配丢弃继续服务，
+  宿主 4 MiB 配拆连接；而且 helper 那一半没有门禁。
+- **L11 成立，而且比报告说的更安静**：`gtk_widget_unparent()` 作用在**没有 parent** 的 widget 上
+  （GTK 4.18 实测）什么都不做、浮游引用还在，所以空菜单那条路每次都留下一个 popover 加它的 box，
+  且没有任何告警。已 `g_object_ref_sink` + `unref`。
 
 ### 仍在处理
 
-M9-M14、M18、M21、L2-L7、L9、L11-L17、L25 与存疑项：逐条核实中，
-结论按上面的格式补进本节。
+M12、M18、M21、M22、L2-L7、L9、L12-L17、L25 与存疑项：逐条核实中，
+结论按上面的格式补进本节。M10/M11/M13/M14 与 L11 见上面「已闭环」（M13 无门禁，理由也在那里）。
+
+- **M22 成立，是写 `examples/host.c` 时撞出来的**（2026-10-22，`test/ci-session.sh` 里的真
+  helper，标签 `file://…/test/dnd-page.html?second`）。三条对照，逐字：
+  `close-browser 99` → `** Message: …: session: helper status: no-such-browser`；
+  `close-browser 2`（tab，slot 确实在）→ 之后**什么也没有**，没有 `helper: browser 2 closing`，
+  没有 `browser-closed`，4 秒后 `quit`；
+  `close-browser 3`（windowed）→ `helper: browser 3 closing`、`demo: browser 3 closed`、
+  `demo: browser 1 selected`。
+  所以不是 id 错位，也不是宿主没接事件。猜测（**未验证**）：`1281-1283` 先 `RemoveChildView`
+  把 view 从 `CefWindow` 摘掉，CEF 在一个没有窗口父级的 `CefBrowserView` 上把 `CloseBrowser`
+  当成无事可做。要证它，得试「不摘 view 直接 Close」和「摘了 view 之后等一帧再 Close」两种
+  顺序，看哪条能出 `OnBeforeClose`。标签关不掉意味着多浏览器的 tab 生命周期只进不出，
+  这是宿主层面无解的：`::browser-closed` 收不到，宿主就不能拆自己的 tab。
 
 
 ---

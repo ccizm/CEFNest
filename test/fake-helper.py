@@ -426,27 +426,45 @@ def tick_permissions():
         deliver_queued()
 
 
+# select() watches the kernel's buffer and makefile() keeps a buffer of its own:
+# a command that arrives in the same read as the one before it then sits in Python
+# while select says there is nothing to read, and it waits there for a second line
+# that never comes. Measured on test/framing-gate.sh's burst half, where a 300 KB
+# js command and the find after it go out back to back — the find was written,
+# read into Python's buffer along with the js line above it, and never answered.
+# So the bytes are drained by hand into one buffer and every whole line in it is
+# handled before select is asked again.
+buf = b""
+ended = False
+
 while True:
-    # A 50 ms timeout is what lets an accepted download advance while the fake
-    # waits for the next command: the real helper's ticks come from Chromium.
-    ready, _, _ = select.select([sock], [], [], 0.05)
-    if not ready:
-        tick_downloads()
-        tick_menu()
-        tick_permissions()
+    if b"\n" in buf:
+        line, buf = buf.split(b"\n", 1)
+        line = line.decode("utf-8", "replace") + "\n"
+    elif ended:
+        # Whatever is left is a command the host never finished writing. Saying so
+        # is as much as the fake can do: a host killed between two writes and a
+        # host that cannot frame a line look the same from here, and it is the
+        # host's own exit status that tells a gate which one happened.
+        if buf:
+            log("the channel ended in the middle of a command: %r" % buf[:120])
+        break
+    else:
+        # A 50 ms timeout is what lets an accepted download advance while the fake
+        # waits for the next command: the real helper's ticks come from Chromium.
+        ready, _, _ = select.select([sock], [], [], 0.05)
+        if not ready:
+            tick_downloads()
+            tick_menu()
+            tick_permissions()
+            continue
+        chunk = sock.recv(65536)
+        if chunk:
+            buf += chunk
+        else:
+            ended = True
         continue
 
-    line = channel.readline()
-    if not line:
-        break
-    if not line.endswith("\n"):
-        # What stopped the read is the socket closing under a half-written
-        # command, not the end of the command. Saying so is as much as the fake
-        # can do: a host killed between two writes and a host that cannot frame
-        # a line look the same from here, and it is the host's own exit status
-        # that tells a gate which one happened.
-        log("the channel ended in the middle of a command: %r" % line[:120])
-        break
     try:
         command = json.loads(line)
     except ValueError:

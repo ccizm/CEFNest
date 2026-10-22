@@ -723,6 +723,15 @@ format_bytes (gint64 bytes)
  * before it is ever joined to a directory: only the last component counts, both
  * separators are honoured because a name can arrive with backslashes in it, and
  * a control character in a terminal path is more trouble than it is worth. */
+
+/* A leaf is 255 bytes on the filesystems this targets, and a page that suggests
+ * its whole <title> as a file name is not asking for 4 kB: past the limit there
+ * is no file the helper can make and the download only fails. The cut comes out
+ * of the stem so the leaf stays openable as the type it claims to be, and a
+ * "suffix" longer than this is not a suffix. */
+#define DOWNLOAD_STEM_MAX 200
+#define DOWNLOAD_SUFFIX_MAX 16
+
 static char *
 sanitise_download_name (const char *suggested)
 {
@@ -746,6 +755,23 @@ sanitise_download_name (const char *suggested)
       g_free (out);
       out = g_strdup ("download");
     }
+
+  if (strlen (out) > DOWNLOAD_STEM_MAX + DOWNLOAD_SUFFIX_MAX)
+    {
+      const char *dot = strrchr (out, '.');
+      g_autofree char *suffix =
+        (dot && dot > out && strlen (dot) <= DOWNLOAD_SUFFIX_MAX) ?
+          g_strdup (dot) : g_strdup ("");
+      const char *cut = g_utf8_offset_to_pointer (out,
+                                                  g_utf8_strlen (out, DOWNLOAD_STEM_MAX));
+      g_autofree char *stem = g_strndup (out, (gsize) (cut - out));
+
+      /* Counted in characters, not bytes: a name out of a page is UTF-8, and a
+       * cut in the middle of one character is a leaf that no decoder reads. */
+      g_free (out);
+      out = g_strconcat (stem, suffix, NULL);
+    }
+
   return out;
 }
 
@@ -796,7 +822,19 @@ download_target_path (const char *dir, const char *name)
         return path;
       g_free (path);
     }
-  return g_build_filename (dir, stem, ext, NULL);
+
+  /* A thousand of one name is a page that will not be satisfied by any leaf, and
+   * the two answers left are to replace a path the host already handed out — the
+   * one thing this loop exists to prevent — or to build the suffix as its own
+   * directory component, which is what this line used to do: it handed out
+   * <dir>/report/.pdf, a file under a directory nobody made, and the download
+   * died on the way in. A leaf with the clock in it is neither. */
+  {
+    g_autofree char *leaf = g_strdup_printf ("%s (%" G_GINT64_FORMAT ")%s",
+                                             stem, g_get_real_time (), ext);
+
+    return g_build_filename (dir, leaf, NULL);
+  }
 }
 
 static void
@@ -1745,7 +1783,13 @@ capture_view (const char *path)
     int sw = toplevel ? gdk_surface_get_width (toplevel) : 0;
     int sh = toplevel ? gdk_surface_get_height (toplevel) : 0;
     int local_w = 0, local_h = 0;
+    /* Printed whether or not there is a client surface, so they start at zero:
+     * a dump line whose numbers are whatever was on the stack is worse than one
+     * that says the compositor had nothing to show. */
     graphene_rect_t src, dst;
+
+    graphene_rect_init (&src, 0, 0, 0, 0);
+    graphene_rect_init (&dst, 0, 0, 0, 0);
 
     if (client_surface)
       {

@@ -2179,6 +2179,9 @@ nested_surfaces_changed (NestedCompositor *self)
 {
   g_return_if_fail (NESTED_IS_COMPOSITOR (self));
 
+  if (self->disposing)
+    return;
+
   seat_retarget (self);
   g_signal_emit (self, signals[SIGNAL_FRAME], 0);
 }
@@ -2203,6 +2206,9 @@ nested_emit_drag_out (NestedCompositor *self, const char *mime, GBytes *bytes,
   g_return_if_fail (mime != NULL);
   g_return_if_fail (bytes != NULL);
 
+  if (self->disposing)
+    return;
+
   g_signal_emit (self, signals[SIGNAL_DRAG_OUT], 0, mime, bytes, types);
 }
 
@@ -2210,6 +2216,11 @@ void
 nested_emit_drag_in_end (NestedCompositor *self, gboolean taken, const char *mime)
 {
   g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  /* Reachable from data_offer_resource_destroyed() while dispose() drops the
+   * clients, which is a verdict on a drag nobody is left to report it to. */
+  if (self->disposing)
+    return;
 
   g_signal_emit (self, signals[SIGNAL_DRAG_IN_END], 0, taken, mime);
 }
@@ -2236,16 +2247,24 @@ nested_update_primary (NestedCompositor *self)
   if (candidate != self->primary)
     {
       g_set_object (&self->primary, candidate);
-      g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_SURFACE]);
-      g_signal_emit (self, signals[SIGNAL_FRAME], 0);
 
-      /* Input follows whatever is on screen: a client that maps a second
-       * surface, or unmaps the only one, must not keep the pointer. */
-      seat_retarget (self);
+      /* The primary changes because a surface went away or was destroyed, so the
+       * bookkeeping above has to run even while dispose() is dropping clients;
+       * the host is the part that must not be called. */
+      if (!self->disposing)
+        {
+          g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_SURFACE]);
+          g_signal_emit (self, signals[SIGNAL_FRAME], 0);
+
+          /* Input follows whatever is on screen: a client that maps a second
+           * surface, or unmaps the only one, must not keep the pointer. */
+          seat_retarget (self);
+        }
     }
 
   self->toplevels_fingerprint = fingerprint;
-  g_signal_emit (self, signals[SIGNAL_TOPLEVELS_CHANGED], 0);
+  if (!self->disposing)
+    g_signal_emit (self, signals[SIGNAL_TOPLEVELS_CHANGED], 0);
 }
 
 void
@@ -2260,6 +2279,9 @@ nested_flush (NestedCompositor *self)
 void
 nested_notify_text_input_state (NestedCompositor *self)
 {
+  if (self->disposing)
+    return;
+
   g_signal_emit (self, signals[SIGNAL_TEXT_INPUT_STATE], 0);
 }
 
@@ -2293,6 +2315,10 @@ nested_compositor_dispose (GObject *object)
 {
   NestedCompositor *self = NESTED_COMPOSITOR (object);
   NestedSurface *surface, *tmp;
+
+  /* Before anything is dropped, because everything below that touches a client
+   * can reach a resource destroy callback that reports to the host. */
+  self->disposing = TRUE;
 
   if (self->frame_timer_id)
     {

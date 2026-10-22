@@ -13,6 +13,7 @@ struct _ChromiumView {
   gulong frame_handler;
   gulong scale_handler;
   gulong text_input_handler;
+  gulong fullscreen_request_handler;
   GdkSurface *scale_surface;
   int pushed_width;
   int pushed_height;
@@ -365,13 +366,7 @@ chromium_view_on_map (GtkWidget *widget, gpointer data)
    * later — and a hidden window pauses the clients along with it. */
   nested_compositor_set_frame_clock (self->compositor,
                                      gtk_widget_get_frame_clock (GTK_WIDGET (widget)));
-  /* Page fullscreen requests turn into window fullscreen here, and the
-   * window's real state flows back to the client. */
-  g_signal_connect_object (self->compositor, "window-fullscreen-request",
-                           G_CALLBACK (chromium_view_on_fullscreen_request),
-                           self, 0);
   chromium_view_watch_fullscreen (self);
-  chromium_view_watch_drops (self);
 
   surface = gtk_native_get_surface (GTK_NATIVE (gtk_widget_get_native (GTK_WIDGET (self))));
 
@@ -824,6 +819,13 @@ chromium_view_dispose (GObject *object)
       self->text_input_handler = 0;
     }
 
+  if (self->fullscreen_request_handler)
+    {
+      g_signal_handler_disconnect (self->compositor,
+                                   self->fullscreen_request_handler);
+      self->fullscreen_request_handler = 0;
+    }
+
   if (self->im_context)
     {
       if (self->im_focused)
@@ -858,6 +860,22 @@ chromium_view_init (ChromiumView *self)
   self->text_input_handler =
     g_signal_connect (self->compositor, "text-input-state",
                       G_CALLBACK (chromium_view_im_on_text_input_state), self);
+
+  /* Page fullscreen requests turn into window fullscreen here, and the window's
+   * real state flows back to the client. Connected once, with the compositor this
+   * view owns: a connection made on every map is a slot GTK keeps for every map,
+   * and a window that is hidden and shown again answers the same request once per
+   * showing. A view that shares another's compositor does not answer at all, so
+   * it is disconnected when the compositor is swapped — one page going fullscreen
+   * must not fullscreen every window on the shared display. */
+  self->fullscreen_request_handler =
+    g_signal_connect (self->compositor, "window-fullscreen-request",
+                      G_CALLBACK (chromium_view_on_fullscreen_request), self);
+
+  /* Outside drops belong to the widget, not to one time it is on screen: a
+   * controller added per map means the same file dropped onto the page starts the
+   * whole drag-in sequence once per showing. */
+  chromium_view_watch_drops (self);
 
   /* Focusable, not merely can-focus: since GTK 4.14 grab_focus() is rejected
    * unless the new property is set, and without focus the page would never see
@@ -930,6 +948,15 @@ chromium_view_use_shared_compositor (ChromiumView *self,
     {
       g_signal_handler_disconnect (self->compositor, self->text_input_handler);
       self->text_input_handler = 0;
+    }
+  if (self->fullscreen_request_handler)
+    {
+      /* Left un-reconnected on purpose: see the comment where it is armed. This
+       * view draws a surface of someone else's compositor, and the view that
+       * owns that compositor is the one that answers for it. */
+      g_signal_handler_disconnect (self->compositor,
+                                   self->fullscreen_request_handler);
+      self->fullscreen_request_handler = 0;
     }
 
   g_set_object (&self->compositor, compositor);

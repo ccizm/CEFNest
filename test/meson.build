@@ -72,7 +72,31 @@ if python.found()
     args: [ files('audit-loop-sources.py') ],
     suite: 'protocol',
     timeout: 60)
+
+  # A window is hidden and shown again, so anything the `map` handler arms — a
+  # signal slot or an event controller — is one more per showing unless the code
+  # holds the id and takes it down. One right click answering five menus is the
+  # symptom; the cause is invisible at runtime. Static, so it costs nothing and
+  # needs no display.
+  test('map-arms-audit', python,
+    args: [ files('audit-map-arms.py') ],
+    suite: 'protocol',
+    timeout: 60)
 endif
+
+# The runtime half of the same rule, and the only place a pile-up can be counted
+# instead of argued: hide and show the widget, then read how many slots GLib holds
+# for each of the signals the widget arms. Needs a display, so a machine without
+# one gets a skip — same 77 as the selftests.
+test('map-cycle',
+  executable(
+    'map-cycle',
+    [ 'map-cycle.c' ],
+    dependencies: [ libcefnest_dep, gtk_dep ],
+    install: false,
+  ),
+  suite: 'selftest',
+  timeout: 120)
 
 # One run per thing the client asks the compositor for. The arguments after the
 # client path go to the client, so each mode binds a different set of protocol

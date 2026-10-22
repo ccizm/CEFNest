@@ -144,6 +144,17 @@ static const Step default_script[] = {
    * reports a touchpad lift. It has to stay a separate step: a stop sent in the
    * frame of the axis events it stops makes Chromium drop the delta. */
   { STEP_AXIS_STOP,     0,   0,   60 },
+  /* A wheel that turns sideways is the other half of the same rule, and the one
+   * a run that only ever scrolls vertically cannot tell apart from a stop sent
+   * for both axes: here the horizontal axis is the only one that moved, so an
+   * axis_stop for the vertical one is the reported defect and nothing else is. */
+  { STEP_AXIS, WL_POINTER_AXIS_HORIZONTAL_SCROLL, 40, 60 },
+  { STEP_AXIS_STOP,     0,   0,   60 },
+  /* And both axes of one diagonal gesture in one frame pair: a client building
+   * momentum out of a fling has to be told that both of them ended. */
+  { STEP_AXIS, WL_POINTER_AXIS_VERTICAL_SCROLL, 100, 60 },
+  { STEP_AXIS, WL_POINTER_AXIS_HORIZONTAL_SCROLL, 40, 60 },
+  { STEP_AXIS_STOP,     0,   0,   60 },
   { STEP_KEY_DOWN,      KEY_A,   1, 60 },
   /* GDK hands over the host's auto-repeat as another press of the same key. The
    * client has to keep seeing those, but the key must not be counted twice: the
