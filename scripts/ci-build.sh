@@ -168,7 +168,8 @@ Highlights of this release:
 | SHA256SUMS | SHA-256 manifest for every artifact |
 
 The helper packages carry the CEF runtime; cefnest-demo depends on
-cefnest-helper, and libcefnest0 recommends it.
+cefnest-helper, and libcefnest0 depends on it too — installing any one of the
+four pulls in the rest.
 EOF
 
 echo "== ci build done"

@@ -25,22 +25,22 @@ main:
       stages:
         - name: build
           image: ubuntu:24.04
-          script: CEFNEST_PACKAGE_RELEASE=2 ./scripts/ci-build.sh
+          script: CEFNEST_PACKAGE_RELEASE=3 ./scripts/ci-build.sh
           timeout: 90m
         - name: upload build
           image: cnbcool/attachments:latest
           settings:
             attachments:
               - "./cefnest-build.tar.gz"
-              - "./dist/libcefnest0_154.0.34-2_amd64.deb"
-              - "./dist/libcefnest-dev_154.0.34-2_amd64.deb"
-              - "./dist/cefnest-demo_154.0.34-2_amd64.deb"
-              - "./dist/cefnest-helper_154.0.34-2_amd64.deb"
-              - "./dist/cefnest-154.0.34-2.x86_64.rpm"
-              - "./dist/cefnest-devel-154.0.34-2.x86_64.rpm"
-              - "./dist/cefnest-demo-154.0.34-2.x86_64.rpm"
-              - "./dist/cefnest-helper-154.0.34-2.x86_64.rpm"
-              - "./dist/cefnest-packages-154.0.34-2.tar.gz"
+              - "./dist/libcefnest0_154.0.34-3_amd64.deb"
+              - "./dist/libcefnest-dev_154.0.34-3_amd64.deb"
+              - "./dist/cefnest-demo_154.0.34-3_amd64.deb"
+              - "./dist/cefnest-helper_154.0.34-3_amd64.deb"
+              - "./dist/cefnest-154.0.34-3.x86_64.rpm"
+              - "./dist/cefnest-devel-154.0.34-3.x86_64.rpm"
+              - "./dist/cefnest-demo-154.0.34-3.x86_64.rpm"
+              - "./dist/cefnest-helper-154.0.34-3.x86_64.rpm"
+              - "./dist/cefnest-packages-154.0.34-3.tar.gz"
               - "./dist/SHA256SUMS"
 $:
   tag_push:
@@ -48,7 +48,7 @@ $:
       stages:
         - name: build
           image: ubuntu:24.04
-          script: CEFNEST_PACKAGE_RELEASE=2 ./scripts/ci-build.sh
+          script: CEFNEST_PACKAGE_RELEASE=3 ./scripts/ci-build.sh
           timeout: 90m
         - name: create release
           type: git:release
@@ -61,13 +61,13 @@ $:
           settings:
             attachments:
               - "./cefnest-build.tar.gz"
-              - "./dist/libcefnest0_154.0.34-2_amd64.deb"
-              - "./dist/libcefnest-dev_154.0.34-2_amd64.deb"
-              - "./dist/cefnest-demo_154.0.34-2_amd64.deb"
-              - "./dist/cefnest-helper_154.0.34-2_amd64.deb"
-              - "./dist/cefnest-154.0.34-2.x86_64.rpm"
-              - "./dist/cefnest-devel-154.0.34-2.x86_64.rpm"
-              - "./dist/cefnest-demo-154.0.34-2.x86_64.rpm"
-              - "./dist/cefnest-helper-154.0.34-2.x86_64.rpm"
-              - "./dist/cefnest-packages-154.0.34-2.tar.gz"
+              - "./dist/libcefnest0_154.0.34-3_amd64.deb"
+              - "./dist/libcefnest-dev_154.0.34-3_amd64.deb"
+              - "./dist/cefnest-demo_154.0.34-3_amd64.deb"
+              - "./dist/cefnest-helper_154.0.34-3_amd64.deb"
+              - "./dist/cefnest-154.0.34-3.x86_64.rpm"
+              - "./dist/cefnest-devel-154.0.34-3.x86_64.rpm"
+              - "./dist/cefnest-demo-154.0.34-3.x86_64.rpm"
+              - "./dist/cefnest-helper-154.0.34-3.x86_64.rpm"
+              - "./dist/cefnest-packages-154.0.34-3.tar.gz"
               - "./dist/SHA256SUMS"

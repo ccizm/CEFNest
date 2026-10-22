@@ -137,7 +137,7 @@ cat > "$SHLIBDEPS_DIR/debian/control" <<EOF
 Source: cefnest
 Section: misc
 Priority: optional
-Maintainer: CEFNest packagers <cefnest@example.invalid>
+Maintainer: siem <yan@zhiming.xyz>
 Standards-Version: 4.6.2
 
 Package: cefnest-helper
@@ -153,6 +153,9 @@ rm -rf "$SHLIBDEPS_DIR"
 if [ -z "$HELPER_DEPS" ]; then
   HELPER_DEPS="libasound2t64, libatk-bridge2.0-0t64, libatk1.0-0t64, libatspi2.0-0t64, libc6 (>= 2.39), libcairo2, libcups2t64, libdbus-1-3, libexpat1, libgbm1, libgcc-s1, libglib2.0-0t64, libnspr4, libnss3, libpango-1.0-0, libstdc++6 (>= 13), libudev1, libx11-6, libxcb1, libxcomposite1, libxdamage1, libxext6, libxfixes3, libxkbcommon0, libxrandr2"
 fi
+# The packages depend on each other: the library needs its helper to render,
+# and the helper package answers with the library it is built for.
+HELPER_DEPS="$HELPER_DEPS, libcefnest0 (= $VERSION-$RELEASE)"
 
 # One writer for all four so the control fields cannot drift.
 deb_control() {
@@ -169,7 +172,7 @@ deb_control() {
     printf 'Package: %s\n' "$_dc_package"
     printf 'Version: %s-%s\n' "$VERSION" "$RELEASE"
     printf 'Architecture: %s\n' "$DEB_ARCH"
-    printf 'Maintainer: CEFNest packagers <cefnest@example.invalid>\n'
+    printf 'Maintainer: siem <yan@zhiming.xyz>\n'
     printf 'Installed-Size: %s\n' "$_dc_size"
     if [ -n "$_dc_depends" ]; then
       printf 'Depends: %s\n' "$_dc_depends"
@@ -186,11 +189,11 @@ deb_control() {
 }
 
 deb_control "$DEB_LIB_DIR" libcefnest0 libs \
-  "libc6 (>= 2.39), libgtk-4-1 (>= 4.14), libwayland-server0, libxkbcommon0, libjson-glib-1.0-0 | libjson-glib-1.0-0t64, libgbm1, libdrm2" \
+  "libc6 (>= 2.39), libgtk-4-1 (>= 4.14), libwayland-server0, libxkbcommon0, libjson-glib-1.0-0 | libjson-glib-1.0-0t64, libgbm1, libdrm2, cefnest-helper (= $VERSION-$RELEASE)" \
   "CEFNest shared library" \
   "The compositor, the GTK 4 widget and the control channel that let a GTK
 application composite a page rendered by Chromium." \
-  "cefnest-helper (= $VERSION-$RELEASE)"
+  ""
 
 deb_control "$DEB_DEV_DIR" libcefnest-dev libdevel \
   "libcefnest0 (= $VERSION-$RELEASE), libgtk-4-dev (>= 4.14), libwayland-dev, libxkbcommon-dev, libjson-glib-dev, libgbm-dev, libdrm-dev" \
@@ -257,6 +260,7 @@ Release: $RELEASE
 Summary: GTK 4 widget that shows a page rendered by Chromium
 License: LGPL-2.1-only
 URL: https://cnb.cool/yanzhiming/CEFNest
+Packager: siem <yan@zhiming.xyz>
 BuildArch: $RPM_ARCH
 
 # The files are already built and installed by meson; rpmbuild only packs them.
@@ -274,7 +278,7 @@ Requires: libxkbcommon
 Requires: json-glib
 Requires: mesa-libgbm
 Requires: libdrm
-Recommends: cefnest-helper = %{version}-%{release}
+Requires: cefnest-helper = %{version}-%{release}
 
 %description
 The compositor, the GTK 4 widget and the control channel that let a GTK
@@ -296,6 +300,7 @@ a host application against CEFNest.
 
 %package helper
 Summary: CEF runtime and cefnest-helper
+Requires: cefnest = %{version}-%{release}
 Requires: glibc >= 2.39
 
 %description helper
