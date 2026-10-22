@@ -1,6 +1,6 @@
 # 每次上屏重新挂接的东西，必须有拆下来的路
 
-日期：2026-10-22。来源：`code-review-2026-10-22.md` **M11**。
+日期：2026-10-22。来源：`docs/code-review-2026-10-22.md` **M11**。
 
 > `src/chromium-view.c` — `chromium_view_watch_drops` 每次 map 重复添加
 > `GtkDropTarget`，unmap 不移除 → 一次拖放触发 N 次合成 drag；

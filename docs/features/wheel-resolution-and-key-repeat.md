@@ -183,7 +183,7 @@ widget 里同一套算术。
 事件里看不出刚才滚的是哪个轴，所以 `stop` 为真就给两个轴各发一条 `axis_stop`，并把"记住本次手势
 动过哪些轴再挑着发"记成了可选优化。
 
-**这条取舍是错的**（`code-review-2026-10-22.md` **L9**）。wayland.xml 对 `axis_stop` 的说法是
+**这条取舍是错的**（`docs/code-review-2026-10-22.md` **L9**）。wayland.xml 对 `axis_stop` 的说法是
 "stop motion on the given axis"，它结束的是**这根轴上正在进行的那次滚动**；而滚轮只有一个方向，
 于是每一格滚轮都附带一条"水平方向现在不在滚"——一条从没开始过的序列被告知结束了。Chromium
 把手势序列记在 `ScrollController` 上，多余的 stop 会把刚建起来的序列提前结掉。

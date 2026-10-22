@@ -41,7 +41,7 @@ this list; this is the full record.
   `CloseBrowser`, and nothing comes back — no `OnBeforeClose`, so no
   `::browser-closed` either. An id that does not exist answers
   `status: no-such-browser`, which is how a host tells "already gone" from
-  "silently refused" (code-review-2026-10-22.md M22; the three-way probe is in
+  "silently refused" (docs/code-review-2026-10-22.md M22; the three-way probe is in
   `docs/features/multi-browser.md` §1 and `docs/guides/minimal-host.md` §5). The same asymmetry
   shows up one signal earlier: `::popup-requested` carries only the URL, so a
   host cannot see whether the page asked for a background tab or a foreground

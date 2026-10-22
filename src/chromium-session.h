@@ -48,7 +48,7 @@ uint64_t           chromium_session_get_frame_count (ChromiumSession *self);
  * chromium_session_close_browser () is only effective for a windowed browser
  * today. For a tab the helper detaches the view and calls CloseBrowser, and
  * nothing comes back: no OnBeforeClose, so no ::browser-closed either
- * (code-review-2026-10-22.md M22). An unknown @id answers
+ * (docs/code-review-2026-10-22.md M22). An unknown @id answers
  * status: no-such-browser, which is how a host can tell "already gone" from
  * "silently refused". */
 void               chromium_session_new_browser   (ChromiumSession *self,

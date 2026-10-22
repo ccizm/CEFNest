@@ -151,7 +151,7 @@ host: script 1 = "DND-PAGE"
   `browser 1 selected`。
 
 也就是说 `close_browser()` 只对独立窗口有效，标签是静默空操作，宿主这侧无从补救
-（`::browser-closed` 收不到，就不能拆自己的 tab）。记在 `code-review-2026-10-22.md`
+（`::browser-closed` 收不到，就不能拆自己的 tab）。记在 `docs/code-review-2026-10-22.md`
 的 M22。示例里标签上的 ✕ 和 `close` 动词都保留，注释写明它今天关不掉什么。
 
 ### 窗口先走，session 后走
