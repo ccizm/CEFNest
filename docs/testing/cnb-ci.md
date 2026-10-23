@@ -181,15 +181,18 @@ CNB 没有流水线级 timeout，只有 job 级；`build` 那 90 分钟约束的
   依旧报 `E: no-copyright-file`。判据直接从 `.deb` 的数据流里 `tar -xO` 那一个成员
   （一次 1.5 GB 的读流，十几秒），所以不装包也能量到；
 - 以 root 安装本地的 `cefnest` 与 `cefnest-dev`：这一条是手写 `Depends` 唯一的真判据，
-  名字写错、版本约束写错、依赖一个归档里不存在的包，都在这里当场失败；
+  名字写错、版本约束写错、依赖一个归档里不存在的包，都在这里当场失败。**但 apt 非零退出
+  不等于 `Depends` 写错**——见 §4.2，第一次真跑就是这么判错的；
 - 装完之后对 `/usr/lib/*/libcefnest.so.0` 与安装路径上的 `cefnest-helper` 跑 `ldd`，
   任何 `not found` 都算失败；
 - 用安装后的 `cefnest.pc` 编译一个最小宿主，断言 `chromium_session_get_helper_path()`
   等于 `/usr/libexec/cefnest/<arch>/cefnest-helper`——这同时验证了 pkg-config、链接和
-  编进库里的默认路径；
+  编进库里的默认路径；**这条要 `cc`**，裸 `ubuntu:24.04` 没有，所以 job 脚本先装
+  `gcc`；镜像里没有就记一条"没跑到"，不算包的失败；
 - 解包 `cefnest-build.tar.gz`，确认 `src/libcefnest.so.<X.Y.Z>` 里记着的正是安装路径上的
   helper（这条路径编在库里，不在 demo 里），demo 的 `ldd` 在解包目录里全部满足；
-  `test/shm-client` 也必须在那棵树里；
+  `test/shm-client` 也必须在那棵树里；**读那条路径要 `strings`**（属于 `binutils`），
+  同上：job 里装，缺了就明说没测；
 - 不带显示直接起一次 helper，读它的横幅：`helper: sandbox=on` 必须在（打包默认开沙箱），
   出现 `No usable sandbox!` 就是这次包在这个宿主上根本跑不起来。这条**不**能替你测
   Ubuntu 24.04 那套 AppArmor 限制（`apparmor_restrict_unprivileged_userns` 默认开）——容器复现不了别人机器上的策略，能复现的是"默认值
@@ -198,6 +201,47 @@ CNB 没有流水线级 timeout，只有 job 级；`build` 那 90 分钟约束的
 
 不在 root 时安装那一段会被跳过，而且会跳过得有声有色：不给 `CI_SMOKE_SKIP_INSTALL=1`
 就直接退出失败，免得一条只做了 inspect 的绿线被读成"包装过了"。
+
+### 4.2 第一次真跑（`v154.0.34-7`，2026-10-23 15:27）：三条红，只有第一条还没有答案
+
+跑在 `image: ubuntu:24.04` 上，整个 stage `Finished, code: 1`。三条 `FAIL`：
+
+1. `the install failed — a Depends string is wrong or unsatisfiable`，后面是 apt 那句
+   `Errors were encountered while processing:` 列出的 17 个包——`tzdata`、
+   `python3`/`python3.12`/`libpython3.12-stdlib`/`libpython3-stdlib`/`python3-packaging`、
+   `libglib2.0-dev`/`libglib2.0-dev-bin`、`libpango1.0-dev`、`libgraphene-1.0-dev`、
+   `libcairo2-dev`、`libgdk-pixbuf-2.0-dev`、`libharfbuzz-dev`、`libvulkan-dev`、
+   `libgtk-4-dev`、`libjson-glib-dev`、`cefnest-dev`。
+   **这句判词判错了对象**：紧跟其后的四条全过——装完之后
+   `/usr/lib/*/libcefnest.so.0` 与 `/usr/libexec/cefnest/x86_64/cefnest-helper` 的
+   `ldd` 都没有 `not found`、`/usr/bin/cefnest-demo` 确实没被装进来、
+   `pkg-config --exists cefnest` 通过——也就是那 296 MB 的主包和 dev 包是真落到盘上、
+   loader 也是自洽的；而 `Depends` 里有一个名字写错，apt 连解析都过不去，根本走不到
+   "配置这一堆发行版包"这一步。所以这一次失败**为什么**失败，在转录里读不出来：脚本只
+   `tail -20`，而 apt 的尾巴恰好是不含原因的那 20 行——谁先坏、坏在哪一步在更前面。
+2. `the pkg-config compile failed`，同一行 `cc: not found`：裸镜像里没有编译器。
+3. `the build-tree library does not name /usr/libexec/cefnest/x86_64/cefnest-helper`，
+   同一行 `strings: not found`：裸镜像里没有 binutils。
+
+2 和 3 改掉的理由是同一条：**缺工具是关于镜像的事实，不是关于包的证据**，所以按 `rpm`
+那条已有的口径降级成 `..  没跑到` 的 note；同时 job 的脚本先 `apt-get install -y
+--no-install-recommends gcc binutils`，把这两条在 CI 上真正的覆盖拿回来（装不上就整条
+stage 红，而不是悄悄少测两项）。1 只改 reporting：失败时依次打第一条
+`dpkg: error` / `E:` / `No space left on device`、我们自己两个包的 `dpkg -l` 状态、
+`df -h /usr /var`，最后才打那段尾巴。
+
+1 到底是什么，现在只能说"和这两个包的文件无关、发生在这个事务里"。该排的顺序：
+**容器磁盘**（这个 stage 前面是一个 90 分钟的 build stage，把 ~1 GB 的 CEF 下载、铺成
+296 MB 的 deb，装的时候还要在 `/usr` 落 1.5 GB 以上；而 dev 包那串 `-dev` 依赖把 GTK
+全家拖进同一事务，是这次比历史上任何一次都大的原因）、`tzdata` 那个绑定挂载的
+`/etc/localtime`（`ci-build.sh` 为它做过绕行，本脚本也 umount 一次，但容器里的 `umount`
+不保证有权）、以及 GTK 依赖链上某个 postinst 在这台 runner 上真的坏。**下一次跑那三行
+会直接给答案，答案出来之前不动 `Depends`。**
+
+同一次跑里另外两条与"包能不能用"相关的证据是好的：`..  unprivileged user namespaces in
+this container: no`、`helper: sandbox=on`、`no sandbox FATAL on this host`——容器不是
+AppArmor 那种宿主（`docs/internals/sandbox-policy.md` §4），但打包默认值在这台上是"开"
+且没有当场炸。
 
 ## 5. 发版（tag push）
 

@@ -34,7 +34,13 @@ $:
           # The runner is root on some pools and a sudo user on others; the
           # script only installs its own packages when it really is root, so
           # escalate first and let it fail loudly if neither works.
-          script: CEFNEST_PACKAGE_RELEASE=7 sh -c 'if [ "$(id -u)" = 0 ]; then exec ./scripts/ci-smoke-packages.sh; else exec sudo -E ./scripts/ci-smoke-packages.sh; fi'
+          # gcc and binutils are here for the script's own two checks — a host
+          # compiling against the installed cefnest.pc, and reading the helper
+          # path out of the build-tree library. The bare image has neither, and
+          # without them those two lines degrade to "did not run" notes. A failed
+          # apt for these stops the stage: a smoke job that cannot say what it
+          # did not check is worse than a red line.
+          script: CEFNEST_PACKAGE_RELEASE=7 sh -c 'as_root() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo -E "$@"; fi; }; as_root apt-get update -qq; as_root apt-get install -y --no-install-recommends gcc binutils; as_root ./scripts/ci-smoke-packages.sh'
           timeout: 30m
         - name: create release
           type: git:release

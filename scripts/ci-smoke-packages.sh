@@ -250,7 +250,21 @@ if [ "$AS_ROOT" = 1 ]; then
        >"$DIST/smoke-install.log" 2>&1; then
     ok "apt resolved and installed cefnest and cefnest-dev"
   else
-    bad "the install failed — a Depends string is wrong or unsatisfiable"
+    # A non-zero apt has several causes and "a Depends string is wrong" is only
+    # one of them, and the tail apt prints — the list of packages left
+    # unconfigured — names none: it does not say which package broke or why. The
+    # 2026-10-23 -7 run failed on exactly that, with 17 distro postinsts in the
+    # error list, our own two packages installed and ldd-clean on the next lines,
+    # and nothing readable about the cause. So print the first error, the state
+    # our packages reached, and the disk the container had.
+    bad "the install failed — the three lines after this one name the cause"
+    grep -m3 -E '^dpkg: error|^E:|[Nn]o space left on device' \
+      "$DIST/smoke-install.log" | sed 's/^/         /' || true
+    printf '         our packages: %s\n' \
+      "$(dpkg -l cefnest cefnest-dev 2>/dev/null |
+           sed -n '/^[a-z][a-z] /p' | tr '\n' '|')"
+    printf '         disk: %s\n' \
+      "$(df -h /usr /var 2>/dev/null | sed -n '1!p' | tr '\n' '|')"
     tail -20 "$DIST/smoke-install.log" | sed 's/^/         /'
   fi
 
@@ -302,7 +316,13 @@ main (void)
   return 0;
 }
 PROBE
-  if cc "$PROBE_DIR/probe.c" -o "$PROBE_DIR/probe" \
+  # A missing compiler is a fact about the image, not about the package: the
+  # bare ubuntu:24.04 the pipeline runs on has no cc, and the -7 run read that as
+  # "the pkg-config compile failed". Skipped out loud instead, and .cnb.yml
+  # installs gcc + binutils in front of this script so the check really runs.
+  if ! command -v cc >/dev/null 2>&1; then
+    note "no cc in this image: the pkg-config compile check did not run"
+  elif cc "$PROBE_DIR/probe.c" -o "$PROBE_DIR/probe" \
        $(pkg-config --cflags --libs cefnest) >"$PROBE_DIR/cc.log" 2>&1; then
     ok "a host compiles with pkg-config --cflags --libs cefnest"
     PROBE_OUT=$("$PROBE_DIR/probe" 2>&1 || true)
@@ -326,7 +346,9 @@ PROBE
       # demo only links against it. Asking the demo would fail even on a
       # correct tree, so read the library that sits next to it.
       TREE_LIB="$DEMO_TREE/src/libcefnest.so.$VERSION"
-      if [ -f "$TREE_LIB" ] &&
+      if ! command -v strings >/dev/null 2>&1; then
+        note "no strings in this image: the build-tree helper-path check did not run"
+      elif [ -f "$TREE_LIB" ] &&
          strings "$TREE_LIB" | grep -qF "$HELPER_DIR/cefnest-helper"; then
         ok "the build-tree library was compiled with the package helper path"
       else
