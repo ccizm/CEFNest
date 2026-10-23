@@ -197,7 +197,8 @@ ok 行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 
 表是 2026-10-21 的实测。2026-10-22 复跑时 `gtk_popover_popup()` 在这台 mutter 上
 不返回，`menu` 改为在 `CEFNEST_HEADLESS=1` 下整体 `exit 77`（`ci-all` 报 SKIP，约 1s）；
 `unit` 也已经是 27 项（新增 `seat-selftest-popup-cycle`、
-`seat-selftest-popup-overflow` 等）。
+`seat-selftest-popup-overflow` 等）；2026-10-23 再加 `seat-selftest-shm-release`，
+现在 **28 项**。
 
 两条补充测量：
 

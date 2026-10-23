@@ -20,6 +20,10 @@
  * zwp_primary_selection_source_v1 and a wl_surface where the protocol wants a
  * wl_data_source, and fails the run if the compositor takes either: an object
  * id is a struct the compositor will go on reading through the wrong fields.
+ * With --shm-release it writes the one request of wl_shm that no wrapper will
+ * send on this host — opcode 1, destroy under the 1.22 headers, release under
+ * the 1.23 ones — and fails the run unless the compositor goes on drawing the
+ * window: an empty implementation slot there is a wl_abort inside the host.
  * With --pool-shrink it cuts its own shm pool file down after the compositor
  * has mapped it and commits a second buffer from the same pool: reading the old
  * mapping is a SIGBUS that takes the whole host, so a compositor that has the
@@ -232,6 +236,9 @@ static int use_refused;
 static int use_pool_budget;
 static int use_wrong_object;
 static int wrong_object_done;
+static int use_shm_release;
+static int shm_release_done;
+static int shm_release_graded;
 static int use_popup_reposition;
 static int use_second_window;
 static int popups_opened;
@@ -414,6 +421,7 @@ static void do_copy (void);
 static void do_drag_out (uint32_t serial);
 static void dnd_requests_probe (void);
 static void wrong_object_probe (void);
+static void shm_release_probe (void);
 static void pool_shrink_probe (void);
 static void empty_copy_probe (void);
 static void popup_depth_probe (void);
@@ -959,6 +967,32 @@ frame_done (void *data, struct wl_callback *callback, uint32_t time)
     {
       pool_shrink_done = 1;
       pool_shrink_probe ();
+    }
+
+  /* Sent on this client's own connection, and graded by the frames after it:
+   * the counter only moves when the compositor answers a wl_callback, so
+   * reaching the grading step below is already the proof that the request did
+   * not kill it. */
+  if (use_shm_release && !shm_release_done && frames > 3)
+    {
+      shm_release_done = 1;
+      shm_release_probe ();
+    }
+
+  if (use_shm_release && shm_release_done && !shm_release_graded && frames > 40)
+    {
+      shm_release_graded = 1;
+      if (wl_display_get_error (display) != 0)
+        {
+          fprintf (stderr, "client: %d: shm-release gate FAILED: the compositor "
+                           "went on drawing but hung an error on this "
+                           "connection: %s\n",
+                   __LINE__, strerror (wl_display_get_error (display)));
+          exit (1);
+        }
+      fprintf (stderr, "client: shm-release gate passed: opcode 1 of wl_shm was "
+                       "taken, and %d frames later this connection is still "
+                       "being served\n", frames - 3);
     }
 
   /* The same rule as the probes above: the window has to be mapped and the seat
@@ -3238,7 +3272,13 @@ registry_global (void *data, struct wl_registry *registry, uint32_t name,
     compositor = wl_registry_bind (registry, name, &wl_compositor_interface,
                                    version < 4 ? version : 4);
   else if (!strcmp (interface, "wl_shm"))
-    shm = wl_registry_bind (registry, name, &wl_shm_interface, 1);
+    /* Bound at 2 where the compositor offers it: version 2 is the one that names
+     * a release request, and --shm-release has to send that request legally.
+     * libwayland-server answers a since-2 request on a version-1 object itself,
+     * with "invalid method", and a gate whose byte never reaches the
+     * compositor would be grading the client library. */
+    shm = wl_registry_bind (registry, name, &wl_shm_interface,
+                            version < 2 ? version : 2);
   else if (!strcmp (interface, "wp_viewporter"))
     viewporter = wl_registry_bind (registry, name, &wp_viewporter_interface,
                                    version < 1 ? version : 1);
@@ -3887,16 +3927,23 @@ wrong_connection_close (struct WrongConnection *conn)
  * the compositor is then the only one left who can say no.
  *
  * set_selection is opcode 1 of wl_data_device and takes two arguments, the
- * source id and the serial; a wayland frame is size, sender id, opcode and then
- * the arguments, all in native order. */
+ * source id and the serial. A wayland frame is the sender's object id, then one
+ * word carrying the size in its high 16 bits and the opcode in its low 16, then
+ * the arguments, all in native order. Measured rather than assumed: strace of
+ * wl_display.bind (opcode 1, 12 bytes) came out as 01 00 00 00 | 01 00 0c 00 —
+ * id, then 0x000c0001 — and wl_buffer.destroy (opcode 0, 8 bytes) and
+ * wl_shm_pool.destroy (opcode 1, 8 bytes) as 0x00080000 and 0x00080001. The
+ * first two versions of this probe got the words the other way round and the
+ * compositor answered "invalid method 8" / "invalid method 16", which is the
+ * size field read as an opcode: it had been grading a malformed frame instead of
+ * the wrong object it means to name. */
 static void
 wrong_selection_of (struct WrongConnection *conn, uint32_t source_id,
                     const char *what)
 {
-  struct { uint32_t size, id, opcode, source, serial; } message = {
-    sizeof message,
+  struct { uint32_t id, size_opcode, source, serial; } message = {
     wl_proxy_get_id ((struct wl_proxy *) conn->device),
-    1,
+    ((uint32_t) sizeof message << 16) | 1u,
     source_id,
     1
   };
@@ -3980,6 +4027,62 @@ wrong_object_probe (void)
    * compositor is drawing. Going back to the frame loop makes the rest of the
    * script grade that — a run whose picture vanishes after the attacks is the
    * bug this probe exists to catch. */
+}
+
+/* -------------------------------------------------------- --shm-release */
+
+/* wl_shm has a destructor in request slot 1, and no wrapper will send it here:
+ * the 1.23 headers turned wl_shm_destroy() into a local-only call, so the only
+ * way to get the byte onto the wire is to write it. That is the shape of the
+ * request that kills this compositor if the slot stays empty — on the 1.22
+ * headers Ubuntu 24.04 builds and installs against, wl_shm_destroy() marshals
+ * opcode 1 itself, so there a client that does nothing clever at all reaches it
+ * by closing. The frame follows the header the library writes: the object id,
+ * then the size above the opcode, and this request has no arguments, so eight
+ * bytes are the whole message. */
+static void
+shm_release_probe (void)
+{
+  struct { uint32_t id, size_opcode; } message;
+  ssize_t written;
+
+  if (!shm || wl_proxy_get_version ((struct wl_proxy *) shm) < 2)
+    {
+      fprintf (stderr, "client: %d: shm-release gate FAILED: the compositor "
+                       "advertises wl_shm at version %u, so opcode 1 is not a "
+                       "request it can be sent at all and this run would grade "
+                       "nothing\n",
+               __LINE__, shm ? wl_proxy_get_version ((struct wl_proxy *) shm) : 0);
+      exit (1);
+    }
+
+  message.id = wl_proxy_get_id ((struct wl_proxy *) shm);
+  message.size_opcode = ((uint32_t) sizeof message << 16) | 1u;
+
+  wl_display_flush (display);
+  written = write (wl_display_get_fd (display), &message, sizeof message);
+  if (written != (ssize_t) sizeof message)
+    {
+      fprintf (stderr, "client: %d: cannot send the raw frame: %s\n",
+               __LINE__, strerror (errno));
+      exit (1);
+    }
+
+  /* From here this proxy names an object the compositor has let go, so nothing
+   * more is asked of it: the pool and the buffer were made through it but are
+   * resources of their own, and the picture keeps committing through those.
+   * That is also why no other mode sends this — the ones that make a second
+   * pool would be asking a dead id for it. */
+  if (wl_display_roundtrip (display) < 0)
+    {
+      fprintf (stderr, "client: %d: shm-release gate FAILED: the compositor hung "
+                       "up on the request instead of taking it\n", __LINE__);
+      exit (1);
+    }
+
+  fprintf (stderr, "client: sent opcode 1 of wl_shm (destroy on the 1.22 "
+                   "headers, release on the 1.23 ones) on id %u and the "
+                   "connection is still live\n", message.id);
 }
 
 /* ---------------------------------------------------------- --empty-copy */
@@ -4762,6 +4865,8 @@ main (int argc, char *argv[])
         use_pool_budget = 1;
       else if (!strcmp (argv[i], "--wrong-object"))
         use_wrong_object = 1;
+      else if (!strcmp (argv[i], "--shm-release"))
+        use_shm_release = 1;
       else if (!strcmp (argv[i], "--pool-shrink"))
         use_pool_shrink = 1;
       else if (!strcmp (argv[i], "--empty-copy"))

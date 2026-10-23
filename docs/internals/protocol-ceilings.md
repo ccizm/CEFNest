@@ -1,10 +1,15 @@
 # 协议天花板：把没广告的协议和版本上限逐个判掉
 
 日期：2026-10-20
-问题：任务 #28。嵌套 compositor 只广告 11 个全局对象，版本各自封顶
-（`src/nested-internal.h`）。这份记录回答两个问题：**客户端在我们要的东西，
-我们给了没有？客户端在别的 compositor 上还要的东西，我们不给行不行？**
+问题：任务 #28。嵌套 compositor 只广告 11 个全局对象（有渲染节点时再加
+`zwp_linux_dmabuf_v1`，共 12 个），版本各自封顶（`src/nested-internal.h`）。
+这份记录回答两个问题：**客户端在我们要的东西，我们给了没有？客户端在别的
+compositor 上还要的东西，我们不给行不行？**
 每一项都有量出来的证据，不是看协议文档猜的。
+
+> 2026-10-23 重量一遍：`wl_shm` 的广告版本从 1 抬到 2（`docs/internals/empty-request-slot.md` §9）。
+> 本文 §1 的归属判据和 §2 的两张表都按新测量重写，顺带补上旧表漏掉的两个
+> 真实 bind。客户端**要**的版本没变，变的只是它能要的上限。
 
 ## 1. 量法
 
@@ -15,39 +20,70 @@
 timeout 30 env GDK_BACKEND=wayland CHROMIUM_HELPER=1 WAYLAND_DEBUG=1 \
   CHROMIUM_SESSION_SCRIPT=/tmp/probe.session ./builddir/src/cefnest-demo > /tmp/probe.log 2>&1
 
-# 跑 B：纯客户端连我们——seat-selftest 本体不开 GDK 显示，--gtk-client 的
-# 第二个进程用 GDK 连我们的 socket，日志里没有 mutter 的成分
+# 跑 B：seat-selftest 本体的 GDK 连的是**外层** display（它要把合成结果画进
+# GdkTexture，见 test/seat-selftest.c:1693 的 gtk_init_check）；只有 --gtk-client
+# 派出的第二个进程被 start_gtk_client() 把 WAYLAND_DISPLAY 改成我们的 socket。
+# 所以这份日志里有两份 GDK 连接，得按下面的指纹分。
 WAYLAND_DEBUG=1 ./builddir/test/seat-selftest /tmp/x.png \
   "$PWD/builddir/test/shm-client" --gtk-client > /tmp/gtk-client-bind.log 2>&1
 ```
 
-归属判据：我们的 compositor 按固定顺序建全局，名字恰好是 1–11，版本也是
-我们广告的版本；mutter 那份注册表里 11 号是 `gtk_shell1`，一眼可分。
-跑 B 里 `gtk_shell1`、`wp_presentation` 等 mutter 独有协议的 bind 行数
-为 **0**，证明这份日志是纯"客户端对我们"的测量。
+归属判据：我们的 compositor 按固定顺序建全局，名字恰好是 1–12，版本也是
+我们广告的版本，其中最靠得住的指纹是 `wl_compositor`——我们封顶 **4**，mutter 48.7
+给的是 **6**，两个注册表一眼分开。名字位置不能当判据：`gtk_shell1` 在宿主机那份
+注册表里是 11 号，在 headless 嵌套 mutter 里是 10 号，因为它前面的全局有多少
+`wl_output` 会变。
+
+> 这里原来还有第二条判据："跑 B 里 `gtk_shell1`、`wp_presentation` 等 mutter 独有
+> 协议的 bind 行数为 **0**，证明这份日志是纯'客户端对我们'的测量"。**重量时它不
+> 成立**：重跑上面那条命令，日志前半段就有这么一行
+> `-> wl_registry#2.bind(10, "gtk_shell1", 6, new id [unknown]#11)`，
+> 那是 selftest 本体连外层 mutter 的那份 GDK，不是脏数据。旧结论只是恰好被"两份
+> 连接的 `wl_compositor` 版本号不同"救了。判据换成上面那条指纹，或者只看我们
+> compositor 服务端打印的、不带 `->` 的行——§2 两张表这次就是这么摘的。
 
 ## 2. 客户端对我们：要的 exactly 是我们有的
 
-跑 B 里 GTK4/GDK 绑定的全部（名字 1–11，版本 = 我们的封顶）：
+2026-10-23 在 `./test/ci-session.sh` 的 headless 嵌套 mutter 里重跑两遍量出来的。
+两张表都只取我们 compositor **服务端**打印的请求（不带 `->` 的那些），按
+`wl_compositor 4` 认领连接。
+
+跑 B 里那个被强制连我们的 GTK4/GDK 客户端，绑了 12 个全局中的 11 个：
 
 ```
-wl_compositor 4, wl_shm 1, xdg_wm_base 3, wp_viewporter 1,
+wl_compositor 4, wl_shm 1, wl_output 3, xdg_wm_base 3, wp_viewporter 1,
 wp_fractional_scale_manager_v1 1, wl_seat 8, wl_data_device_manager 3,
-zwp_text_input_manager_v3 1, wp_cursor_shape_manager_v1 1,
+zwp_primary_selection_device_manager_v1 1, wp_cursor_shape_manager_v1 1,
 zwp_linux_dmabuf_v1 5
 ```
 
-跑 A 里真 Chromium 绑定的全部：
+没绑的只有 `zwp_text_input_manager_v3`——它要等一个有焦点的输入区，而这个客户端
+不映射窗口。旧表把它列进去了、却漏了 `wl_output` 和 `zwp_primary_selection_...`，
+那两条正是本次重量的差别（`--as-gtk-client` 现在压根不建窗口）。
+
+跑 A 里真 Chromium 起了**两条**连接（browser 进程和它的子进程），旧表把两条混成了
+一句"同上"：
 
 ```
-同上，外加 wl_output 3/4（v4 的 name/description 随 bind 发出）；dmabuf 绑的是
-4（我们封顶 5，Chromium 取 min）；v4 起不发被废弃的 format，只发 modifier
+连接 1：上面 11 个全绑，再加 zwp_text_input_manager_v3 1，共 12 个；
+        wl_output 绑 4（我们封顶 4），dmabuf 绑 4（我们封顶 5，它只要 4）
+连接 2：绑 11 个，同样不碰 text_input；wl_output 绑 3、dmabuf 绑 5；
+        xdg_wm_base 要到 create_pool 之后 330 ms 才补 bind
 ```
+
+dmabuf 两边都只收到 `modifier` 事件、没有那条已废弃的 `format`——`version < 4` 才
+发它（`src/nested-dmabuf.c:304`），所以绑 4 和绑 5 拿到的格式信息是一样的。
+
+两条连接的 `wl_shm` 都**只要版本 1**，尽管全局现在广告 2。这条对本次改动要紧：
+抬广告版本并没有让真实客户端开始发 `release`（它们连要都没要），所以
+`docs/internals/empty-request-slot.md` §9.1 说的"日常可达的那条路是 1.22 表头的
+`wl_shm_destroy()`"没有被这次测量推翻——槽 1 该填还是得填。
 
 结论：
 
 - 两个真实客户端（CEF Chromium、GDK4）对我们的 bind **一个不多、一个不少**，
-  全部落在我们广告的 11 个全局里。
+  全部落在我们广告的全局里（有渲染节点时 12 个，没有时 11 个——dmabuf 是条件广告，
+  `src/nested.c:2645`）。
 - 两边都没有任何 missing-global 抱怨；跑 B exit 0（GDK 客户端跑完整个脚本
   序列没崩），跑 A 的 Chromium 页面渲染、滚轮、剪贴板都是已验证的黄金路径
   （`docs/features/wheel-resolution-and-key-repeat.md`、`docs/features/clipboard-bridge.md`）。

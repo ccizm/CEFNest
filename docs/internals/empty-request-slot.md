@@ -197,3 +197,117 @@ selftest: finished at step 27, 139 fds open (119 at start)
 - **seat-selftest 没有拖拽回归**：现在只有 demo 脚本这条路径会碰到 `set_actions`。
 - **#28 升版本前必须先跑审计**：`xdg_toplevel_impl` 连 `.close` 都没填，这类空槽在别的接口上一旦
   版本抬起来就是同一个死法。
+
+## 9. 第二个死法：wl_shm 的槽 1（本篇第 8 节最后那条预言应验了）
+
+日期：2026-10-23。`meson test` 在 Debian 13（libwayland 1.23.1）上报红：
+
+```
+MISSING  src/nested.c shm_impl  slot 1 = release  since 2
+1 uncovered slot(s), 0 unknown interface(s), 32 implementation struct(s)
+```
+
+`shm_impl` 从来只填了 `create_pool`。槽 1 在 1.22 的头文件里叫 `destroy`，1.23 把它
+改名成 `release` 并标成 `since=2`——**opcode 没动**，`/usr/share/wayland/wayland.xml` 里
+`wl_shm` 现在是 `version="2"`，成员顺序 `create_pool`(0)、`release`(1)。
+
+### 9.1 谁能真的发出来
+
+- **1.23 上发不出来**：全局报的是版本 1，而 libwayland-server 自己就按 `since` 拦
+  （头文件里有两条不同的串，实测走的是后者）：
+
+  ```
+  $ strings /usr/lib/x86_64-linux-gnu/libwayland-server.so.0 | grep -a 'invalid method'
+  invalid method %d, object %s#%u
+  invalid method %d (since %d < %d), object %s#%u
+  ```
+
+  所以在 1.23 上这条请求连实现表都碰不到，闸门是**红但打不死人**的。
+- **1.22 上是日常路径**：那边 `destroy` 的 `since=1`，而 `wl_shm_destroy()` 就是把这个
+  opcode 写上线的包装函数。Ubuntu 24.04——本项目 deb/rpm 的构建与安装目标——正是 1.22。
+  也就是说：**在那台机器上，一个客户端只是正常关掉自己的 shm 代理，就能把嵌套合成器
+  连同宿主进程 `wl_abort`**。这才是这条真正要修的理由。
+
+### 9.2 修法：填槽，并把版本升到能测它
+
+`src/nested.c` 里槽 1 用**位置式**初始化，不是疏忽：`destroy` 这个名字在 1.23 不存在，
+`release` 在 1.22 不存在，只有按下标填才同时对得上两边。`shm_release()` 就一句
+`wl_resource_destroy (resource)`——协议写明"经本接口创建的对象不受影响"，池子各有自己的
+引用，确实只有这个资源要走。
+
+全局版本从 1 抬到 2。不抬的话，客户端绑到版本 1 的代理发 `release` 会被 libwayland-server
+按 `since` 拦掉，运行时闸门就只能测"版本检查"而测不到我们的槽。抬到 2 之后这条请求才是
+合法的，闸门才有东西可判。
+
+### 9.3 顺手量出来的两件事
+
+**(a) 帧头的字节序，本篇第 6 节那个探针一直是错的。** `--wrong-object` 注释里写着
+"a wayland frame is size, sender id, opcode"，真实布局是**对象 id、然后一个
+`(size<<16)|opcode` 的字**。拿 strace 量的（同一份 libwayland 自己写出去的帧）：
+
+```
+wl_display.bind   (opcode 1, 12 字节) → 01 00 00 00 | 01 00 0c 00
+wl_buffer.destroy (opcode 0,  8 字节) → 05 00 00 00 | 00 00 08 00
+wl_shm_pool.destroy(opcode 1, 8 字节) → 03 00 00 00 | 00 00 08 00
+```
+
+按旧写法发出去的帧，compositor 回的是 `invalid method 16`——那是把 size 字段当成 opcode
+读了。**这个闸门此前一直在判一条畸形帧，而不是它宣称在判的那个错对象。** 改对之后同一条
+请求的回答变成：
+
+```
+invalid object (8), type (zwp_primary_selection_source_v1), message set_selection(?ou)
+invalid object (8), type (wl_surface), message set_selection(?ou)
+```
+
+正是 libwayland-server 的参数类型检查，也是这个闸门本来要量的东西。
+
+**(b) 审计自己漏了 NULL 的写法。** 把槽改回 `{ shm_create_pool, NULL }` 之后
+`audit-impl-slots.py` 仍然报 0 空槽：它的位置式正则 `^\s*(?!/\*|\.)(\w+),` 把 `NULL`
+也当成"填过了"。设计式同理（`.destroy = NULL` 也算 provided）。libwayland-server 按下标
+取函数指针，不关心源码怎么拼这个洞，所以两种写法都得算洞。修完之后同一份变异报
+`MISSING ... slot 1 = release since 2`。
+
+### 9.4 运行时闸门：`--shm-release`
+
+`test/shm-client.c` 新增模式：把主连接的 `wl_shm` 绑到版本 2，手写那 8 字节裸帧发
+opcode 1，然后要求这条连接继续被服务。`test/meson.build` 的模式表里加了一个
+`shm-release`，`meson test` 从 27 条变 28 条。
+
+```
+$ ./test/ci-session.sh ./builddir/test/seat-selftest /tmp/x.png "$PWD/builddir/test/shm-client" --shm-release
+client: sent opcode 1 of wl_shm (destroy on the 1.22 headers, release on the 1.23 ones)
+        on id 4 and the connection is still live
+client: shm-release gate passed: opcode 1 of wl_shm was taken, and 38 frames later this
+        connection is still being served
+selftest: finished at step 52, 162 fds open (129 at start)
+RESULT shm-release: exit 0
+```
+
+| 跑法 | 结果 |
+| --- | --- |
+| 填槽（`shm_release`） | exit 0，请求被接走，之后 38 帧仍在服务 |
+| 同一份代码把槽改成 `NULL` | **exit 134**，日志里就是本篇第 1 节那个死法：`listener function for opcode 1 of wl_shm is NULL` |
+| `audit-impl-slots.py`，填槽 | 0 uncovered |
+| `audit-impl-slots.py`，槽写 `NULL` | MISSING slot 1 = release since 2（修审计之前这一格是 0 uncovered，即漏判） |
+| `--wrong-object` 帧序修正后 | exit 0，但拒绝理由是 `invalid object (8), type (...)` 而不是 `invalid method` |
+| `meson test -C builddir`（嵌套 mutter 里） | **28/28 OK**，含 `impl-slot-audit` 与新的 `seat-selftest-shm-release` |
+
+注：裸帧只能在 `wl_display_flush()` 之后直接写 socket；写完这个代理就是一个死 id，所以
+`--shm-release` 之后本模式不再碰 `wl_shm`，别的模式也不发这条请求（要再建池子的模式会拿
+死 id 去建）。
+
+### 9.5 重量过 bind 表，以及还没做的
+
+- **版本 2 抬上去之后 `docs/internals/protocol-ceilings.md` §2 已重量**（2026-10-23，
+  在 `./test/ci-session.sh` 的 headless 嵌套 mutter 里跑 A 与跑 B）。两个结论：
+  真实客户端**要**的版本没变——GDK 和 Chromium 的两条连接都仍然 `bind(2, "wl_shm", 1)`，
+  所以抬广告版本不会让它们开始发 `release`，槽 1 的意义仍然在 1.22 那条 `destroy` 路径上；
+  顺带量出旧表记错了两处（漏了 `wl_output` 与 `zwp_primary_selection_device_manager_v1`，
+  多记了一个本轮根本不绑的 `zwp_text_input_manager_v3`），以及 §1 那条"mutter 独有协议
+  bind 行数为 0"的归属判据不成立——selftest 本体为了画 GdkTexture 自己就连着外层
+  mutter。这些都在那篇里改了。
+- **1.22 那条日常路径本机量不到**：这台机器只有 1.23。`wl_shm_destroy()` 在 1.22 会发
+  opcode 1 这件事，依据是 `strings` 里 libwayland-server 的两条版本检查串、1.23 头文件里
+  `WL_SHM_RELEASE=1 / since 2` 的存在，以及 `wl_shm_interface` 的成员顺序；没有在真的
+  1.22 上跑过一次"客户端正常关闭 → 修复前 abort"。

@@ -6,6 +6,9 @@ slot is not a refused request: libwayland-server aborts the whole compositor
 ("listener function for opcode N of IFACE is NULL") the moment a client sends
 that request. Parse every "struct X_interface" from the installed and the
 generated server headers, then every initializer in src/, and report the holes.
+A slot that is spelled out and set to NULL counts as a hole, in either
+spelling — `.destroy = NULL` and a positional NULL both leave the array entry
+empty, and the abort cannot tell how the source wrote it.
 
 Run with no arguments from anywhere in the checkout: the sources are found
 relative to this file, and the generated headers relative to ./builddir. Pass a
@@ -67,8 +70,13 @@ for path in sorted(glob.glob(os.path.join(root, 'src', '*.c'))):
     text = open(path).read()
     for m in re.finditer(r'static const struct (\w+)_interface (\w+) = \{(.*?)\n\};', text, re.S):
         iface, var, body = m.group(1), m.group(2), m.group(3)
-        provided = set(re.findall(r'\.(\w+)\s*=', body))
-        positional = re.findall(r'^\s*(?!/\*|\.)(\w+),', body, re.M)
+        # A slot written out but set to NULL is an empty slot: libwayland-server
+        # indexes the table by opcode and does not care how the source spelled
+        # the hole, so `.destroy = NULL` aborts exactly like a missing entry.
+        # Counting either spelling as coverage made this audit pass a tree that
+        # had deliberately emptied a slot — see docs/internals/empty-request-slot.md.
+        provided = set(re.findall(r'\.(\w+)\s*=\s*(?!NULL\b|0\b)\S', body))
+        positional = re.findall(r'^\s*(?!/\*|\.|NULL\b|0\b)(\w+),', body, re.M)
         rows.append((path, iface, var, provided, positional))
 
 missing = 0

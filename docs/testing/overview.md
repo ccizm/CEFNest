@@ -35,7 +35,7 @@ client saw. Each mode asks for a different set of protocol objects:
 ```
 
 with `--dmabuf`, `--text-input`, `--cursor-shape`, `--popup`, `--refused`,
-`--pool-budget`, `--wrong-object`, `--pool-shrink`, `--empty-copy`,
+`--pool-budget`, `--wrong-object`, `--pool-shrink`, `--shm-release`, `--empty-copy`,
 `--popup-depth`, `--popup-cycle`, `--popup-overflow`, `--damage-scale`, `--drag-fake-serial`, `--drag-no-source`,
 `--dnd-requests`, `--drag-out`, `--drag-in`, `--fullscreen`,
 `--second-window`, `--gtk-client`. On a machine with no display each one exits 77,
@@ -54,6 +54,16 @@ both, with the mutation each one is proven against.
 run fails unless the compositor takes some and refuses the next. It measured 10
 accepted, 1 refused against the 1 GiB per-connection ceiling
 (`docs/internals/resource-limits.md` §2).
+
+`--shm-release` asks for the one request slot no wrapper on this host will send
+for you: the client writes a `wl_shm` opcode 1 frame straight onto the socket,
+past libwayland-client's own version check, and the run fails unless the
+compositor takes the request and is still serving that connection 38 frames
+later. Leave the slot `NULL` and the same run dies with `SIGABRT` (exit 134) and
+libwayland names the reason — `listener function for opcode 1 of wl_shm is NULL`
+(`docs/internals/empty-request-slot.md` §9). It binds `wl_shm` at version 2
+because the server enforces a request's `since` against the bound version, and a
+gate that gets refused for version reasons would be grading the client library.
 
 `--dmabuf` is scored on the compositor's side of the import: the client falls
 back to `wl_shm` on any refusal and still exits 0, so the run counts what the

@@ -181,7 +181,7 @@ helper 侧对称缺陷：`helper/src/main.cpp:279-291` 的 `Send()` 靠 SO_SNDTI
 
 | 条目 | 处置 | 门禁 |
 | --- | --- | --- |
-| S1 | 补 `wl_resource_instance_of` 校验 | `--wrong-object`（裸 frame 绕过 libwayland 客户端的类型检查，见 shm-client.c:3746-3753 的实测记录） |
+| S1 | 补 `wl_resource_instance_of` 校验 | `--wrong-object`（裸 frame 绕过 libwayland 客户端的类型检查，见 shm-client.c:3920-3940 的实测记录；这条门禁本轮订正过一次帧序，见第五轮） |
 | S2 | dispose 补清 `primary_replay_id` | `test/audit-loop-sources.py`（静态：每个 idle/timeout 要么持引用要么被 dispose 取消） |
 | S3 | 事后缩小的 pool 直接拒绝读取 | `--pool-shrink`（两种 pool 生命周期各一遍） |
 | S4 | 宿主与 helper 两侧都补写循环 | `test/framing-gate.sh` |
@@ -448,7 +448,7 @@ CNB runner 上验证。
   1.22，那个槽位还不存在，所以这条只在 Debian 13 这类新头文件宿主上红。`shm_impl` 与
   审计脚本都不在本轮改动里（`git diff` 可查），报告的原样留着：客户端按 v2 绑定后发
   `release`，libwayland-server 会当场 abort 合成器。修它要在 compositor 核心动 6 行，
-  不在本轮范围，等决定。
+  不在本轮范围，等决定。**→ 下一条（第五轮）已修掉，含门禁与变异。**
 - helper 有一条**先前就存在的偶发 `*** stack smashing detected ***`**：在改动前的旧二进制上
   同样能复现，本轮未定位。
 - RPM 分支本机零测量（无 `rpmbuild`）；`License:` 覆写、`%files` 新行、`Requires` 自动发现
@@ -501,3 +501,66 @@ CEF 摘要钉值、示例修正与 `chromium-session.h` 订正。上一版清单
 v154.0.34-5”并绿——这正是 runner 上 checkout tag 之后走的那条路径。`v154.0.34-5`
 已推到远端、指向 `1dd1244`，流水线由这次推送触发；本机没有 CNB 的 CLI，跑出来的
 结果只能在网页上看，这里不替它下结论。
+
+## 第五轮：2026-10-23 补掉上节两条"等决定"的第一条
+
+对象是 `impl-slot-audit` 那条红门禁。它报的不是"审计太严"，是真的有一个空槽：
+`wl_shm` 的请求槽 1（1.23 叫 `release`，1.22 叫 `destroy`，同一个 opcode）在
+`shm_impl` 里没填，而**空槽不是"拒绝请求"，是 `wl_abort`**——libwayland-server 打印
+`listener function for opcode 1 of wl_shm is NULL` 然后带走整个进程，也就是嵌套
+compositor、widget 和宿主一起没。可达性在 `docs/internals/empty-request-slot.md` §9.1：
+本机 1.23 反而难打（服务端会先按绑定版本查 `since`，v1 代理发 v2 请求在 libwayland
+客户端里就被拦下），真正日常可达的是 **1.22 的 `wl_shm_destroy()`**——那正是 CI 与
+Ubuntu 24.04 装机用的头文件，客户端只是正常关掉自己的 shm 代理就撞上槽 1。
+
+改动四处：
+
+- `src/nested.c`：填槽 1（`shm_release`，只做 `wl_resource_destroy`，池子按协议
+  "remain unaffected" 各自活着）。这一格**必须按位置初始化**——`.release` 在 1.22
+  头文件里不存在，`.destroy` 在 1.23 里不存在，两种写法都编不过对面。同时把
+  `wl_shm` 全局从 1 抬到 2：槽实现了才有资格广告它，也才有客户端能合法地发到它。
+- `test/shm-client.c`：新增 `--shm-release`。它绑 v2、绕开 libwayland-client 的版本
+  检查，`wl_display_flush()` 之后把 8 字节裸帧直接写 socket，然后要求合成器**继续**
+  服务这条连接 38 帧。顺手订正了本篇第二件事（见下）。
+- `test/audit-impl-slots.py`：`.destroy = NULL` 与位置写法里的 `NULL` 都不再算覆盖。
+- `test/meson.build`：`seat-selftest-shm-release`，`meson test` 从 27 项变 **28 项**。
+
+路上挖出两条先前就存在的门禁缺陷，都不是本轮引入的：
+
+1. **`--wrong-object` 一直在给一个畸形帧打分**。它按仓库注释里那句"a wayland frame is
+   size, sender id, opcode"摆字节，而真实顺序是**对象 id 在前，第二字是
+   `(size << 16) | opcode`**。合成器回的是 `invalid method 8` / `invalid method 16`
+   ——把长度字段当成了 opcode，压根没走到它要测的 `wl_resource_instance_of`。用
+   strace 量了 libwayland 自己发出的三种帧才订正：bind 是 `01 00 00 00 | 01 00 0c 00`，
+   `wl_buffer.destroy` 是 `05 00 00 00 | 00 00 08 00`。修完之后它拒绝的理由变成
+   `invalid object (8), type (zwp_primary_selection_source_v1), message
+   set_selection(?ou)`，这才是那条门禁该抓的东西；**修前修后它都是 exit 0**，所以旧
+   那一版的绿是假绿。
+2. **审计看不见明写的 `NULL`**。把槽改成 `NULL` 时它报 "0 uncovered"，等于这道静态
+   门禁对它的目标情形完全失灵。
+
+复测（都在 `./test/ci-session.sh` 的 headless 嵌套 mutter 里）：
+
+- `python3 test/audit-impl-slots.py builddir`：**0 uncovered slot(s) / 0 unknown
+  interface(s) / 32 implementation struct(s)**。
+- 新门禁绿：`shm-release gate passed: opcode 1 of wl_shm was taken, and 38 frames
+  later this connection is still being served`。
+- 变异：槽改回 `NULL` → `RESULT shm-release: exit 134`，日志里就是那句 abort；
+  审计同时报 `MISSING slot 1 = release since 2`。这条变异第一次跑是**假绿**——脚本里
+  写了 `s.replace(a,b).replace(c,d) if False else s`，优先级把改动全吞了，重写之后
+  才红得起来。
+- `meson test -C builddir`：**28 ok / 0 fail / 0 skip**。
+- `./test/ci-all.sh`（13 跑全量）：`proof 7`、`unit 28`、`framing 13`、`pixel 12`、
+  `find 34`、`permission 58`、`download 54`、`dnd 59`、`primary 2`、`multi 10`、
+  `signal 12`、`soak 12` 全 PASS，`menu` SKIP（headless 不映射 popover，同第三、四轮），
+  **总退出码 0**——这是这套门禁第一次整条绿。
+- `docs/internals/protocol-ceilings.md` §2 两张 bind 表按新测量重量过：GDK 与 Chromium
+  的两条连接**都仍然只要 `wl_shm` 版本 1**，抬广告版本没让真实客户端开始发 `release`；
+  顺带订正那篇的两处记错（旧表漏了 `wl_output` 与 primary selection、多记了本轮根本不
+  绑的 text input），以及 §1 那条"mutter 独有协议 bind 行数为 0"的归属判据不成立
+  ——selftest 本体为了画 GdkTexture 自己就连着外层 mutter。
+
+还没做的：1.22 那条日常路径本机量不到（这台只有 1.23），依据是 1.23 头文件里的
+`WL_SHM_RELEASE=1 / since 2`、`wl_shm_interface` 成员顺序和 libwayland-server 里那两条
+版本检查字符串；剩下第二条"等决定"（helper 的偶发 `*** stack smashing detected ***`）
+见下一节。

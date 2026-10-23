@@ -1380,8 +1380,26 @@ shm_create_pool (struct wl_client *client, struct wl_resource *resource,
   pool->resource = pool_resource;
 }
 
+/* Slot 1 of wl_shm has two names depending on which libwayland headers this
+ * tree is compiled against: destroy up to 1.22, release from 1.23, same opcode,
+ * same destructor. It is therefore filled positionally — a designated
+ * `.release` does not exist on 1.22 and `.destroy` does not exist on 1.23. A
+ * NULL slot is not a refused request: libwayland-server wl_aborts with
+ * "listener function for opcode 1 of wl_shm is NULL", which takes the nested
+ * compositor, its widget and the whole host down. On the 1.22 headers that
+ * Ubuntu 24.04 ships, wl_shm_destroy() sends exactly that byte, so an ordinary
+ * client tearing its shm proxy down reaches it without trying to. */
+static void
+shm_release (struct wl_client *client, struct wl_resource *resource)
+{
+  /* "Objects created via this interface remain unaffected": the pools keep
+   * their own references, so only the resource goes. */
+  wl_resource_destroy (resource);
+}
+
 static const struct wl_shm_interface shm_impl = {
-  .create_pool = shm_create_pool,
+  shm_create_pool,
+  shm_release,
 };
 
 static void
@@ -2587,7 +2605,11 @@ nested_compositor_new (GError **error)
     wl_global_create (self->display, &wl_compositor_interface, 4, self,
                       compositor_bind);
   self->global_shm =
-    wl_global_create (self->display, &wl_shm_interface, 1, self, shm_bind);
+    /* Version 2 exists to name one thing: the release request. It is implemented
+     * above, so it can be advertised — and advertising it is what makes
+     * test/shm-client.c --shm-release able to reach the slot at all, instead of
+     * being turned away by libwayland-server's own version check. */
+    wl_global_create (self->display, &wl_shm_interface, 2, self, shm_bind);
   self->global_output =
     wl_global_create (self->display, &wl_output_interface, 4, self, output_bind);
   self->global_xdg_wm_base =

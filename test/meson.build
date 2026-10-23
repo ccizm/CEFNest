@@ -109,6 +109,7 @@ test('map-cycle',
 # copy of the test, built against GTK, as a client of its own compositor.
 foreach mode : [ 'plain', 'dmabuf', 'text-input', 'cursor-shape', 'popup',
                  'refused', 'pool-budget', 'wrong-object', 'pool-shrink',
+                 'shm-release',
                  'empty-copy', 'popup-depth', 'popup-cycle', 'popup-overflow',
                  'drag-fake-serial', 'damage-scale',
                  'drag-no-source',
