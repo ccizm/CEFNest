@@ -213,6 +213,8 @@ seed/watch variables, `CHROMIUM_A11Y`); see `src/main.c`.
 - `docs/control-channel.md` — the NDJSON protocol between session and helper
   (commands, events, the four interaction shapes). Only needed for custom
   helpers or direct channel work.
+- `site/` — the project page (Vite + Vue + Bootstrap); `npm run dev` and
+  `npm run build` inside it.
 
 ## License
 

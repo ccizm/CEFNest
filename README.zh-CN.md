@@ -206,6 +206,8 @@ demo 还会读取一些额外的开关（`CEFNEST_DOWNLOAD_*`、`CEFNEST_PERMISS
 
 - `docs/control-channel.zh-CN.md` —— session 与 helper 之间的 NDJSON 协议
   （命令、事件、四种交互形态）。只有自行编写 helper 或直接驱动通道时才需要。
+- `site/` —— 项目主页（Vite + Vue + Bootstrap）；在目录里运行 `npm run dev`
+  或 `npm run build`。
 
 ## 许可
 
