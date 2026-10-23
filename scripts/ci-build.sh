@@ -96,7 +96,12 @@ rm -rf builddir
 # libcefnest.so.0.0.1 — meson's own default — while the deb beside it in the
 # same Release carries libcefnest.so.$PACKAGE_VERSION, and the two version
 # strings a reader is told to compare turn out to describe different files.
-meson setup builddir -Dcefnest-version="$PACKAGE_VERSION"
+#
+# -Dprefix=/usr is what makes the build tree's demo usable against the packages:
+# the helper path is compiled into the demo from the prefix, and the package
+# installs it at /usr/libexec/cefnest/<arch>/. With the default /usr/local the
+# demo would look under /usr/local and not find the helper it was shipped beside.
+meson setup builddir -Dprefix=/usr -Dcefnest-version="$PACKAGE_VERSION"
 ninja -C builddir
 
 # Keep src/, examples/ and test/ as directories. The demo looks for its library
@@ -139,93 +144,73 @@ CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION)
 
 ## 中文
 
-本版变更（相对 154.0.34-5）：
+本版只改发布形态，组件行为与 154.0.34-6 相同：
 
-- \`wl_shm\` 的请求槽 1 现在有实现，全局版本升到 2：Wayland 1.22 上客户端正常销毁
-  自己的 \`wl_shm\` 代理不再命中空槽，把嵌套合成器连同宿主一起 \`wl_abort\`。源码
-  审计把显式 \`NULL\`/\`0\` 初始化式也算作空槽；新运行时门禁
-  \`seat-selftest-shm-release\` 发一条裸请求并要求连接继续被服务，\`--wrong-object\`
-  的帧头也按真实布局（对象 id 在前）修正。
-- CEF 子进程改用 \`_exit(code)\` 离开 \`main()\`，不再走栈保护尾言。CEF 154 的
-  fork-without-exec 子进程继承父进程的 canary 槽，正常返回会打出
-  \`*** stack smashing detected ***\` 并以 SIGABRT 收尾；\`test/ci-session.sh\`
-  已把这类行从“容忍的沙箱噪声”改成失败。
-- helper 把“页面没了”和“进程没了”分成两个时刻：\`::closed\` 仍由页面关闭发出，
-  新增的 \`::helper-exited\` 在 \`child_waited()\` 收走子进程之后才发。宿主若拥有
-  helper 正在画的嵌套 compositor，就该等后者再拆——\`systemctl stop\`/注销时
-  helper 先报 \`closed\`、再在 \`CefShutdown()\` 里继续用那条 Wayland 连接，先拆
-  会让它的 GDK 打出 \`Lost connection to Wayland compositor\` 并把进程结束在
-  \`main()\` 尾部之前。demo 的脚本在 helper 主动退出时据此推迟退出，
-  \`test/helper-signal-gate.sh\` 的 \`load\`/\`wait\`/\`quit\` 因此保留 pending 步并
-  真正走到这条路径；每边 9 条断言，改完连跑 10 次全绿（此前 11 次里红 2 次）。
+- 安装包从四个收敛为两个：\`cefnest\` 是 GTK 4 组件库本身，连同它启动的
+  \`cefnest-helper\`（含完整 CEF 运行时）一起交付；\`cefnest-dev\` 只放头文件、
+  链接用 \`.so\` 与 \`cefnest.pc\`。组件库以系统库 \`libcefnest.so.0\` 安装，
+  原本就精确依赖同版本 helper，拆开只是把 1.5 GB 的下载藏到依赖里；现在它
+  直接成为主包的一部分。
+- \`cefnest-demo\` 与 \`shm-client\` 不再单独发包。它们是开发/测试工具，留在
+  \`cefnest-build.tar.gz\` 的 \`src/\` 与 \`test/\` 里；CI 仍用构建树跑它们。
+- 构建树改为按 \`-Dprefix=/usr\` 编译，解包后的 demo 会直接找到安装包放在
+  \`/usr/libexec/cefnest/<arch>/\` 的 helper，不再需要设置 \`CHROMIUM_HELPER\`。
+- 旧包名可平滑升级：deb 用 \`Replaces\`/\`Breaks\`，rpm 用 \`Obsoletes\`，从 -6
+  升级不需要手工卸载 \`libcefnest0\`、\`cefnest-helper\` 或 \`cefnest-demo\`。
+- 取消 \`cefnest-packages-*.tar.gz\`：两个包已经包含全量，合集只会把同一份
+  deb 与 rpm 再打包一遍。
 
 ### 附件说明
 
 | 文件 | 说明 |
 | --- | --- |
-| cefnest-build.tar.gz | 构建树：\`src/\`（\`libcefnest.so\`、\`libcefnest.so.0\`、\`libcefnest.so.$PACKAGE_VERSION\`、\`cefnest-demo\`）、\`examples/\`（$EXAMPLE_COUNT 个示例）、\`test/\`（\`shm-client\`、\`seat-selftest\`）。解包后保持这三层目录，二进制会用自身的 \`\$ORIGIN\` rpath 找到同批的库。**不含 helper、不含 CEF 运行时**：要渲染页面得装下面的 cefnest-helper 包，或用 \`CHROMIUM_HELPER\` 指到一个已构建的 helper |
-| libcefnest0_${V}_amd64.deb | 运行库：合成器、GTK 4 部件与控制通道 |
-| libcefnest-dev_${V}_amd64.deb | 开发文件：头文件、链接用 .so、cefnest.pc |
-| cefnest-helper_${V}_amd64.deb | helper 与完整 CEF 运行时（约 1.5 GB）。它是 libcefnest0 的依赖，装库会把它一起拉进来 |
-| cefnest-demo_${V}_amd64.deb | 演示浏览器与回退客户端 shm-client |
-| cefnest-$V.x86_64.rpm | 运行库（rpm） |
+| cefnest-build.tar.gz | 构建树：\`src/\`（\`libcefnest.so\`、\`.so.0\`、\`.so.$PACKAGE_VERSION\`、\`cefnest-demo\`）、\`examples/\`（$EXAMPLE_COUNT 个示例）、\`test/\`（\`shm-client\`、\`seat-selftest\`）。解包后保持这三层目录，二进制会用自身的 \`\$ORIGIN\` rpath 找到同批的库。**不含 helper、不含 CEF 运行时**：装 \`cefnest\` 后，\`src/cefnest-demo\` 会直接找到安装位置里的 helper |
+| cefnest_${V}_amd64.deb | GTK 4 组件库：\`libcefnest.so.0\` + \`cefnest-helper\` + 完整 CEF 运行时（安装后约 1.5 GB） |
+| cefnest-dev_${V}_amd64.deb | 开发文件：三个头文件、链接用 \`.so\`、\`cefnest.pc\` |
+| cefnest-$V.x86_64.rpm | GTK 4 组件库（rpm） |
 | cefnest-devel-$V.x86_64.rpm | 开发文件（rpm） |
-| cefnest-helper-$V.x86_64.rpm | helper 与 CEF 运行时（rpm） |
-| cefnest-demo-$V.x86_64.rpm | demo 与 shm-client（rpm） |
-| cefnest-packages-$V.tar.gz | 除 helper 外 6 个包的归档 |
 | SHA256SUMS | dist/ 下全部上传物的 SHA-256 清单，含 cefnest-build.tar.gz |
 
 ---
 
 ## English
 
-Highlights of this release (relative to 154.0.34-5):
+This release changes the packaging only; the component's behaviour is unchanged
+from 154.0.34-6.
 
-- Request slot 1 of \`wl_shm\` is implemented and the global is advertised at
-  version 2: on Wayland 1.22 a client that destroys its own \`wl_shm\` proxy no
-  longer hits an empty slot and \`wl_abort\`s the nested compositor together with
-  the host. The source audit now counts explicit \`NULL\`/\`0\` initializers as
-  empty slots, a new runtime gate (\`seat-selftest-shm-release\`) sends the raw
-  request and requires the connection to keep being served, and the
-  \`--wrong-object\` frame header was corrected to the real layout (object id
-  first).
-- CEF subprocesses leave \`main()\` with \`_exit(code)\` instead of returning
-  through the stack protector. CEF 154's fork-without-exec children inherit the
-  parent's canary slot, so a normal return printed
-  \`*** stack smashing detected ***\` and ended in SIGABRT; \`test/ci-session.sh\`
-  now treats that line as a failure instead of a tolerated sandbox message.
-- The helper now separates "the page is gone" from "the process is gone":
-  \`::closed\` still comes when the browser closes, and the new
-  \`::helper-exited\` follows once \`child_waited()\` has reaped the child. A host
-  that owns the nested compositor the helper draws into should tear it down on
-  the latter — on \`systemctl stop\` or a logout the helper reports \`closed\`
-  and then spends \`CefShutdown()\` still using that Wayland connection, so
-  tearing the display down first makes its GDK print
-  \`Lost connection to Wayland compositor\` and end the process before the tail
-  of \`main()\`. The demo now defers its scripted quit, and
-  \`test/helper-signal-gate.sh\` keeps a pending \`wait\`/\`quit\` step so it
-  exercises that path; nine assertions per signal, 10 consecutive green runs
-  after the fix (the old shape failed 2 of 11).
+- The release now has two packages instead of four: \`cefnest\` is the GTK 4
+  component library itself, shipped with the \`cefnest-helper\` it starts and
+  the complete CEF runtime; \`cefnest-dev\` carries the headers, the unversioned
+  \`.so\` and \`cefnest.pc\`. The library installs system-wide as
+  \`libcefnest.so.0\` and already hard-depended on the exact helper version, so
+  the split only hid a 1.5 GB download behind a dependency; it is now part of
+  the main package.
+- \`cefnest-demo\` and \`shm-client\` are no longer packaged. They are
+  development/test tools and travel in \`cefnest-build.tar.gz\` under \`src/\`
+  and \`test/\`; CI still runs them from there.
+- The build tree is configured with \`-Dprefix=/usr\`, so the unpacked demo
+  finds the installed helper at \`/usr/libexec/cefnest/<arch>/\` without
+  \`CHROMIUM_HELPER\`.
+- Old package names upgrade cleanly: deb uses \`Replaces\`/\`Breaks\`, rpm uses
+  \`Obsoletes\`; upgrading from -6 does not require removing \`libcefnest0\`,
+  \`cefnest-helper\` or \`cefnest-demo\` by hand.
+- \`cefnest-packages-*.tar.gz\` is gone: the two packages already carry
+  everything, and the bundle would only repack the same deb and rpm.
 
 ### Assets
 
 | File | Description |
 | --- | --- |
-| cefnest-build.tar.gz | Build tree: \`src/\` (\`libcefnest.so\`, \`.so.0\`, \`.so.$PACKAGE_VERSION\`, \`cefnest-demo\`), \`examples/\` ($EXAMPLE_COUNT examples), \`test/\` (\`shm-client\`, \`seat-selftest\`). Keep the three directories when unpacking — the binaries find this same library through their own \`\$ORIGIN\` rpath. **No helper, no CEF runtime**: render a page by installing the cefnest-helper package below, or point \`CHROMIUM_HELPER\` at a built helper |
-| libcefnest0_${V}_amd64.deb | Runtime library: compositor, GTK 4 widget, control channel |
-| libcefnest-dev_${V}_amd64.deb | Development files: headers, link .so, cefnest.pc |
-| cefnest-helper_${V}_amd64.deb | Helper and full CEF runtime (~1.5 GB). libcefnest0 depends on it, so installing the library pulls this in |
-| cefnest-demo_${V}_amd64.deb | Demo browser and the shm-client fallback |
-| cefnest-$V.x86_64.rpm | Runtime library (rpm) |
+| cefnest-build.tar.gz | Build tree: \`src/\` (\`libcefnest.so\`, \`.so.0\`, \`.so.$PACKAGE_VERSION\`, \`cefnest-demo\`), \`examples/\` ($EXAMPLE_COUNT examples), \`test/\` (\`shm-client\`, \`seat-selftest\`). Keep the three directories when unpacking — the binaries find this same library through their own \`\$ORIGIN\` rpath. **No helper, no CEF runtime**: after installing \`cefnest\`, \`src/cefnest-demo\` finds the installed helper directly |
+| cefnest_${V}_amd64.deb | GTK 4 component library: \`libcefnest.so.0\` + \`cefnest-helper\` + complete CEF runtime (~1.5 GB installed) |
+| cefnest-dev_${V}_amd64.deb | Development files: headers, link \`.so\`, \`cefnest.pc\` |
+| cefnest-$V.x86_64.rpm | GTK 4 component library (rpm) |
 | cefnest-devel-$V.x86_64.rpm | Development files (rpm) |
-| cefnest-helper-$V.x86_64.rpm | Helper and CEF runtime (rpm) |
-| cefnest-demo-$V.x86_64.rpm | Demo and shm-client (rpm) |
-| cefnest-packages-$V.tar.gz | Archive of the six packages except the helper |
 | SHA256SUMS | SHA-256 manifest for everything in dist/, cefnest-build.tar.gz included |
 
-The helper packages carry the CEF runtime. Dependencies are layered, never
-circular: install cefnest-helper first, libcefnest0 depends on it, and the
--dev and demo packages pull in the library.
+Install \`cefnest\` to run a host application or the build-tree demo; add
+\`cefnest-dev\` only when compiling against the library. The demo is not part of
+either package.
 EOF
 
 echo "== ci build done"

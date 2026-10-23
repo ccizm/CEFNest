@@ -530,11 +530,11 @@ on_zoom_changed (ChromiumSession *session, double level, gpointer data)
       </p>
       <CodeBlock label="bash" lang="bash" :code="`cc host.c -o host \$(pkg-config --cflags --libs cefnest)`" />
       <div class="doc-note">
-        从<router-link to="/downloads">下载页</router-link>安装 <code>libcefnest0</code> 与
-        <code>libcefnest-dev</code>，或按<router-link to="/dev/build">从源码构建</router-link>
-        装进同一个 prefix——两条路都会留下 <code>cefnest.pc</code>，同一行命令即可。渲染页面还需要
-        <code>cefnest-helper</code>（安装包已带；源码构建时开 <code>install-helper</code>）。
-        下文的示例程序两种路径都适用。
+        从<router-link to="/downloads">下载页</router-link>安装 <code>cefnest</code> 与
+        <code>cefnest-dev</code>，或按<router-link to="/dev/build">从源码构建</router-link>
+        装进同一个 prefix——两条路都会留下 <code>cefnest.pc</code>，同一行命令即可。组件包已经带着
+        <code>cefnest-helper</code> 与 CEF；源码构建时要开 <code>install-helper</code>，
+        渲染页面才不需要另外指路径。下文的示例程序两种路径都适用。
       </div>
       <h2>三个对象，一条硬性顺序</h2>
       <CodeBlock label="examples/minimal.c · 节选" :code="quickCode" lang="c" />

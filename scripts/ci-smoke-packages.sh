@@ -2,11 +2,16 @@
 # ci-smoke-packages.sh — install the packages the way a user does, then check
 # what a user would find.
 #
+# Since 154.0.34-7 there are two packages: cefnest (the GTK 4 component library
+# plus cefnest-helper and its CEF runtime) and cefnest-dev (headers, link .so and
+# cefnest.pc). The demo and shm-client are development/test tools and are not
+# packaged; they are checked out of cefnest-build.tar.gz instead.
+#
 # The tag pipeline used to build the packages and stop there: nothing proved the
-# four deb Depends strings (hand-written, in scripts/build-packages.sh) name
-# libraries that exist, that the CEF runtime really travels next to the helper,
-# or that the 1.5 GB of files satisfy each other's loader. All three are the
-# kind of thing a user finds out by having nothing on screen.
+# Depends strings (hand-written, in scripts/build-packages.sh) name libraries
+# that exist, that the CEF runtime really travels next to the helper, or that
+# the 1.5 GB of files satisfy each other's loader. All three are the kind of
+# thing a user finds out by having nothing on screen.
 #
 # The sandbox question this also answers: chrome-sandbox ships 0755 and the
 # helper starts with the sandbox on, so a host that restricts unprivileged user
@@ -41,6 +46,14 @@ CEF_VERSION=$(cat third_party/cef/dist/.cef-version)
 CHROMIUM_VERSION=$(cat third_party/cef/dist/.chromium-version)
 VERSION=$(cat third_party/cef/dist/.cef-package-version)
 RELEASE=${CEFNEST_PACKAGE_RELEASE:-1}
+V="$VERSION-$RELEASE"
+DEB_ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
+MULTIARCH=$(gcc -print-multiarch 2>/dev/null || true)
+
+MAIN_DEB="$DIST/cefnest_${V}_${DEB_ARCH}.deb"
+DEV_DEB="$DIST/cefnest-dev_${V}_${DEB_ARCH}.deb"
+MAIN_RPM="$DIST/cefnest-${V}.${ARCH}.rpm"
+DEV_RPM="$DIST/cefnest-devel-${V}.${ARCH}.rpm"
 
 fails=0
 ok() { printf '  ok   %s\n' "$1"; }
@@ -65,6 +78,17 @@ fi
 echo "== smoke: the manifest covers what the pipeline uploads"
 # The build tarball is hashed here too — it is moved into dist/ by
 # build-packages.sh for exactly this reason.
+for expected in cefnest-build.tar.gz "$MAIN_DEB" "$DEV_DEB" "$MAIN_RPM" "$DEV_RPM" SHA256SUMS; do
+  case "$expected" in
+    /*) [ -f "$expected" ] || bad "missing release asset: $expected" ;;
+    *)  [ -f "$DIST/$expected" ] || bad "missing release asset: $DIST/$expected" ;;
+  esac
+done
+if [ -f "$MAIN_DEB" ] && [ -f "$DEV_DEB" ] &&
+   [ -f "$MAIN_RPM" ] && [ -f "$DEV_RPM" ]; then
+  ok "the two packages exist in both formats"
+fi
+
 if (cd "$DIST" && sha256sum -c SHA256SUMS >/dev/null); then
   if grep -q cefnest-build.tar.gz "$DIST/SHA256SUMS"; then
     ok "SHA256SUMS verifies, and lists cefnest-build.tar.gz"
@@ -76,38 +100,63 @@ else
   (cd "$DIST" && sha256sum -c SHA256SUMS 2>&1 | tail -12) | sed 's/^/         /'
 fi
 
+# The old four-package layout and the bundle should not come back by accident.
+if ls "$DIST"/libcefnest0_* "$DIST"/libcefnest-dev_* \
+      "$DIST"/cefnest-helper_* "$DIST"/cefnest-demo_* \
+      "$DIST"/cefnest-packages-* >/dev/null 2>&1; then
+  bad "dist/ contains a package from the retired -6 layout"
+else
+  ok "no retired package names or package bundle in dist/"
+fi
+
 echo "== smoke: package contents"
 # dpkg -c needs no root and no install: it reads the archive. Checking the names
 # inside the .deb is what catches "the helper is there but its runtime is not"
 # before anything tries to load it.
-for pkg in libcefnest0 libcefnest-dev cefnest-demo cefnest-helper; do
-  deb="$DIST/${pkg}_${VERSION}-${RELEASE}_amd64.deb"
-  [ -f "$deb" ] || { bad "no $deb"; continue; }
-  ok "present: $deb"
-done
-
-HELPER_LIST=$(dpkg -c "$DIST/cefnest-helper_${VERSION}-${RELEASE}_amd64.deb" 2>/dev/null || true)
+MAIN_LIST=$(dpkg -c "$MAIN_DEB" 2>/dev/null || true)
 for needed in "$HELPER_DIR/cefnest-helper" "$HELPER_DIR/libcef.so" \
               "$HELPER_DIR/icudtl.dat" "$HELPER_DIR/resources.pak" \
               "$HELPER_DIR/v8_context_snapshot.bin" "$HELPER_DIR/chrome-sandbox" \
               "$HELPER_DIR/locales"; do
-  case "$HELPER_LIST" in
-    *"$needed"*) ok "cefnest-helper carries $needed" ;;
-    *) bad "cefnest-helper does not carry $needed" ;;
+  case "$MAIN_LIST" in
+    *"$needed"*) ok "cefnest carries $needed" ;;
+    *) bad "cefnest does not carry $needed" ;;
   esac
 done
 
-LIB_LIST=$(dpkg -c "$DIST/libcefnest0_${VERSION}-${RELEASE}_amd64.deb" 2>/dev/null || true)
-case "$LIB_LIST" in
-  *"libcefnest.so.$VERSION"*) ok "libcefnest0 carries the versioned object" ;;
-  *) bad "libcefnest0 has no libcefnest.so.$VERSION — check -Dcefnest-version" ;;
+case "$MAIN_LIST" in
+  *"libcefnest.so.$VERSION"*) ok "cefnest carries the versioned library object" ;;
+  *) bad "cefnest has no libcefnest.so.$VERSION — check -Dcefnest-version" ;;
+esac
+case "$MAIN_LIST" in
+  *cefnest-demo*) bad "cefnest carries cefnest-demo; the demo belongs to the build tree" ;;
+  *) ok "cefnest carries no demo" ;;
+esac
+case "$MAIN_LIST" in
+  *shm-client*) bad "cefnest carries shm-client; it is a test client" ;;
+  *) ok "cefnest carries no shm-client" ;;
+esac
+
+DEV_LIST=$(dpkg -c "$DEV_DEB" 2>/dev/null || true)
+for needed in "usr/include/cefnest/chromium-session.h" \
+              "usr/include/cefnest/chromium-view.h" \
+              "usr/include/cefnest/nested.h" \
+              "pkgconfig/cefnest.pc"; do
+  case "$DEV_LIST" in
+    *"$needed"*) ok "cefnest-dev carries $needed" ;;
+    *) bad "cefnest-dev does not carry $needed" ;;
+  esac
+done
+case "$DEV_LIST" in
+  *libcef.so*) bad "cefnest-dev carries the CEF runtime; that belongs in cefnest" ;;
+  *) ok "cefnest-dev carries no CEF runtime" ;;
 esac
 
 # chrome-sandbox is deliberately 0755: this project ships no setuid helper and
 # no AppArmor profile it has not measured (docs/internals/sandbox-policy.md §6).
 # The mode is asserted so a future packaging change cannot quietly turn it into
 # a privilege-escalation surface nobody reviewed.
-SBX_MODE=$(dpkg -c "$DIST/cefnest-helper_${VERSION}-${RELEASE}_amd64.deb" 2>/dev/null |
+SBX_MODE=$(printf '%s\n' "$MAIN_LIST" |
   awk -v p="$HELPER_DIR/chrome-sandbox" '$0 ~ p { print substr($1, 1, 10); exit }')
 if [ "$SBX_MODE" = "-rwxr-xr-x" ]; then
   ok "chrome-sandbox is 0755 (not setuid, as decided)"
@@ -117,57 +166,65 @@ fi
 
 # Policy §12.5: a binary package's copyright file lives in the data tree, at
 # /usr/share/doc/<package>/copyright. This is checked where it is read from —
-# the first version wrote DEBIAN/copyright instead, dpkg never installs that
-# member, and lintian still reported E: no-copyright-file. Reading the member
-# out of the archive costs one pass over the helper's 1.5 GB and runs without
-# root, so the reduced CI_SMOKE_SKIP_INSTALL=1 pass still checks it.
-for pkg in libcefnest0 libcefnest-dev cefnest-demo cefnest-helper; do
-  deb="$DIST/${pkg}_${VERSION}-${RELEASE}_amd64.deb"
-  [ -f "$deb" ] || { bad "no $deb to read the copyright from"; continue; }
-  dep5=$(dpkg-deb --fsys-tarfile "$deb" 2>/dev/null |
-         tar -xO "./usr/share/doc/$pkg/copyright" 2>/dev/null || true)
-  case "$dep5" in
-    *copyright-format/1.0*License:\ LGPL-2.1*)
-      ok "$pkg ships /usr/share/doc/$pkg/copyright" ;;
-    *) bad "$pkg has no usable /usr/share/doc/$pkg/copyright" ;;
-  esac
-  if [ "$pkg" = cefnest-helper ]; then
-    case "$dep5" in
-      *"Files: usr/libexec/cefnest/"*BSD-3-clause*)
-        ok "cefnest-helper records the CEF runtime as BSD-3-clause" ;;
-      *) bad "cefnest-helper does not record a license for the CEF runtime it carries" ;;
-    esac
-  fi
-done
+# reading the member out of the archive costs one pass over the 1.5 GB and runs
+# without root, so the reduced CI_SMOKE_SKIP_INSTALL=1 pass still checks it.
+MAIN_DEP5=$(dpkg-deb --fsys-tarfile "$MAIN_DEB" 2>/dev/null |
+  tar -xO ./usr/share/doc/cefnest/copyright 2>/dev/null || true)
+case "$MAIN_DEP5" in
+  *copyright-format/1.0*License:\ LGPL-2.1*)
+    ok "cefnest ships /usr/share/doc/cefnest/copyright" ;;
+  *) bad "cefnest has no usable /usr/share/doc/cefnest/copyright" ;;
+esac
+case "$MAIN_DEP5" in
+  *"Files: usr/libexec/cefnest/"*BSD-3-clause*)
+    ok "cefnest records the CEF runtime as BSD-3-clause" ;;
+  *) bad "cefnest does not record a license for the CEF runtime it carries" ;;
+esac
+case "$MAIN_LIST" in
+  *"usr/share/doc/cefnest/LICENSE.cef.txt"*) ok "cefnest carries CEF's license text" ;;
+  *) bad "cefnest does not carry CEF's license text" ;;
+esac
+
+DEV_DEP5=$(dpkg-deb --fsys-tarfile "$DEV_DEB" 2>/dev/null |
+  tar -xO ./usr/share/doc/cefnest-dev/copyright 2>/dev/null || true)
+case "$DEV_DEP5" in
+  *copyright-format/1.0*License:\ LGPL-2.1*)
+    ok "cefnest-dev ships /usr/share/doc/cefnest-dev/copyright" ;;
+  *) bad "cefnest-dev has no usable /usr/share/doc/cefnest-dev/copyright" ;;
+esac
 
 if ls "$DIST"/*.rpm >/dev/null 2>&1; then
   echo "== smoke: rpm contents (listed, not installed — this is a Debian host)"
   command -v rpm >/dev/null 2>&1 || { note "no rpm tool: skipping the rpm listing"; }
   if command -v rpm >/dev/null 2>&1; then
-    for rpm_name in "cefnest-${VERSION}-${RELEASE}.$ARCH.rpm" \
-                    "cefnest-devel-${VERSION}-${RELEASE}.$ARCH.rpm" \
-                    "cefnest-demo-${VERSION}-${RELEASE}.$ARCH.rpm" \
-                    "cefnest-helper-${VERSION}-${RELEASE}.$ARCH.rpm"; do
-      [ -f "$DIST/$rpm_name" ] || { bad "no $DIST/$rpm_name"; continue; }
-      if rpm -qp --requires "$DIST/$rpm_name" >/dev/null 2>&1; then
-        ok "rpm -qp readable: $rpm_name"
+    for rpm_name in "$MAIN_RPM" "$DEV_RPM"; do
+      [ -f "$rpm_name" ] || { bad "no $rpm_name"; continue; }
+      if rpm -qp --requires "$rpm_name" >/dev/null 2>&1; then
+        ok "rpm -qp readable: $(basename "$rpm_name")"
       else
         bad "rpm -qp failed on $rpm_name"
       fi
     done
-    case "$(rpm -qlp "$DIST/cefnest-helper-${VERSION}-${RELEASE}.$ARCH.rpm" 2>/dev/null || true)" in
-      *"$HELPER_DIR/libcef.so"*) ok "the helper rpm carries the CEF runtime too" ;;
-      *) bad "the helper rpm does not list $HELPER_DIR/libcef.so" ;;
+    case "$(rpm -qlp "$MAIN_RPM" 2>/dev/null || true)" in
+      *"$HELPER_DIR/libcef.so"*) ok "the cefnest rpm carries the CEF runtime too" ;;
+      *) bad "the cefnest rpm does not list $HELPER_DIR/libcef.so" ;;
     esac
-    # Reported, not asserted: the spec's own Requires for the helper is one line
-    # (glibc), so whether a host is told about libnss3/libgbm and the rest comes
-    # from rpmbuild's own soname discovery — which %global __os_install_post
-    # %{nil} does *not* cover (that macro stops the brp post-processing, not
-    # find-requires). Nobody in this repo has an rpm host to have measured it
-    # on, so the line below is the measurement, and docs/testing/cnb-ci.md is
-    # meant to be updated from what a real run prints.
-    note "cefnest rpm --requires: $(rpm -qp --requires \
-      "$DIST/cefnest-helper-${VERSION}-${RELEASE}.$ARCH.rpm" 2>/dev/null |
+    case "$(rpm -qlp "$MAIN_RPM" 2>/dev/null || true)" in
+      *cefnest-demo*) bad "the cefnest rpm carries the demo" ;;
+      *) ok "the cefnest rpm carries no demo" ;;
+    esac
+    case "$(rpm -qlp "$DEV_RPM" 2>/dev/null || true)" in
+      *cefnest.pc*) ok "the devel rpm carries cefnest.pc" ;;
+      *) bad "the devel rpm does not list cefnest.pc" ;;
+    esac
+    # Reported, not asserted: the spec's own Requires for the main package is a
+    # short list, so whether a host is told about libnss3/libgbm and the rest
+    # comes from rpmbuild's own soname discovery — which %global
+    # __os_install_post %{nil} does *not* cover (that macro stops the brp
+    # post-processing, not find-requires). Nobody in this repo has an rpm host
+    # to have measured it on, so the line below is the measurement, and
+    # docs/testing/cnb-ci.md is meant to be updated from what a real run prints.
+    note "cefnest rpm --requires: $(rpm -qp --requires "$MAIN_RPM" 2>/dev/null |
       tr '\n' ' ')"
   fi
 fi
@@ -189,12 +246,9 @@ if [ "$AS_ROOT" = 1 ]; then
     umount /etc/localtime 2>/dev/null || true
   fi
   apt-get update -qq
-  if apt-get install -y --no-install-recommends \
-       "$DIST/libcefnest0_${VERSION}-${RELEASE}_amd64.deb" \
-       "$DIST/cefnest-helper_${VERSION}-${RELEASE}_amd64.deb" \
-       "$DIST/cefnest-demo_${VERSION}-${RELEASE}_amd64.deb" \
+  if apt-get install -y --no-install-recommends "$MAIN_DEB" "$DEV_DEB" \
        >"$DIST/smoke-install.log" 2>&1; then
-    ok "apt resolved and installed libcefnest0, cefnest-helper, cefnest-demo"
+    ok "apt resolved and installed cefnest and cefnest-dev"
   else
     bad "the install failed — a Depends string is wrong or unsatisfiable"
     tail -20 "$DIST/smoke-install.log" | sed 's/^/         /'
@@ -202,7 +256,7 @@ if [ "$AS_ROOT" = 1 ]; then
 
   echo "== smoke: the installed loader is satisfied"
   # ldd on the *installed* paths is the point: the helper loads libcef.so from
-  # $ORIGIN, and a runtime file that came along under the wrong name shows up
+  # $ORIGIN, and a CEF runtime file that came along under the wrong name shows up
   # here as a "not found" rather than as a window that never paints.
   LIBSO=$(ls /usr/lib/*/libcefnest.so.0 2>/dev/null | head -1)
   [ -n "$LIBSO" ] || { bad "no installed libcefnest.so.0 to run ldd on"; }
@@ -218,6 +272,84 @@ if [ "$AS_ROOT" = 1 ]; then
   else
     ok "ldd $HELPER_DIR/cefnest-helper is satisfied"
   fi
+  if [ -e /usr/bin/cefnest-demo ]; then
+    bad "the cefnest install put a cefnest-demo binary in /usr/bin"
+  else
+    ok "no demo binary was installed"
+  fi
+
+  echo "== smoke: pkg-config finds the installed development files"
+  PKG_CONFIG_PATH=$(ls -d /usr/lib/*/pkgconfig 2>/dev/null | head -1 || true)
+  export PKG_CONFIG_PATH
+  if pkg-config --exists cefnest; then
+    ok "pkg-config --exists cefnest"
+  else
+    bad "pkg-config cannot find cefnest.pc"
+  fi
+  PROBE_DIR=$(mktemp -d)
+  cat > "$PROBE_DIR/probe.c" <<'PROBE'
+#include <cefnest/chromium-session.h>
+#include <stdio.h>
+
+int
+main (void)
+{
+  ChromiumSession *session = chromium_session_new (NULL);
+  const char *path = chromium_session_get_helper_path (session);
+
+  printf ("%s\n", path);
+  g_object_unref (session);
+  return 0;
+}
+PROBE
+  if cc "$PROBE_DIR/probe.c" -o "$PROBE_DIR/probe" \
+       $(pkg-config --cflags --libs cefnest) >"$PROBE_DIR/cc.log" 2>&1; then
+    ok "a host compiles with pkg-config --cflags --libs cefnest"
+    PROBE_OUT=$("$PROBE_DIR/probe" 2>&1 || true)
+    if [ "$PROBE_OUT" = "$HELPER_DIR/cefnest-helper" ]; then
+      ok "the installed library names the packaged helper path"
+    else
+      bad "helper path reads as '${PROBE_OUT:-<empty>}', expected $HELPER_DIR/cefnest-helper"
+    fi
+  else
+    bad "the pkg-config compile failed"
+    tail -20 "$PROBE_DIR/cc.log" | sed 's/^/         /'
+  fi
+  rm -rf "$PROBE_DIR"
+
+  echo "== smoke: the build-tree demo names the installed helper"
+  DEMO_TREE=$(mktemp -d)
+  if tar -xzf "$DIST/cefnest-build.tar.gz" -C "$DEMO_TREE"; then
+    if [ -x "$DEMO_TREE/src/cefnest-demo" ]; then
+      ok "cefnest-build.tar.gz carries src/cefnest-demo"
+      # The compiled-in helper path lives in libcefnest, not in the demo: the
+      # demo only links against it. Asking the demo would fail even on a
+      # correct tree, so read the library that sits next to it.
+      TREE_LIB="$DEMO_TREE/src/libcefnest.so.$VERSION"
+      if [ -f "$TREE_LIB" ] &&
+         strings "$TREE_LIB" | grep -qF "$HELPER_DIR/cefnest-helper"; then
+        ok "the build-tree library was compiled with the package helper path"
+      else
+        bad "the build-tree library does not name $HELPER_DIR/cefnest-helper; check -Dprefix=/usr"
+      fi
+      if ldd "$DEMO_TREE/src/cefnest-demo" 2>&1 | grep -q "not found"; then
+        bad "ldd on the build-tree demo has unresolved libraries"
+        ldd "$DEMO_TREE/src/cefnest-demo" 2>&1 | grep "not found" | sed 's/^/         /'
+      else
+        ok "ldd on the build-tree demo is satisfied"
+      fi
+    else
+      bad "cefnest-build.tar.gz has no executable src/cefnest-demo"
+    fi
+    if [ -x "$DEMO_TREE/test/shm-client" ]; then
+      ok "cefnest-build.tar.gz carries test/shm-client"
+    else
+      bad "cefnest-build.tar.gz has no executable test/shm-client"
+    fi
+  else
+    bad "could not unpack cefnest-build.tar.gz"
+  fi
+  rm -rf "$DEMO_TREE"
 
   echo "== smoke: the packaged sandbox default"
   # Started the way a user starts it, with no display: whatever it says, it says

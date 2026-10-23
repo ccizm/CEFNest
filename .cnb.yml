@@ -6,7 +6,7 @@
 # cefnest-helper against it, installs and smoke-tests the deb packages, then
 # creates the Release for that tag and uploads the build tarball plus the
 # installable deb/rpm packages (including the helper and its CEF runtime) as
-# Release assets. Push a version tag such as v154.0.34-6 to publish one.
+# Release assets. Push a version tag such as v154.0.34-7 to publish one.
 # Ordinary branch pushes build nothing here — the full gate (test/ci-all.sh)
 # runs locally or on a prepared self-hosted runner; docs/testing/cnb-ci.md
 # describes both paths.
@@ -23,18 +23,18 @@ $:
       stages:
         - name: check the release strings
           image: ubuntu:24.04
-          script: CEFNEST_PACKAGE_RELEASE=6 CEFNEST_EXPECTED_TAG=v154.0.34-6 ./scripts/check-release-tag.sh
+          script: CEFNEST_PACKAGE_RELEASE=7 CEFNEST_EXPECTED_TAG=v154.0.34-7 ./scripts/check-release-tag.sh
           timeout: 10m
         - name: build
           image: ubuntu:24.04
-          script: CEFNEST_PACKAGE_RELEASE=6 ./scripts/ci-build.sh
+          script: CEFNEST_PACKAGE_RELEASE=7 ./scripts/ci-build.sh
           timeout: 90m
         - name: install and smoke the packages
           image: ubuntu:24.04
           # The runner is root on some pools and a sudo user on others; the
           # script only installs its own packages when it really is root, so
           # escalate first and let it fail loudly if neither works.
-          script: CEFNEST_PACKAGE_RELEASE=6 sh -c 'if [ "$(id -u)" = 0 ]; then exec ./scripts/ci-smoke-packages.sh; else exec sudo -E ./scripts/ci-smoke-packages.sh; fi'
+          script: CEFNEST_PACKAGE_RELEASE=7 sh -c 'if [ "$(id -u)" = 0 ]; then exec ./scripts/ci-smoke-packages.sh; else exec sudo -E ./scripts/ci-smoke-packages.sh; fi'
           timeout: 30m
         - name: create release
           type: git:release
@@ -47,13 +47,8 @@ $:
           settings:
             attachments:
               - "./dist/cefnest-build.tar.gz"
-              - "./dist/libcefnest0_154.0.34-6_amd64.deb"
-              - "./dist/libcefnest-dev_154.0.34-6_amd64.deb"
-              - "./dist/cefnest-demo_154.0.34-6_amd64.deb"
-              - "./dist/cefnest-helper_154.0.34-6_amd64.deb"
-              - "./dist/cefnest-154.0.34-6.x86_64.rpm"
-              - "./dist/cefnest-devel-154.0.34-6.x86_64.rpm"
-              - "./dist/cefnest-demo-154.0.34-6.x86_64.rpm"
-              - "./dist/cefnest-helper-154.0.34-6.x86_64.rpm"
-              - "./dist/cefnest-packages-154.0.34-6.tar.gz"
+              - "./dist/cefnest_154.0.34-7_amd64.deb"
+              - "./dist/cefnest-dev_154.0.34-7_amd64.deb"
+              - "./dist/cefnest-154.0.34-7.x86_64.rpm"
+              - "./dist/cefnest-devel-154.0.34-7.x86_64.rpm"
               - "./dist/SHA256SUMS"

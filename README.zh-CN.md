@@ -109,21 +109,24 @@ ninja -C builddir install
 | --- | --- | --- |
 | `helper-path` | 空，由 `prefix` + `libexecdir` + 主机架构推导 | 编进库里的路径，无人指定时使用 |
 | `helper-build-dir` | `helper/build/Release` | cmake 的构建产物：开发期回退路径，也是被安装的对象 |
-| `install-helper` | `false` | 同时安装 helper 和整套 CEF runtime——约 1.5 GB，因此是可选项 |
+| `install-helper` | `false` | 同时安装 helper 和整套 CEF 运行时——约 1.5 GB，因此是可选项 |
 | `install-demo` | `true` | 安装 `cefnest-demo`，以及无 Chromium 时它回退到的 `shm-client` |
 
 在未跑过 cmake 的构建树上开启 `install-helper` 会在 configure 阶段报错，而不是留下一个空目录、
-配一行看似成功的 "Installing subdir"。安装出去的 helper 对构建它的树一无所需——CEF runtime
+配一行看似成功的 "Installing subdir"。安装出去的 helper 对构建它的树一无所需——CEF 运行时
 随它一起安装，并从它所在目录解析，这是把整个 `third_party/cef/dist` 目录挪走之后实测过的
 （`docs/guides/packaging.md` §9）。
 
-CNB 的发版流水线还会把安装树打成 `libcefnest0`、`libcefnest-dev`、`cefnest-demo`
-和 `cefnest-helper` 的 deb/rpm；装进系统后就能用
-`pkg-config --cflags --libs cefnest` 构建宿主。依赖严格分层、无循环：
-`cefnest-helper`（CEF 运行时）在底层、最先安装，`libcefnest0` 精确依赖对应版本的
-helper，`libcefnest-dev` 与 `cefnest-demo` 精确依赖对应版本的库。四个包共用一个
-版本号——CEF stable `X.Y.Z` 加修订号（`154.0.34-6`）——同一次构建一起发布，
-升级时整体联动。流水线只在版本 tag 上构建，详见 `docs/testing/cnb-ci.md`。
+CNB 的发版流水线把安装树打成两个包，各有 deb 与 rpm 两种格式。`cefnest` 就是
+组件本身：GTK 4 部件库、`cefnest-helper` 和整套 CEF 运行时（安装后约 1.5 GB）。
+它以系统库 `libcefnest.so.0` 装进发行版，只依赖系统库，装它就能运行宿主。
+`cefnest-dev` 放头文件、链接用的 `.so` 与
+`cefnest.pc`，精确依赖对应版本的 `cefnest`；装好后用
+`pkg-config --cflags --libs cefnest` 构建宿主。demo 与 `shm-client` 是开发测试工具，
+不打包，只随 `cefnest-build.tar.gz` 发布。两个包共用一个版本号——CEF stable `X.Y.Z`
+加修订号（`154.0.34-7`）——同一次构建一起发布。从 -6 的四包布局升级由 deb 的
+`Replaces`/`Breaks` 与 rpm 的 `Obsoletes` 处理，不需要手工卸载旧包。流水线只在
+版本 tag 上构建，详见 `docs/testing/cnb-ci.md`。
 
 `cefnest-helper` 默认**开着**沙箱启动 Chromium，而它把 `chrome-sandbox` 原样装成 0755
 ——没有 setuid 位，也不带 AppArmor profile。宿主有可用的非特权用户命名空间时，事情到

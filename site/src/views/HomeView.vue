@@ -194,9 +194,9 @@ const globalsList =
           <div class="col-lg-7">
             <h2 class="fw-bold mb-3">{{ release.version }} 带来了什么</h2>
             <ul class="release-list mb-3">
-              <li><strong>wl_shm 请求槽 1 补齐，全局版本升到 2。</strong> Wayland 1.22 客户端销毁自己的 wl_shm 代理时，不再把嵌套合成器与宿主一起 wl_abort。</li>
-              <li><strong>CEF 子进程改用 _exit()。</strong> 不再穿过继承来的栈保护尾言，此前的“stack smashing detected”与 SIGABRT 不再出现。</li>
-              <li><strong>新增 ::helper-exited。</strong> “页面没了”与 helper 进程真正被收走分成两个时刻，宿主可以等后者再拆合成器。</li>
+              <li><strong>发布包从四个收敛为两个。</strong> <code>cefnest</code> 是 GTK 4 组件库本身，连同 helper 与完整 CEF 一起交付；<code>cefnest-dev</code> 只保留头文件、.so 与 pkg-config。</li>
+              <li><strong>demo 与 shm-client 不再单独发包。</strong> 它们是开发测试工具，只留在 <code>cefnest-build.tar.gz</code> 的 <code>src/</code> 与 <code>test/</code> 里。</li>
+              <li><strong>旧包名可平滑升级。</strong> deb 侧用 Replaces/Breaks、rpm 侧用 Obsoletes 替换 -6 的包名，不需要手工卸载；组件本身行为不变，本版只改发布形态。</li>
             </ul>
             <router-link to="/downloads" class="btn btn-primary">
               <i class="bi bi-download me-1"></i> 下载 {{ release.version }}
@@ -208,7 +208,7 @@ const globalsList =
               <div class="d-flex flex-column gap-3">
                 <router-link to="/downloads" class="docs-next">
                   <span><i class="bi bi-box-seam me-2"></i>下载与安装</span>
-                  <small class="text-secondary">四个包、校验、deb / rpm 命令</small>
+                  <small class="text-secondary">两个包、校验、deb / rpm 命令</small>
                 </router-link>
                 <router-link to="/dev/build" class="docs-next">
                   <span><i class="bi bi-hammer me-2"></i>从源码构建</span>

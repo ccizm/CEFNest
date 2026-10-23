@@ -11,6 +11,8 @@ deb-libcefnest0/
 deb-libcefnest-dev/
 deb-cefnest-demo/
 deb-cefnest-helper/
+deb-cefnest/
+deb-cefnest-dev/
 rpmbuild/
 dist/
 /artifact/

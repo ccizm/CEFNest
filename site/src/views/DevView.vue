@@ -370,9 +370,9 @@ wp_cursor_shape_manager_v1 (1)`
               <h3 class="h6 fw-semibold mb-0">安装 deb / rpm</h3>
             </div>
             <p class="small text-secondary mb-3">
-              四个包：<code>cefnest-helper</code>、<code>libcefnest0</code>、
-              <code>libcefnest-dev</code>、<code>cefnest-demo</code>，同版本发布、锁步升级。
-              编译宿主需要 <code>-dev</code>；渲染页面需要 helper。本版资产为 amd64 / x86_64，
+              两个包：<code>cefnest</code>（GTK 4 组件库、helper 与完整 CEF 运行时）与
+              <code>cefnest-dev</code>（头文件、链接用 .so、pkg-config），同版本发布、锁步升级。
+              编译宿主需要开发包；渲染页面所需的 helper 已在组件包里。本版资产为 amd64 / x86_64，
               包在 Ubuntu 24.04 上构建，需 glibc 2.39+ 与 GTK 4.14+。
             </p>
             <router-link to="/downloads" class="btn btn-sm btn-primary mt-auto align-self-start">
@@ -397,9 +397,9 @@ wp_cursor_shape_manager_v1 (1)`
         </div>
       </div>
       <div class="doc-note">
-        依赖是单向的：<code>cefnest-helper</code> 是底层，<code>libcefnest0</code>
-        精确依赖对应版本的 helper，<code>-dev</code> 与 demo 再依赖运行库。本地安装四个文件时要一起
-        交给包管理器——它不会自动搜索同目录的其它包。细节在
+        依赖是单向的：<code>cefnest-dev</code> 精确依赖对应版本的 <code>cefnest</code>，
+        组件库不再拆出单独的 helper 包。本地安装开发包时两个文件要一起交给包管理器——它不会自动搜索
+        同目录的其它包。demo 与 shm-client 只留在构建树里，不单独发包。细节在
         <router-link to="/downloads">下载页</router-link>。
       </div>
 
@@ -453,7 +453,7 @@ wp_cursor_shape_manager_v1 (1)`
       <p>
         本页对应 <strong>{{ release.version }}</strong>，资产在
         <a :href="release.page" target="_blank" rel="noopener">Release 页</a>。
-        四个包共用这个版本号（CEF stable X.Y.Z 加修订号），同一次构建发布、一起升级。
+        两个包共用这个版本号（CEF stable X.Y.Z 加修订号），同一次构建发布、一起升级。
         <strong>API 尚不稳定</strong>：信号可能加参数，头文件可能在版本之间变形状。宿主应对着自己
         构建的版本编译；已知边角行为见<router-link to="/dev/limits">已知限制</router-link>。
       </p>
@@ -491,7 +491,7 @@ wp_cursor_shape_manager_v1 (1)`
       <div class="doc-note">
         装出的 helper 从自身旁边解析 CEF 运行时——把整个 <code>third_party/cef/dist</code>
         挪走后实测过。安装的 demo 的 <code>DT_RUNPATH</code> 是 <code>$ORIGIN</code> 相对，
-        同样不依赖构建树。宿主二进制若不在这个前缀里链接，运行时仍需
+        同样不依赖构建树。宿主二进制若不在这个前缀里链接，运行时尚需
         <code>LD_LIBRARY_PATH</code> 或 ldconfig 条目。
       </div>
 

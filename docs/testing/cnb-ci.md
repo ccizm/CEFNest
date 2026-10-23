@@ -1,12 +1,12 @@
 # CNB（cnb.cool）接入
 
-仓库根目录的 `.cnb.yml` 只在**发版**时构建：推一个版本 tag（如 `v154.0.34-6`）才触发，
-普通分支推送不触发任何构建——门禁留在本地或自托管 runner 上（§3）。四个 stage 依次是：
+仓库根目录的 `.cnb.yml` 只在**发版**时构建：推一个版本 tag（如 `v154.0.34-7`）才触发，
+普通分支推送不触发任何构建——门禁留在本地或自托管 runner 上（§3）。流水线依次是：
 先比对版本串与 tag（`scripts/check-release-tag.sh`，见 §4）；然后在 CNB 托管 Ubuntu 24.04
 节点上装编译依赖、拉取已验证的 stable CEF 154.0.34、构建 `cefnest-helper`、`meson setup
--Dcefnest-version=…` + `ninja`，把库、demo、全部示例和测试客户端按构建目录布局打成
-`cefnest-build.tar.gz`，再由 `scripts/build-packages.sh` 产出带版本号的 deb 和 rpm
-（`scripts/ci-build.sh` 同时生成 `RELEASE-NOTES.md`）；接着把 `dist/` 里的包真装一遍并冒烟
+-Dprefix=/usr -Dcefnest-version=…` + `ninja`，把库、demo、全部示例和测试客户端按构建目录布局
+打成 `cefnest-build.tar.gz`，再由 `scripts/build-packages.sh` 产出带版本号的两个 deb 和两个
+rpm（`scripts/ci-build.sh` 同时生成 `RELEASE-NOTES.md`）；接着把 `dist/` 里的包真装一遍并冒烟
 （§4.1）；最后创建该 tag 的 Release 并把全部产物作为 Release 资产上传。它不运行
 `test/ci-all.sh`，也不把 helper 或 CEF 运行时放进 `cefnest-build.tar.gz`。
 
@@ -46,62 +46,64 @@ tzdata`。`/etc/timezone` 仍会被写入，后续命令用导出的 `TZ`，不�
 `$ORIGIN/../src`。摊平成一个目录之后这些 rpath 全部指向不存在的地方，"解压即可运行"
 就悄悄变成"解压后请设 `LD_LIBRARY_PATH`"。库版本串由同一次 `meson setup
 -Dcefnest-version=<X.Y.Z>` 决定，和包名里的版本是同一个串——不传这个选项时 meson 会
-用仓库默认值 `0.0.1`，于是同一个 Release 里出现两个版本号。
+用仓库默认值 `0.0.1`，于是同一个 Release 里出现两个版本号。构建树同时用
+`-Dprefix=/usr` 配置：不指定 prefix 时默认是 `/usr/local`，解包后的 demo 会去那里找
+helper，而包把 helper 装在 `/usr/libexec/cefnest/<arch>/`。
 
-不包含 `helper`，也不包含 CEF 运行时（那是 1.5 GB 的 `cefnest-helper` 包）。要在这里
-渲染页面，装下面的包，或者用 `CHROMIUM_HELPER` 指到一个已构建的 helper。
+不包含 `helper`，也不包含 CEF 运行时（它们是 `cefnest` 包的一部分）。要在这里
+渲染页面，装下面的包，或者用 `CHROMIUM_HELPER` 指到一个已构建的 helper。demo 与
+`shm-client` 只在这个归档里，不单独发包。
 
 同一次构建还会在 `dist/` 下产出可安装的 Debian 和 RPM 包：
 
 | 包 | 内容 | 用途 |
 | --- | --- | --- |
-| `cefnest-helper` | `cefnest-helper`、`libcef.so`、`icudtl.dat`、`locales/` 等 | 真实 Chromium 渲染，约 1.5 GB；底层包，只依赖系统库 |
-| `libcefnest0` / `cefnest` | `libcefnest.so.0`、`libcefnest.so.154.0.34` 和一个 `shlibs` 声明 | 运行时依赖；精确依赖 `cefnest-helper (= 版本-修订)` |
-| `libcefnest-dev` / `cefnest-devel` | 三个头文件、`libcefnest.so`、`cefnest.pc` | 用 `pkg-config` 编译宿主；精确依赖 `libcefnest0` |
-| `cefnest-demo` | `cefnest-demo` 和 `/usr/libexec/cefnest/shm-client` | 演示；精确依赖 `libcefnest0` 与 `cefnest-helper` |
+| `cefnest`（deb）/ `cefnest`（rpm） | `libcefnest.so.0`、`libcefnest.so.154.0.34`、`shlibs`，以及 `/usr/libexec/cefnest/<arch>/` 下的 `cefnest-helper`、`libcef.so`、`icudtl.dat`、`locales/` 等 | GTK 4 组件库：嵌套合成器、部件、控制通道，连同 helper 与完整 CEF 运行时，约 1.5 GB；以 `libcefnest.so.0` 装成系统库，只依赖系统库 |
+| `cefnest-dev`（deb）/ `cefnest-devel`（rpm） | 三个头文件、`libcefnest.so`、`cefnest.pc` | 用 `pkg-config` 编译宿主；精确依赖 `cefnest` |
 
-依赖图严格分层、无循环：helper（CEF 运行时）→ `libcefnest0` → `-dev` / demo。
-四个包共用一个版本号——CEF stable `X.Y.Z` 加修订号（`154.0.34-6`）——从同一源码树
-同一次构建产出、同一个 tag 发布，升级时整体联动；单独升级某一个不可行，这正是
-lib 与 helper 之间私有控制协议想要的保护。包版本跟随构建时使用的 CEF stable 版本：
-`cefnest-version` = CEF 的 `X.Y.Z`（当前实测 `154.0.34`），完整 CEF/Chromium 版本
-写进 `cefnest-helper` 的 `Description`。同版本重发用修订号区分：流水线导出
-`CEFNEST_PACKAGE_RELEASE`（`.cnb.yml` 里当前为 `6`），产物名形如
-`libcefnest0_154.0.34-6_amd64.deb`；包管理器把 `-5` 和 `-6` 视为不同版本，
-重发必须递增修订号。`scripts/fetch-cef.sh` 默认取**已验证的** stable
+依赖只有一层：`cefnest-dev` 精确依赖对应版本的 `cefnest`，组件库不再拆出单独的
+helper 包——helper 与库之间的私有控制协议要求它们同批构建，而分开只会让每次装库
+都仍然下载那 1.5 GB。两个包共用一个版本号——CEF stable `X.Y.Z` 加修订号
+（`154.0.34-7`）——从同一源码树同一次构建产出、同一个 tag 发布，升级时整体联动。
+包版本跟随构建时使用的 CEF stable 版本：`cefnest-version` = CEF 的 `X.Y.Z`
+（当前实测 `154.0.34`），完整 CEF/Chromium 版本写进 `cefnest` 的 `Description`。
+同版本重发用修订号区分：流水线导出 `CEFNEST_PACKAGE_RELEASE`（`.cnb.yml` 里当前为
+`7`），产物名形如 `cefnest_154.0.34-7_amd64.deb`；包管理器把 `-6` 和 `-7` 视为
+不同版本，重发必须递增修订号。`scripts/fetch-cef.sh` 默认取**已验证的** stable
 `154.0.34`；`CEF_VERSION=latest` 取 CEF index 当前标为 stable 的最新构建，
 `CEF_VERSION=<完整版本>` 固定其它构建，`CEF_CHANNEL=any` 取任意 channel 的最新构建。
 CEF index 会把同一个构建同时列在 beta 和 stable 下（156.0.7 就是这样），所以默认不
 盲目跟随“最新 stable”，避免未重跑门禁的新 major 自动改掉包版本。
 
 Debian 包按 `amd64`/`arm64` 的 multiarch 路径安装，RPM 包按 `/usr/lib64` 安装，
-两者都由 `meson install` 的安装树直接打包，不移动文件。helper 包把整个 CEF runtime
-放在 `/usr/libexec/cefnest/<arch>/`，`libcefnest0` 编译时烧进去的默认路径正是这里。
+两者都由 `meson install` 的安装树直接打包，不移动文件。`cefnest` 把整个 CEF runtime
+放在 `/usr/libexec/cefnest/<arch>/`，库编译时烧进去的默认 helper 路径正是这里。
 
 ```bash
-# 装一个 cefnest-demo 就够：包管理器按 helper → 库 → demo 自动解算拉齐
-sudo apt install ./cefnest-demo_154.0.34-6_amd64.deb
-# 或者按层安装
-sudo apt install ./cefnest-helper_154.0.34-6_amd64.deb \
-  ./libcefnest0_154.0.34-6_amd64.deb ./libcefnest-dev_154.0.34-6_amd64.deb
-# RPM 系（demo 同样会把库与 helper 拉上）
-sudo dnf install ./cefnest-demo-154.0.34-6.x86_64.rpm
+# 只运行宿主：一个文件就够，helper 与 CEF 都在里面
+sudo apt install ./cefnest_154.0.34-7_amd64.deb
+# 还要编译宿主：把开发包一并给出（apt 不会自动搜索同目录的本地包）
+sudo apt install ./cefnest_154.0.34-7_amd64.deb ./cefnest-dev_154.0.34-7_amd64.deb
+# RPM 系同理
+sudo dnf install ./cefnest-154.0.34-7.x86_64.rpm ./cefnest-devel-154.0.34-7.x86_64.rpm
 
 cc host.c -o host $(pkg-config --cflags --libs cefnest)
 ```
 
-`shm-client` 回退只存在于源码构建：包安装里 `libcefnest0` 硬依赖 helper，
-装库必然带上 1.5 GB 的 CEF 运行时。想在无 CEF 的环境演练合成器，用方法二的
-开发构建（`docs/guides/packaging.md`），demo 会退而驱动 `test/shm-client`。
+`shm-client` 回退只存在于源码构建：发布包只有 `cefnest`，装它必然带上 1.5 GB 的
+CEF 运行时。想在无 CEF 的环境演练合成器，用方法二的开发构建
+（`docs/guides/packaging.md`），demo 会退而驱动 `test/shm-client`；demo 与
+`shm-client` 本身只在 `cefnest-build.tar.gz` 里。
 
-`dist/` 里的产物全部带版本-修订号（`libcefnest0_154.0.34-6_amd64.deb` 等），外加
+`dist/` 里有六个上传物：两个包各两种格式（`cefnest_154.0.34-7_amd64.deb` 等）、
 完整构建树 `cefnest-build.tar.gz` 和 `SHA256SUMS`。CNB 的附件列表不展开 shell
 变量，所以 `.cnb.yml` 里的附件名是静态写死的——升版本或修订号时要同步手改。
 RPM 的 `Requires` 按 Fedora 的包名**手写**（`gtk4`、`libwayland-server`、`mesa-libgbm`
-等，helper 子包只有一行 `glibc >= 2.39`）。spec 里的 `%global __os_install_post %{nil}`
-关掉的是 brp 后处理（strip、压缩 man、`%{_build_id_links}` 一类），**不是**
-`find-requires` 那条依赖抽取——所以 helper 包里 `libcef.so` 的 soname 依赖到底会不会
-自动出现在 `rpm -qp --requires` 里，本仓库还没有一台真正跑过 rpmbuild 的宿主量过它。
+等，另加一行 `glibc >= 2.39`；helper 子包已经不存在）。spec 里的
+`%global __os_install_post %{nil}` 关掉的是 brp 后处理（strip、压缩 man、
+`%{_build_id_links}` 一类），**不是** `find-requires` 那条依赖抽取——所以主包里
+`libcef.so` 的 soname 依赖到底会不会自动出现在 `rpm -qp --requires` 里，本仓库还没有
+一台真正跑过 rpmbuild 的宿主量过它。
 `scripts/ci-smoke-packages.sh` 因此把这一行**打印**出来而不做断言（红或绿都不该由猜
 决定），第一次 CI 跑完应当把结果补回这一段。deb 侧不存在这个不确定性：
 `dpkg-shlibdeps` 直接对 `libcef.so` 与 helper 生成 `Depends`，冒烟 job 再用 apt 真装一遍。
@@ -138,14 +140,14 @@ pinned 版本拉回来，要么明说 `CI_SKIP_HELPER_BUILD=1 ./test/ci-all.sh u
 
 ## 4. 超时与附件
 
-发版流水线是四个 stage 串在一起，顺序有讲究：
+发版流水线是几个 stage 串在一起，顺序有讲究：
 
 | stage | 跑什么 | timeout |
 | --- | --- | --- |
 | `check the release strings` | `scripts/check-release-tag.sh`：`PINNED` × `CEFNEST_PACKAGE_RELEASE` × `.cnb.yml` 的 `CEFNEST_EXPECTED_TAG` 与静态附件名必须互相一致 | 10m |
-| `build` | `scripts/ci-build.sh`：apt 依赖、`fetch-cef.sh`、helper、`builddir`（带 `-Dcefnest-version`）、`dist/` 与 `RELEASE-NOTES.md` | 90m |
+| `build` | `scripts/ci-build.sh`：apt 依赖、`fetch-cef.sh`、helper、`builddir`（带 `-Dprefix=/usr` 与 `-Dcefnest-version`）、`dist/` 与 `RELEASE-NOTES.md` | 90m |
 | `install and smoke the packages` | `scripts/ci-smoke-packages.sh`：见 §4.1 | 30m |
-| `create release` + `upload release assets` | `git:release` 用 `RELEASE-NOTES.md` 建 Release，`cnbcool/attachments` 上传 `dist/` 里那 11 个名字 | — |
+| `create release` + `upload release assets` | `git:release` 用 `RELEASE-NOTES.md` 建 Release，`cnbcool/attachments` 上传 `dist/` 里那 6 个名字 | — |
 
 第一个 stage 存在的理由很简单：附件名是静态的，漏改一个是 90 分钟后才炸；把检查提到
 最前面，同一件事几秒钟就有结论。它只能检查流水线**告诉它**的那个 tag（`CEFNEST_EXPECTED_TAG`
@@ -155,31 +157,39 @@ pinned 版本拉回来，要么明说 `CI_SKIP_HELPER_BUILD=1 ./test/ci-all.sh u
 CNB 没有流水线级 timeout，只有 job 级；`build` 那 90 分钟约束的是 CEF 下载、helper 编译、
 三份源码树（`builddir`、`build-pkg-deb`、`build-pkg-rpm`）和两次大包压缩，不约束完整门禁。
 `upload release assets` stage 用 `cnbcool/attachments:latest` 把 `dist/cefnest-build.tar.gz`、
-八个 deb/rpm（四个包 × deb/rpm）、`cefnest-packages-<版本>-<修订>.tar.gz` 和 `SHA256SUMS`
-放到该 tag 的 Release；上传失败会让流水线失败，但产物仍留在该次构建的工作区里。
+四个 deb/rpm（两个包 × 两种格式）和 `SHA256SUMS` 放到该 tag 的 Release；上传失败会让
+流水线失败，但产物仍留在该次构建的工作区里。
 
 ### 4.1 装包冒烟
 
-发版过去只*生产*包：四个 deb 的 `Depends` 是手写的，没人证明过它们的名字存在；
-1.5 GB 的 CEF 运行时是不是真跟着 helper 落到了 `/usr/libexec/cefnest/<arch>/`，也没人
-在装完之后看过。`scripts/ci-smoke-packages.sh` 补的就是这两段，按能在容器里做到的和做不到的
-分得很清楚：
+发版过去只*生产*包：`Depends` 是手写的，没人证明过它们的名字存在；1.5 GB 的 CEF
+运行时是不是真跟着 helper 落到了 `/usr/libexec/cefnest/<arch>/`，也没人在装完之后看过。
+`scripts/ci-smoke-packages.sh` 补的就是这两段，按能在容器里做到的和做不到的分得很清楚：
 
-- `sha256sum -c dist/SHA256SUMS`，并要求清单里有 `cefnest-build.tar.gz`（清单只覆盖
-  `build-packages.sh` 自己产出的那些文件时，"全部产物的校验清单"这句话是假的）；
-- `dpkg -c` 逐个点名 helper 包里的运行文件、`libcefnest0` 里那个带版本的 `.so`，
-  以及 `chrome-sandbox` 的权限位必须是 `-rwxr-xr-x`（0755、非 setuid 是决定，写成判据
-  才不会被以后某次"顺手修权限"改掉）；
-- 四个包都必须把 machine-readable copyright 放在**数据层**的
-  `/usr/share/doc/<包名>/copyright`，helper 那份还要有一段 `Files: usr/libexec/cefnest/*`
-  的 BSD-3-clause。这一条是踩出来的：第一版写的是 `DEBIAN/copyright`，看着像有了，其实
-  dpkg 根本不会安装控制层里的这个成员，`lintian` 依旧报 `E: no-copyright-file`。判据直接
-  从 `.deb` 的数据流里 `tar -xO` 那一个成员（一次 1.5 GB 的读流，十几秒），所以不装包也能量到；
-  把改动退回 `DEBIAN/copyright` 重跑，这一条变红。
-- 以 root `apt-get install ./dist/*.deb`：这一条是手写 `Depends` 唯一的真判据，名字写错、
-  版本约束写错、依赖一个归档里不存在的包，都在这里当场失败；
+- 六个上传物逐个点名，`sha256sum -c dist/SHA256SUMS` 必须通过，清单里必须有
+  `cefnest-build.tar.gz`（清单只覆盖 `build-packages.sh` 自己产出的那些文件时，"全部产物
+  的校验清单"这句话是假的）；`dist/` 里若还躺着 `libcefnest0`、`cefnest-helper`、
+  `cefnest-demo` 或 `cefnest-packages-*` 这些 -6 的名称，直接判红；
+- `dpkg -c` 逐个点名 `cefnest` 里的 helper 运行文件与那个带版本的 `.so`，并要求它**不**带
+  demo 或 `shm-client`；`cefnest-dev` 必须带三个头文件与 `cefnest.pc`，且不带
+  `libcef.so`；`chrome-sandbox` 的权限位必须是 `-rwxr-xr-x`（0755、非 setuid 是决定，
+  写成判据才不会被以后某次"顺手修权限"改掉）；
+- 两个包都必须把 machine-readable copyright 放在**数据层**的
+  `/usr/share/doc/<包名>/copyright`，`cefnest` 那份还要有一段 `Files: usr/libexec/cefnest/*`
+  的 BSD-3-clause 并带上 `LICENSE.cef.txt`。这一条是踩出来的：第一版写的是
+  `DEBIAN/copyright`，看着像有了，其实 dpkg 根本不会安装控制层里的这个成员，`lintian`
+  依旧报 `E: no-copyright-file`。判据直接从 `.deb` 的数据流里 `tar -xO` 那一个成员
+  （一次 1.5 GB 的读流，十几秒），所以不装包也能量到；
+- 以 root 安装本地的 `cefnest` 与 `cefnest-dev`：这一条是手写 `Depends` 唯一的真判据，
+  名字写错、版本约束写错、依赖一个归档里不存在的包，都在这里当场失败；
 - 装完之后对 `/usr/lib/*/libcefnest.so.0` 与安装路径上的 `cefnest-helper` 跑 `ldd`，
   任何 `not found` 都算失败；
+- 用安装后的 `cefnest.pc` 编译一个最小宿主，断言 `chromium_session_get_helper_path()`
+  等于 `/usr/libexec/cefnest/<arch>/cefnest-helper`——这同时验证了 pkg-config、链接和
+  编进库里的默认路径；
+- 解包 `cefnest-build.tar.gz`，确认 `src/libcefnest.so.<X.Y.Z>` 里记着的正是安装路径上的
+  helper（这条路径编在库里，不在 demo 里），demo 的 `ldd` 在解包目录里全部满足；
+  `test/shm-client` 也必须在那棵树里；
 - 不带显示直接起一次 helper，读它的横幅：`helper: sandbox=on` 必须在（打包默认开沙箱），
   出现 `No usable sandbox!` 就是这次包在这个宿主上根本跑不起来。这条**不**能替你测
   Ubuntu 24.04 那套 AppArmor 限制（`apparmor_restrict_unprivileged_userns` 默认开）——容器复现不了别人机器上的策略，能复现的是"默认值
@@ -194,24 +204,24 @@ CNB 没有流水线级 timeout，只有 job 级；`build` 那 90 分钟约束的
 普通分支推送不触发任何构建。发版推一个与包版本-修订一致的 tag：
 
 ```bash
-git tag v154.0.34-6
-git push origin v154.0.34-6
+git tag v154.0.34-7
+git push origin v154.0.34-7
 ```
 
-`.cnb.yml` 的 `$: tag_push` 按 §4 那四个 stage 依次跑：`scripts/check-release-tag.sh`
-先比版本串与 tag，`scripts/ci-build.sh` 才做重活（导出 `CEFNEST_PACKAGE_RELEASE=6`，
+`.cnb.yml` 的 `$: tag_push` 按 §4 那些 stage 依次跑：`scripts/check-release-tag.sh`
+先比版本串与 tag，`scripts/ci-build.sh` 才做重活（导出 `CEFNEST_PACKAGE_RELEASE=7`，
 构建时生成中英双语的 `RELEASE-NOTES.md`，含“本版变更”清单与附件说明表格），
 `scripts/ci-smoke-packages.sh` 把 `dist/` 里的包装一遍，然后：
 
 - `git:release` 用该 tag 创建 Release，描述从 `RELEASE-NOTES.md` 读取；
-- `cnbcool/attachments` 把 `dist/` 里那 11 个文件上传到该 tag 的 Release。
+- `cnbcool/attachments` 把 `dist/` 里那 6 个文件上传到该 tag 的 Release。
 
 顺序不能反：附件插件要求 Release 已经存在。重发同版本时要递增修订号，而 `.cnb.yml`
-里跟着动的有 **13 个位置**：三行 `CEFNEST_PACKAGE_RELEASE=6`（check、build、smoke
-各一处）、一行 `CEFNEST_EXPECTED_TAG=v154.0.34-6`、以及 9 个带版本的静态附件名——
+里跟着动的有 **8 个位置**：三行 `CEFNEST_PACKAGE_RELEASE=7`（check、build、smoke
+各一处）、一行 `CEFNEST_EXPECTED_TAG=v154.0.34-7`、以及 4 个带版本的静态附件名——
 `cefnest-build.tar.gz` 与 `SHA256SUMS` 这两个名字永远不带版本。附件列表不展开 shell
 变量，所以这份清单只能手写；上面第一个 stage 就是为它手写清单兜底的，漏改哪一处都在
-几十秒内失败，而不是 90 分钟后少一个文件。tag 名要与包版本一致（`v154.0.34-6`），
+几十秒内失败，而不是 90 分钟后少一个文件。tag 名要与包版本一致（`v154.0.34-7`），
 包版本本身仍由 CEF 的 `X.Y.Z` 决定。
 
 `create release` 带着 `latest: true`，而 CNB 没有"只有最新的 tag 才标 latest"这种条件：

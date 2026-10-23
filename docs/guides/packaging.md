@@ -38,15 +38,25 @@ libexec/cefnest/x86_64/         cefnest-helper + libcef.so + …，一共 1.5 G
 加一条允许 `userns` 的 AppArmor profile，或设 `CHROMIUM_HELPER_NO_SANDBOX=1`。Chromium 那句 FATAL
 自己给的第三条（`chmod 4755`）本项目不发也不建议——没量过，理由见同一篇 §6。
 
+从 154.0.34-7 起，发布包只有两个：`cefnest` 是 GTK 4 组件库本身——嵌套合成器、
+`ChromiumView` 部件、`ChromiumSession` 控制面——连同它启动的 helper 与整套 CEF 运行时
+放在一起；`cefnest-dev` 只放头文件、链接用 `.so` 与 `cefnest.pc`。库以
+`libcefnest.so.0` 装成系统库，任意 GTK 4 宿主都能链接，所以这里说的是“组件包”而不是
+“运行时包”：运行时指的是 helper 旁边那套 CEF。demo 与 `shm-client` 是
+开发测试工具，不打包，只随构建树发布。`scripts/build-packages.sh` 用
+`-Dinstall-demo=false -Dinstall-helper=true` 分别配置 Debian 多架构与 RPM `/usr/lib64`
+两棵安装树。
+
 许可信息按各自生态的规矩放，而且是量过的：
 
-- 四个 deb 各在**数据层**带一份 machine-readable copyright：`/usr/share/doc/<包名>/copyright`
+- 两个 deb 各在**数据层**带一份 machine-readable copyright：`/usr/share/doc/<包名>/copyright`
   （Policy §12.5）。写成 `DEBIAN/copyright` 不算——dpkg 不安装控制层里的这个成员，`lintian`
-  依旧报 `E: no-copyright-file`。helper 那份额外有一段 `Files: usr/libexec/cefnest/*` =
-  `BSD-3-clause`，并把 CEF 分发自带的 `LICENSE.txt` 原样装到
-  `/usr/share/doc/cefnest-helper/LICENSE.cef.txt`。
-- RPM 没有 DEP-5 对应物，靠 spec 的 `License:` 字段：主包 `LGPL-2.1-only`，helper 子包覆写成
-  `LGPL-2.1-only and BSD-3-Clause`，`%files helper` 里打包同一份 CEF 文本。**这条只写在 spec 里，本机
+  依旧报 `E: no-copyright-file`。`cefnest` 那份额外有一段
+  `Files: usr/libexec/cefnest/*` = `BSD-3-clause`，并把 CEF 分发自带的 `LICENSE.txt` 原样
+  装到 `/usr/share/doc/cefnest/LICENSE.cef.txt`。
+- RPM 没有 DEP-5 对应物，靠 spec 的 `License:` 字段：主包 `LGPL-2.1-only and BSD-3-Clause`
+  （它同时带着 CEF 运行时），`devel` 子包是 `LGPL-2.1-only`，主包的 `%files` 里打包
+  `LICENSE` 与 `LICENSE.cef.txt` 两份文本。**这条只写在 spec 里，本机
   没有 rpmbuild，没量过**；rpmbuild 会对未被任何 `%files` 列出的文件报错，所以那个路径一旦
   写错，是 CI 当场红而不是静默漏掉。
 
@@ -190,14 +200,15 @@ meson setup builddir && ninja -C builddir
 meson setup builddir -Dprefix=$HOME/.local/cefnest-stage -Dinstall-helper=true
 ninja -C builddir install
 
-# 打包机：helper 由包管理器放到别处，demo 不装
-meson setup builddir -Dprefix=/usr -Dhelper-path=/usr/lib/cefnest/x86_64/cefnest-helper \
-  -Dinstall-demo=false
+# 打包机：helper 与库装进同一个包，demo 不装
+meson setup builddir -Dprefix=/usr -Dinstall-helper=true -Dinstall-demo=false
 DESTDIR=$PKG ninja -C builddir install
 ```
 
-第三种配置里 `helper-path` 必须是绝对路径——`test/helper-path.c` 的第一条断言就是它，而第 3 节说明这条
-断言为什么值得留在这里。
+第三种配置不传 `helper-path`：由 `prefix` 推出来的默认值正好是
+`/usr/libexec/cefnest/<arch>/cefnest-helper`，和包实际安装的位置一致。若显式设置它，
+必须是绝对路径——`test/helper-path.c` 的第一条断言就是它，而第 3 节说明这条断言为什么
+值得留在这里。
 
 ## 8. 装好的东西确实跑起了一页
 
@@ -272,10 +283,12 @@ demo: script 3 ok value="DND-PAGE|true"
 - deb/rpm 打包在 `scripts/build-packages.sh`；没有 desktop 文件；`third_party/cef/dist`
   那份分发仍假定与可执行文件并排。
 
-## 11. lintian 的账（本轮第一次跑，记下来没修）
+## 11. lintian 的账（-7 之前第一次跑，记下来没修）
 
-补 copyright 时顺手在装好的包上跑了 `lintian --no-tag-display-limit`，对象是本轮产物里三个小包
-（`libcefnest0`、`libcefnest-dev`、`cefnest-demo`）；296 MB 的 helper 包没跑。报出来的都是与
+这一节记的是四包布局时代的结果。补 copyright 时顺手在装好的包上跑了
+`lintian --no-tag-display-limit`，对象是当时产物里的三个小包
+（`libcefnest0`、`libcefnest-dev`、`cefnest-demo`）；296 MB 的 helper 包没跑。两个包合并后
+还没有重跑 lintian，下面的结论不能直接当成 `cefnest` / `cefnest-dev` 的现状。报出来的都是与
 许可无关的旧债，一条都没修，如实记在这里：
 
 | 标签 | 落在哪些文件 |

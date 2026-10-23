@@ -68,7 +68,7 @@
 | --- | --- |
 | `docs/testing/overview.md` | 全部测试怎么跑、每个门禁证明什么、断言背后的实测数字与被验证过的变异，以及 demo 的完整环境变量表 |
 | `docs/testing/headless-ci.md` | 对着没人看得见的嵌套 mutter 跑门禁：为什么 session 要自己的 HOME 和 bus、一个信号怎么收走整棵进程树、没有输出设备的显示器能证明什么不能证明什么 |
-| `docs/testing/cnb-ci.md` | 仅在版本 tag 上构建的发版流水线（分层依赖的四个包、Release 资产、修订号）；完整门禁的本地/自托管准备 |
+| `docs/testing/cnb-ci.md` | 仅在版本 tag 上构建的发版流水线（两个包：GTK 4 组件库含 helper 与 CEF、开发文件；demo 只在构建树；Release 资产与修订号）；完整门禁的本地/自托管准备 |
 | `docs/testing/real-sites.md` | 五站点真实页面巡检批次：每站一个嵌套 session、截图、JS 读回、3 秒 rAF 计数，以及实测的 H.264/VP9 结论 |
 
 ## 根目录的元记录

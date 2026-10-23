@@ -126,16 +126,20 @@ installed helper needs nothing from the tree it was built in — the CEF runtime
 travels next to it and is resolved from there, which is measured with the whole
 `third_party/cef/dist` directory moved aside (`docs/guides/packaging.md` §9).
 
-The CNB release pipeline also packs the install tree into `libcefnest0`,
-`libcefnest-dev`, `cefnest-demo` and `cefnest-helper` debs and rpms; once
-installed, a host builds with `pkg-config --cflags --libs cefnest`. The
-dependencies are strictly layered, never circular: `cefnest-helper` (the CEF
-runtime) sits at the bottom and installs first, `libcefnest0` depends on the
-exact helper version, and `libcefnest-dev` and `cefnest-demo` depend on the
-exact library version. All four share one version — CEF stable `X.Y.Z` plus a
-revision (`154.0.34-6`) — and are built and released together, so an upgrade
-moves all of them at once. The pipeline builds on version tags only; see
-`docs/testing/cnb-ci.md`.
+The CNB release pipeline packs the install tree into two packages, as both debs
+and rpms. `cefnest` is the component itself: the GTK 4 widget library,
+`cefnest-helper` and the complete CEF runtime (about 1.5 GB installed). The
+library installs system-wide as `libcefnest.so.0`, depends only on system
+libraries, and installing it is enough to run a host.
+`cefnest-dev` adds the headers, the unversioned `.so` link and `cefnest.pc`;
+it depends on the exact `cefnest` version, and a host builds with
+`pkg-config --cflags --libs cefnest`. The demo and `shm-client` are
+development/test tools and are not packaged — they travel in
+`cefnest-build.tar.gz`. Both packages share one version — CEF stable `X.Y.Z`
+plus a revision (`154.0.34-7`) — and are built and released together. Upgrades
+from the four-package -6 layout are handled by deb `Replaces`/`Breaks` and rpm
+`Obsoletes`, so they need no manual removal. The pipeline builds on version
+tags only; see `docs/testing/cnb-ci.md`.
 
 `cefnest-helper` starts Chromium with the sandbox **on** and installs
 `chrome-sandbox` as plain 0755 — no setuid bit, no AppArmor profile shipped with
