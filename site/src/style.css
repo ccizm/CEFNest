@@ -534,8 +534,13 @@ section {
 
   .footer-cols {
     grid-template-columns: 1fr;
-    justify-items: center;
     gap: 0.45rem;
+  }
+
+  .footer-cols > :first-child,
+  .footer-cols > :nth-child(2),
+  .footer-cols > :last-child {
+    justify-self: center;
   }
 
   .actions .btn {
@@ -563,6 +568,13 @@ section {
     white-space: pre-wrap;
     overflow-wrap: normal;
     word-break: normal;
+  }
+}
+
+@media (max-width: 359.98px) {
+  /* Keep the navbar on one row on the narrowest phones; the hero spells the name. */
+  .brand-text {
+    display: none;
   }
 }
 
