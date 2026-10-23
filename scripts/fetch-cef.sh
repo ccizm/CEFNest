@@ -94,12 +94,59 @@ PACKAGE_VERSION=$(printf '%s\n' "$VERSION" |
 }
 
 ENC="${VERSION//+/%2B}"
-URL="https://cef-builds.spotifycdn.com/cef_binary_${ENC}_${ARCH}_minimal.tar.bz2"
+ARCHIVE_NAME="cef_binary_${ENC}_${ARCH}_minimal.tar.bz2"
+URL="https://cef-builds.spotifycdn.com/$ARCHIVE_NAME"
 
 if [ "${1:-}" = '--print-url' ]; then
   echo "$URL"
   exit 0
 fi
+
+# The archive is ~311 MB and the route to the build service can be lossy: a
+# release build died on curl 18 (partial file) with no way to continue where
+# the transfer stopped. download() tries its candidates in order — the
+# CEF_MIRROR_URLS mirrors first, then the official service — and gives each
+# candidate up to CEF_DOWNLOAD_PASSES passes (default 6). Every pass resumes
+# from the bytes already on disk; the CDN serves range requests, and a
+# candidate that does not has its partial bytes dropped so the next pass
+# starts clean. A pass that stalls below 10 KB/s for 45 s is cut and retried;
+# --retry 3 covers the transient connect/5xx class on its own. Whatever the
+# source, the pinned digest below still decides whether the bytes are the
+# build this repository approved.
+download () {
+  local dest="$1"
+  shift
+  local url pass rc ranges
+  for url in "$@"; do
+    ranges=$(curl -fsIm 20 "$url" | tr -d '\r' | grep -i '^accept-ranges:' || true)
+    case "$ranges" in
+      *bytes*) : ;;
+      *) rm -f "$dest" ;;
+    esac
+    for pass in $(seq 1 "${CEF_DOWNLOAD_PASSES:-6}"); do
+      echo "fetch: $url (pass $pass)"
+      rc=0
+      curl -fL -C - --retry 3 --retry-all-errors --retry-delay 5 \
+        --connect-timeout 20 --speed-time 45 --speed-limit 10240 \
+        -o "$dest" "$url" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        return 0
+      fi
+      echo "fetch: curl exited $rc, $(stat -c%s "$dest" 2>/dev/null || echo 0) bytes on disk" >&2
+      if [ "$rc" -eq 33 ]; then
+        echo "fetch: $url does not serve ranges; restarting that candidate from zero" >&2
+        rm -f "$dest"
+      fi
+    done
+  done
+  return 1
+}
+
+CANDIDATES=()
+for MIRROR in ${CEF_MIRROR_URLS:-}; do
+  CANDIDATES+=("${MIRROR%/}/$ARCHIVE_NAME")
+done
+CANDIDATES+=("$URL")
 
 mkdir -p "$DEST"
 
@@ -114,7 +161,11 @@ fi
 
 echo "fetch: $VERSION (Chromium $CHROMIUM_VERSION)"
 echo "fetch: $URL"
-curl -fL --retry 3 -o "$DEST/cef.tar.bz2" "$URL"
+if ! download "$DEST/cef.tar.bz2" "${CANDIDATES[@]}"; then
+  echo "fetch: every source gave up on $ARCHIVE_NAME; partial bytes kept at" >&2
+  echo "  $DEST/cef.tar.bz2 — rerun to resume where this stopped" >&2
+  exit 1
+fi
 
 # The archive has to be the bytes the build service published. A missing
 # digest is a failure, not a reason to skip the check. This one answers
