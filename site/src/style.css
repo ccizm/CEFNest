@@ -528,6 +528,12 @@ section {
 }
 
 @media (max-width: 575.98px) {
+  /* The navbar holds the brand plus four buttons; the repo link is the one
+     thing that can go — the hero's "browse source" button covers it. */
+  .btn-repo {
+    display: none;
+  }
+
   .hero {
     padding: 3.5rem 0 3rem;
   }
