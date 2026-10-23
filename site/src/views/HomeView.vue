@@ -1,228 +1,113 @@
 <script setup>
-import CodeBlock from '../components/CodeBlock.vue'
 import { release } from '../data/release.js'
-
-const quickCode = `cc host.c -o host $(pkg-config --cflags --libs cefnest)
-
-GtkWidget       *view    = g_object_new (CHROMIUM_TYPE_VIEW, NULL);
-ChromiumSession *session = chromium_session_new (NULL);
-
-chromium_session_set_view (session, CHROMIUM_VIEW (view));
-g_signal_connect (session, "load-end", G_CALLBACK (on_load_end), NULL);
-chromium_session_start (session, "https://cnb.cool/yanzhiming/CEFNest", &error);`
+import { builds, buildStatuses, asOf } from '../data/builds.js'
+import { groups } from '../docs/manifest.js'
 
 const pieces = [
-  {
-    name: 'NestedCompositor',
-    file: 'src/nested*.c',
-    desc: '嵌套 Wayland 合成器：globals、surface 栈、damage、输入、剪贴板，以及跨窗口边缘双向的拖拽。',
-  },
-  {
-    name: 'ChromiumView',
-    file: 'src/chromium-view.c',
-    desc: 'GTK 4 部件：把宿主窗口的真实指针、键盘与输入法交给合成器，并把合成结果画成 GdkTexture。',
-  },
-  {
-    name: 'ChromiumSession',
-    file: 'src/chromium-session.c',
-    desc: '控制面：启动与停止 helper，跟踪页面状态，执行 JavaScript，代理下载、查找、右键菜单与权限请求。',
-  },
+  ['NestedCompositor', 'src/nested*.c', '嵌套 Wayland 合成器：globals、surface 栈、damage、输入、剪贴板，以及跨窗口边缘双向的拖拽。'],
+  ['ChromiumView', 'src/chromium-view.c', 'GTK 4 部件：把宿主窗口的真实指针、键盘与输入法交给合成器，并把合成结果画成 GdkTexture。'],
+  ['ChromiumSession', 'src/chromium-session.c', '控制面：启动与停止 helper，跟踪页面状态，执行 JavaScript，代理下载、查找、右键菜单与权限请求。'],
 ]
 
-const features = [
-  {
-    icon: 'bi-window-desktop',
-    title: '真 Chromium 渲染',
-    text: '页面跑在 Chromium 自己的 ozone/wayland 后端里，是用户桌面上那个浏览器引擎，不是另一套引擎的近似实现。',
-    cls: '',
-  },
-  {
-    icon: 'bi-signpost-split',
-    title: '原生 Wayland',
-    text: '没有 XWayland，没有 X11 客户端，没有 XEMBED。同进程内跑一个 libwayland-server 合成器，接收 shm / dmabuf 缓冲。',
-    cls: 'green',
-  },
-  {
-    icon: 'bi-film',
-    title: '直接合成，无 OSR',
-    text: '没有离屏渲染缓冲被拷进 Cairo surface。Chromium 提交 Wayland surface，合成结果直接作为 GdkTexture 进部件。',
-    cls: '',
-  },
-  {
-    icon: 'bi-keyboard',
-    title: '输入全桥接',
-    text: '指针、键盘（含 axis_value120 滚轮刻度）、输入法组合、光标形状、剪贴板与主选区，双向跨过窗口边缘。',
-    cls: 'green',
-  },
-  {
-    icon: 'bi-shield-check',
-    title: '策略归宿主',
-    text: '下载落到哪、权限答不答应、右键菜单长什么样——页面问的每一个问题都由宿主回答，session 只负责代理。',
-    cls: '',
-  },
-  {
-    icon: 'bi-box-seam',
-    title: '库化交付',
-    text: 'meson install 装出 libcefnest.so、三个头文件与 pkg-config 文件；deb / rpm 由发版流水线从同一棵安装树产出。',
-    cls: 'green',
-  },
-]
-
-const globalsList =
-  'wl_compositor (4) · wl_shm (2) · wl_seat (8) · wl_output (4) · wl_data_device_manager (3) · xdg_wm_base (3) · zwp_linux_dmabuf_v1 (5) · wp_viewporter (1) · wp_fractional_scale_manager_v1 (1) · zwp_primary_selection_device_manager_v1 (1) · zwp_text_input_manager_v3 · wp_cursor_shape_manager_v1'
+const latest = builds[0]
 </script>
 
 <template>
-  <div>
-    <!-- Hero -->
-    <section class="bg-dark text-white py-5">
-      <div class="container">
-        <div class="row align-items-center g-5">
-          <div class="col-lg-6">
-            <span class="hero-badge"><i class="bi bi-stars me-1"></i>{{ release.version }} · API 尚不稳定</span>
-            <h1 class="display-5 fw-bold mb-3">在 GTK 4 里，运行真正的 Chromium</h1>
-            <p class="lead-text lead mb-4">
-              CEFNest 是一个 GTK 4 部件：页面由真 Chromium 渲染，经同一进程内的嵌套
-              Wayland 合成器合成进部件。没有 XWayland，也没有离屏渲染。
-            </p>
-            <div class="d-flex gap-2 flex-wrap">
-              <router-link to="/downloads" class="btn btn-light btn-lg px-4">
-                <i class="bi bi-download me-1"></i> 下载 {{ release.version }}
-              </router-link>
-              <router-link to="/api/quickstart" class="btn btn-outline-light btn-lg px-4">
-                <i class="bi bi-code-slash me-1"></i> 三行接入
-              </router-link>
-            </div>
-            <p class="small text-white-50 mt-3 mb-0">
-              CEF {{ release.cef }} · Chromium {{ release.chromium }} · GTK 4.14+ · 原生 Wayland
-            </p>
-          </div>
-          <div class="col-lg-6">
-            <div class="arch-box mb-2">
-              <div class="arch-title">GTK 4 应用</div>
-              <small>你的窗口与业务逻辑</small>
-            </div>
-            <div class="text-center arch-arrow"><i class="bi bi-arrow-down"></i></div>
-            <div class="arch-box mb-2">
-              <div class="arch-title">ChromiumView <small>· GtkWidget</small></div>
-              <small>NestedCompositor —— 进程内的 libwayland-server 合成器，自有 socket</small>
-            </div>
-            <div class="text-center arch-arrow"><i class="bi bi-arrow-down"></i></div>
-            <div class="arch-proto mb-1">Wayland 协议（socket 的客户端一侧）</div>
-            <div class="arch-box">
-              <div class="arch-title">cefnest-helper <small>· 独立进程，CEF 应用</small></div>
-              <small>以 WAYLAND_DISPLAY= 指向嵌套合成器启动；控制面为 unix socket 上的 NDJSON</small>
-            </div>
-          </div>
-        </div>
+  <div class="container py-4 py-lg-5 home-page">
+    <header class="home-head">
+      <h1 class="h2 fw-bold mb-2">CEFNest 文档</h1>
+      <p class="mb-2" style="max-width: 60rem">
+        CEFNest 是一个 GTK 4 部件：页面由<strong>真正的 Chromium</strong>渲染，经同一进程内的嵌套
+        Wayland 合成器合成进部件。没有 XWayland，也没有离屏渲染——这两条约束排除了所有不自带
+        合成器的「GTK 嵌浏览器」方案。
+      </p>
+      <p class="small text-secondary mb-3">
+        当前版本 {{ release.version }} · CEF {{ release.cef }} · Chromium {{ release.chromium }} ·
+        GTK 4.14+ · 原生 Wayland · API 尚不稳定
+      </p>
+      <div class="d-flex gap-2 flex-wrap">
+        <RouterLink to="/builds" class="btn btn-primary">
+          <i class="bi bi-box-seam me-1"></i>构建产物
+        </RouterLink>
+        <RouterLink to="/api/quickstart" class="btn btn-outline-primary">
+          <i class="bi bi-code-slash me-1"></i>调用文档（API）
+        </RouterLink>
+        <a class="btn btn-outline-secondary" :href="release.repository" target="_blank" rel="noopener">
+          <i class="bi bi-code-square me-1"></i>仓库
+        </a>
+      </div>
+    </header>
+
+    <section class="mt-4 mt-lg-5">
+      <h2 class="h5 fw-semibold mb-2">最新一次构建</h2>
+      <p class="small mb-2">
+        <RouterLink class="fw-semibold me-2" to="/builds">{{ latest.version }}</RouterLink>
+        <span class="badge status-badge" :class="buildStatuses[latest.status].cls">
+          {{ buildStatuses[latest.status].label }}
+        </span>
+        <span class="text-secondary ms-2">tag {{ latest.tag }} · {{ latest.date }} {{ latest.time }} · 状态截至 {{ asOf }}</span>
+      </p>
+      <p class="small text-secondary mb-0">
+        {{ latest.note }} 每条状态都对应一次可复看的判定，写在
+        <RouterLink to="/docs/testing/cnb-ci">CNB 发版流水线</RouterLink>里。
+      </p>
+    </section>
+
+    <section class="mt-4 mt-lg-5">
+      <h2 class="h5 fw-semibold mb-1">目录</h2>
+      <p class="small text-secondary mb-3">
+        这里没有第二份文档：每一行就是仓库里的一个 markdown 文件，站点直接把它们渲染出来。
+        想读某类的取舍顺序，看<RouterLink to="/docs/README">文档索引 · 先读哪篇</RouterLink>。
+      </p>
+      <div v-for="g in groups" :key="g.key" class="doc-index-group">
+        <h3 class="doc-index-title">{{ g.title }}</h3>
+        <ul class="doc-index-list">
+          <li v-for="it in g.items" :key="it.slug">
+            <RouterLink :to="`/docs/${it.slug}`">{{ it.label }}</RouterLink>
+            <code>{{ it.src }}</code>
+          </li>
+        </ul>
       </div>
     </section>
 
-    <!-- 为什么 -->
-    <section class="py-5">
-      <div class="container">
-        <div class="row g-4 align-items-end mb-4">
-          <div class="col-lg-8">
-            <h2 class="fw-bold mb-2">为什么必须自带一个合成器</h2>
-            <p class="text-secondary mb-0">
-              两条约束排除了所有不自带合成器的“GTK 嵌浏览器”方案：页面必须按桌面上真实浏览器的方式
-              说话，而部件又不能靠离屏拷贝拿到像素。
-            </p>
+    <section class="mt-4 mt-lg-5">
+      <h2 class="h5 fw-semibold mb-2">三块积木</h2>
+      <div class="d-flex flex-column gap-2">
+        <div v-for="[name, file, desc] in pieces" :key="name" class="feature-card p-3">
+          <div class="d-flex justify-content-between align-items-baseline flex-wrap gap-2">
+            <code class="fw-bold text-body">{{ name }}</code>
+            <small class="text-secondary">{{ file }}</small>
           </div>
-          <div class="col-lg-4 text-lg-end">
-            <router-link to="/dev/arch" class="small">架构与实现 <i class="bi bi-arrow-right ms-1"></i></router-link>
-          </div>
-        </div>
-        <div class="row g-4">
-          <div v-for="f in features.slice(0, 3)" :key="f.title" class="col-md-4">
-            <div class="feature-card p-4" :class="f.cls">
-              <span class="feature-icon mb-3"><i class="bi" :class="f.icon"></i></span>
-              <h3 class="h5 fw-semibold mb-2">{{ f.title }}</h3>
-              <p class="text-secondary mb-0 small">{{ f.text }}</p>
-            </div>
-          </div>
+          <p class="text-secondary small mb-0 mt-1">{{ desc }}</p>
         </div>
       </div>
-    </section>
-
-    <!-- 组成 -->
-    <section class="py-5 bg-body-tertiary">
-      <div class="container">
-        <div class="row g-5">
-          <div class="col-lg-7">
-            <h2 class="fw-bold mb-4">三块积木，各干一件事</h2>
-            <div class="d-flex flex-column gap-3">
-              <div v-for="p in pieces" :key="p.name" class="feature-card p-3 px-4">
-                <div class="d-flex justify-content-between align-items-baseline flex-wrap gap-2">
-                  <code class="fw-bold text-body">{{ p.name }}</code>
-                  <small class="text-secondary">{{ p.file }}</small>
-                </div>
-                <p class="text-secondary small mb-0 mt-2">{{ p.desc }}</p>
-              </div>
-            </div>
-            <p class="small text-secondary mt-3 mb-0">
-              合成器通告的 globals（括号内为协议版本）：{{ globalsList }}
-            </p>
-            <div class="row g-4 mt-1">
-              <div v-for="f in features.slice(3)" :key="f.title" class="col-md-6">
-                <div class="feature-card p-4 h-100" :class="f.cls">
-                  <span class="feature-icon mb-2"><i class="bi" :class="f.icon"></i></span>
-                  <h3 class="h6 fw-semibold mb-1">{{ f.title }}</h3>
-                  <p class="text-secondary mb-0 small">{{ f.text }}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="col-lg-5">
-            <h2 class="fw-bold mb-4">三行接入</h2>
-            <CodeBlock :code="quickCode" label="pkg-config + 最小宿主" lang="c" />
-            <div class="doc-note">
-              顺序是硬性的：<code>set_view()</code> 必须先于 <code>start()</code>——helper 的
-              <code>WAYLAND_DISPLAY</code> 取自视图的合成器。
-              完整最小宿主见 <router-link to="/api/quickstart">最小宿主</router-link> 与
-              <code>examples/minimal.c</code>。
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 本版变更 -->
-    <section class="py-5">
-      <div class="container">
-        <div class="row g-4 align-items-start">
-          <div class="col-lg-7">
-            <h2 class="fw-bold mb-3">{{ release.version }} 带来了什么</h2>
-            <ul class="release-list mb-3">
-              <li><strong>发布包从四个收敛为两个。</strong> <code>cefnest</code> 是 GTK 4 组件库本身，连同 helper 与完整 CEF 一起交付；<code>cefnest-dev</code> 只保留头文件、.so 与 pkg-config。</li>
-              <li><strong>demo 与 shm-client 不再单独发包。</strong> 它们是开发测试工具，只留在 <code>cefnest-build.tar.gz</code> 的 <code>src/</code> 与 <code>test/</code> 里。</li>
-              <li><strong>旧包名可平滑升级。</strong> deb 侧用 Replaces/Breaks、rpm 侧用 Obsoletes 替换 -6 的包名，不需要手工卸载；组件本身行为不变，本版只改发布形态。</li>
-            </ul>
-            <router-link to="/downloads" class="btn btn-primary">
-              <i class="bi bi-download me-1"></i> 下载 {{ release.version }}
-            </router-link>
-          </div>
-          <div class="col-lg-5">
-            <div class="feature-card p-4">
-              <h3 class="h6 fw-semibold mb-3">接下来去哪里</h3>
-              <div class="d-flex flex-column gap-3">
-                <router-link to="/downloads" class="docs-next">
-                  <span><i class="bi bi-box-seam me-2"></i>下载与安装</span>
-                  <small class="text-secondary">两个包、校验、deb / rpm 命令</small>
-                </router-link>
-                <router-link to="/dev/build" class="docs-next">
-                  <span><i class="bi bi-hammer me-2"></i>从源码构建</span>
-                  <small class="text-secondary">CEF、helper、meson 与自含安装树</small>
-                </router-link>
-                <router-link to="/dev/limits" class="docs-next">
-                  <span><i class="bi bi-exclamation-triangle me-2"></i>已知限制</span>
-                  <small class="text-secondary">输入、编解码、沙箱与生命周期边界</small>
-                </router-link>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <p class="small text-secondary mt-2 mb-0">
+        合成器通告哪些协议、版本上限判到什么，写在
+        <RouterLink to="/docs/internals/protocol-ceilings">协议天花板</RouterLink>与
+        <RouterLink to="/docs/internals/nested-split">nested 拆分</RouterLink>。
+      </p>
     </section>
   </div>
 </template>
+
+<style scoped>
+.home-head { border-bottom: 1px solid var(--bs-border-color); padding-bottom: 1.5rem; }
+.status-badge { font-size: 0.72rem; font-weight: 600; }
+.doc-index-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--bs-secondary-color);
+  margin: 1.5rem 0 0.4rem;
+}
+.doc-index-list { list-style: none; padding: 0; margin: 0; }
+.doc-index-list li { padding: 0.15rem 0; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
+.doc-index-list a { text-decoration: none; }
+.doc-index-list a:hover { text-decoration: underline; }
+.doc-index-list code { font-size: 0.74rem; color: var(--bs-secondary-color); }
+@media (min-width: 768px) {
+  .doc-index-list { columns: 2; column-gap: 2.5rem; }
+  .doc-index-list li { break-inside: avoid; }
+}
+</style>

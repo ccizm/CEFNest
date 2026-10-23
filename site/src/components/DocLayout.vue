@@ -1,8 +1,8 @@
 <script setup>
 defineProps({
-  items: { type: Array, required: true }, // [{ key, label }]
+  // [{ title: '分组名（可空）', items: [{ to, label }] }]
+  sections: { type: Array, required: true },
   heading: { type: String, required: true },
-  base: { type: String, default: 'dev' },
 })
 </script>
 
@@ -12,18 +12,19 @@ defineProps({
       <div class="row g-4">
         <div class="col-lg-3">
           <nav class="doc-sidebar">
-            <div class="sidebar-heading mb-2">{{ heading }}</div>
-            <ul class="nav flex-column gap-0">
-              <li v-for="it in items" :key="it.key" class="nav-item">
-                <router-link
-                  class="nav-link"
-                  :to="`/${base}/${it.key}`"
-                  active-class="active"
-                >
-                  {{ it.label }}
-                </router-link>
-              </li>
-            </ul>
+            <div class="sidebar-title mb-2">{{ heading }}</div>
+            <template v-for="s in sections" :key="s.title || s.items[0].to">
+              <div v-if="s.title" class="sidebar-heading">{{ s.title }}</div>
+              <ul class="nav flex-column mb-2">
+                <li v-for="it in s.items" :key="it.to" class="nav-item">
+                  <RouterLink
+                    class="nav-link"
+                    :to="it.to"
+                    active-class="active"
+                  >{{ it.label }}</RouterLink>
+                </li>
+              </ul>
+            </template>
           </nav>
         </div>
         <div class="col-lg-9">

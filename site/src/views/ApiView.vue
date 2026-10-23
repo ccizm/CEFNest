@@ -17,6 +17,8 @@ const section = computed(() => {
   return 'quickstart'
 })
 
+const apiNav = [{ items: apiSections.map((s) => ({ to: `/api/${s.key}`, label: s.label })) }]
+
 const quickCode = `static void
 on_activate (GtkApplication *app, gpointer data)
 {
@@ -518,7 +520,7 @@ on_zoom_changed (ChromiumSession *session, double level, gpointer data)
 </script>
 
 <template>
-  <DocLayout :items="apiSections" heading="调用文档" base="api">
+  <DocLayout :sections="apiNav" heading="调用文档">
     <!-- ============ 最小宿主 ============ -->
     <template v-if="section === 'quickstart'">
       <h1>最小宿主</h1>
@@ -530,8 +532,8 @@ on_zoom_changed (ChromiumSession *session, double level, gpointer data)
       </p>
       <CodeBlock label="bash" lang="bash" :code="`cc host.c -o host \$(pkg-config --cflags --libs cefnest)`" />
       <div class="doc-note">
-        从<router-link to="/downloads">下载页</router-link>安装 <code>cefnest</code> 与
-        <code>cefnest-dev</code>，或按<router-link to="/dev/build">从源码构建</router-link>
+        从<router-link to="/builds">构建产物页</router-link>安装 <code>cefnest</code> 与
+        <code>cefnest-dev</code>，或按<router-link to="/docs/root/README.zh-CN">从源码构建</router-link>
         装进同一个 prefix——两条路都会留下 <code>cefnest.pc</code>，同一行命令即可。组件包已经带着
         <code>cefnest-helper</code> 与 CEF；源码构建时要开 <code>install-helper</code>，
         渲染页面才不需要另外指路径。下文的示例程序两种路径都适用。
@@ -554,7 +556,7 @@ on_zoom_changed (ChromiumSession *session, double level, gpointer data)
       <h2>动手前值得知道</h2>
       <ul>
         <li>页面站在宿主的回答上：下载、查找、右键菜单、权限请求都要宿主应答，左侧各节逐一给出回复形状与不回答的代价。</li>
-        <li>API 尚不稳定；已知边角行为见<router-link to="/dev/limits">已知限制</router-link>。</li>
+        <li>API 尚不稳定；已知边角行为见<router-link to="/docs/known-limitations">已知限制</router-link>。</li>
       </ul>
     </template>
 
@@ -655,7 +657,7 @@ on_zoom_changed (ChromiumSession *session, double level, gpointer data)
           <code>start()</code> 之前用 <code>chromium_session_new(path)</code> 指名 helper，
           或让它按 <code>CEFNEST_HELPER</code> → <code>CHROMIUM_HELPER</code> → 编入的安装路径
           → cmake 开发产物解析。完整的五步规则与失败形态见
-          <router-link to="/dev/run">运行与调试</router-link>。
+          <router-link to="/docs/guides/packaging">打包与 helper 查找</router-link>。
         </div>
       </template>
     </template>

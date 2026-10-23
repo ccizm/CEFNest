@@ -9,40 +9,7 @@ body {
 
 .site-main { flex: 1 0 auto; }
 
-/* ---------- 首页 hero ---------- */
-.lead-text { color: rgba(255, 255, 255, 0.85); max-width: 46rem; }
-.hero-badge {
-  display: inline-block;
-  background: rgba(255, 255, 255, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  border-radius: 2rem;
-  padding: 0.25rem 0.9rem;
-  font-size: 0.875rem;
-  margin-bottom: 1.25rem;
-}
-
-/* ---------- 架构图 ---------- */
-.arch-box {
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  border-radius: 0.6rem;
-  padding: 0.75rem 1rem;
-  background: rgba(255, 255, 255, 0.07);
-}
-.arch-box .arch-title { font-weight: 600; }
-.arch-box small { color: rgba(255, 255, 255, 0.75); }
-.arch-arrow {
-  color: rgba(255, 255, 255, 0.8);
-  font-size: 1.4rem;
-  line-height: 1;
-  padding: 0.35rem 0;
-}
-.arch-proto {
-  font-size: 0.8rem;
-  color: rgba(255, 255, 255, 0.85);
-  letter-spacing: 0.02em;
-}
-
-/* ---------- 特性卡片 ---------- */
+/* ---------- 卡片 ---------- */
 .feature-card {
   border: 1px solid var(--bs-border-color);
   border-radius: 0.75rem;
@@ -66,19 +33,34 @@ body {
 }
 
 /* ---------- 文档布局 ---------- */
-.doc-page { padding: 2.5rem 0 3.5rem; background: var(--bs-tertiary-bg); }
+.doc-page { padding: 2rem 0 3rem; background: var(--bs-tertiary-bg); }
 .doc-sidebar {
   position: sticky;
   top: 4.2rem;
   max-height: calc(100vh - 5rem);
   overflow-y: auto;
 }
+.doc-sidebar .sidebar-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  color: var(--bs-body-color);
+  padding: 0 0.9rem;
+}
+.doc-sidebar .sidebar-heading {
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  color: var(--bs-secondary-color);
+  padding: 0 0.9rem;
+  margin: 0.75rem 0 0.15rem;
+}
 .doc-sidebar .nav-link {
   color: var(--bs-body-color);
   border-left: 2px solid transparent;
   border-radius: 0;
-  padding: 0.4rem 0.9rem;
-  font-size: 0.925rem;
+  padding: 0.34rem 0.9rem;
+  font-size: 0.88rem;
 }
 .doc-sidebar .nav-link:hover {
   color: var(--bs-primary);
@@ -89,14 +71,6 @@ body {
   border-left-color: var(--bs-primary);
   background: var(--bs-primary-bg-subtle);
   font-weight: 600;
-}
-.doc-sidebar .sidebar-heading {
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--bs-secondary-color);
-  padding: 0 0.9rem;
-  margin-bottom: 0.35rem;
 }
 .doc-content {
   background: #fff;
@@ -109,6 +83,28 @@ body {
 .doc-content h2:first-of-type { margin-top: 1.25rem; }
 .doc-content h3 { font-size: 1.02rem; font-weight: 600; margin-top: 1.4rem; }
 .doc-content p, .doc-content li { line-height: 1.75; }
+.doc-content code:not(pre code) {
+  background: var(--bs-secondary-bg);
+  border: var(--bs-border-width) solid var(--bs-border-color);
+  border-radius: 0.3rem;
+  padding: 0.08rem 0.35rem;
+  font-size: 0.85em;
+  color: var(--bs-code-color);
+}
+.doc-content table {
+  width: 100%;
+  margin: 0.9rem 0 1.2rem;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.doc-content table th,
+.doc-content table td {
+  border: 1px solid var(--bs-border-color);
+  padding: 0.45rem 0.6rem;
+  vertical-align: top;
+  text-align: left;
+}
+.doc-content table th { background: var(--bs-tertiary-bg); font-weight: 600; }
 .doc-note {
   border-left: 3px solid var(--bs-primary);
   background: var(--bs-primary-bg-subtle);
@@ -120,6 +116,63 @@ body {
   border-left-color: var(--bs-warning);
   background: var(--bs-warning-bg-subtle);
 }
+
+/* ---------- markdown 正文 ---------- */
+.markdown h2, .markdown h3 { scroll-margin-top: 5rem; }
+.markdown pre {
+  background: #0d1117;
+  border-radius: 0.6rem;
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+  margin: 0.9rem 0 1.2rem;
+}
+.markdown pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: #e6edf3;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+.markdown blockquote {
+  border-left: 3px solid var(--bs-border-color);
+  color: var(--bs-secondary-color);
+  padding-left: 1rem;
+  margin: 0.9rem 0;
+}
+.markdown hr { margin: 1.75rem 0; opacity: 0.6; }
+/* 文档里的交叉引用写作行内代码路径；渲染成链接时让它读起来像链接而不是色块。 */
+.markdown a code { color: var(--bs-link-color); background: none; border: none; padding: 0; }
+.markdown a:hover code { text-decoration: underline; }
+.doc-src {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--bs-border-color);
+  padding-bottom: 0.6rem;
+  margin-bottom: 1.2rem;
+}
+.doc-toc {
+  border: 1px solid var(--bs-border-color);
+  border-radius: 0.6rem;
+  background: var(--bs-tertiary-bg);
+  padding: 0.75rem 1rem;
+  margin-bottom: 1.5rem;
+}
+.doc-toc .sidebar-heading { padding: 0; margin: 0 0 0.25rem; }
+.doc-toc-item {
+  display: block;
+  background: none;
+  border: none;
+  padding: 0.1rem 0;
+  font-size: 0.86rem;
+  text-align: left;
+  color: var(--bs-body-color);
+}
+.doc-toc-item.deep { padding-left: 1.1rem; color: var(--bs-secondary-color); }
+.doc-toc-item:hover { color: var(--bs-primary); }
 
 /* ---------- 代码块 ---------- */
 .code-block {
@@ -158,15 +211,6 @@ body {
   font-size: 0.84rem;
   line-height: 1.6;
 }
-.inline-code,
-.doc-content code:not(.code-block code) {
-  background: var(--bs-secondary-bg);
-  border: var(--bs-border-width) solid var(--bs-border-color);
-  border-radius: 0.3rem;
-  padding: 0.08rem 0.35rem;
-  font-size: 0.85em;
-  color: var(--bs-code-color);
-}
 
 /* ---------- API 条目 ---------- */
 .api-entry {
@@ -198,29 +242,6 @@ body {
 .api-kind.signal { background: var(--bs-success-bg-subtle); color: var(--bs-success-text-emphasis); }
 .api-kind.getter { background: var(--bs-info-bg-subtle); color: var(--bs-info-text-emphasis); }
 .api-kind.struct { background: var(--bs-warning-bg-subtle); color: var(--bs-warning-text-emphasis); }
-.arg-table td, .arg-table th { font-size: 0.86rem; padding: 0.4rem 0.6rem; }
-.arg-table .arg-name { font-family: Consolas, monospace; color: var(--bs-code-color); white-space: nowrap; }
-
-/* ---------- 发布说明 / 下一步入口 ---------- */
-.release-list { padding-left: 1.15rem; }
-.release-list li { margin-bottom: 0.6rem; line-height: 1.7; }
-
-.docs-next {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.65rem 0.85rem;
-  border: 1px solid var(--bs-border-color);
-  border-radius: 0.5rem;
-  color: var(--bs-body-color);
-  text-decoration: none;
-}
-.docs-next:hover {
-  border-color: var(--bs-primary);
-  background: var(--bs-primary-bg-subtle);
-  color: var(--bs-primary);
-}
-.docs-next small { color: var(--bs-secondary-color); }
 
 /* ---------- 页脚 ---------- */
 .site-footer { flex-shrink: 0; border-top: 1px solid var(--bs-border-color); background: #fff; }

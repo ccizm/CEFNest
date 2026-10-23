@@ -7,6 +7,7 @@
 ## 先读哪篇
 
 - **想把 demo 跑起来**：仓库 `README.md`（构建/安装/运行），然后
+  `docs/guides/first-run.md`（运行前提、三种跑法、报出来怎么查）与
   `docs/testing/overview.md`（怎么跑测试）。
 - **想把这个库接进自己的应用**：`docs/guides/minimal-host.md`（三个对象、必需顺序、
   API 对照表）→ `docs/guides/control-channel.md`（通道上每条命令与事件）→
@@ -22,6 +23,7 @@
 
 | 文档 | 关于 |
 | --- | --- |
+| `docs/guides/first-run.md` | 跑起来需要宿主给什么（原生 Wayland、userns、GTK 下限）、三种跑法各判哪一侧，以及七条被真实运行验证过的排查 |
 | `docs/guides/minimal-host.md` | 三个对象的宿主、必需的顺序、导航/JS/下载/菜单/主选区/无障碍该加哪个 API/信号的对照表，以及 §5：中等示例、它的脚本化运行测到了什么、那个曾经关不掉的标签是怎么修好的 |
 | `docs/guides/control-channel.md` | socket 上的每条命令与事件、失败的加载和死掉的 renderer 长什么样、被决定不做的命令 |
 | `docs/guides/packaging.md` | 什么装到哪、session 找 helper 的五步规则、为什么 `get_option('libexecdir')` 必须先拼进 prefix 再编进去、两个方向故意相反的回退 |

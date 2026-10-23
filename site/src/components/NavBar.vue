@@ -27,13 +27,13 @@ watch(() => route.fullPath, () => { expanded.value = false })
             <router-link class="nav-link" to="/" :class="{ active: route.name === 'home' }">首页</router-link>
           </li>
           <li class="nav-item">
-            <router-link class="nav-link" to="/downloads" :class="{ active: route.name === 'downloads' }">下载</router-link>
+            <router-link class="nav-link" to="/builds" :class="{ active: route.name === 'builds' }">构建产物</router-link>
           </li>
           <li class="nav-item">
-            <router-link class="nav-link" to="/dev/start" :class="{ active: route.name === 'dev' }">文档</router-link>
+            <router-link class="nav-link" to="/docs/README" :class="{ active: route.name === 'docs' }">文档</router-link>
           </li>
           <li class="nav-item">
-            <router-link class="nav-link" to="/api/quickstart" :class="{ active: route.name === 'api' }">API 参考</router-link>
+            <router-link class="nav-link" to="/api/quickstart" :class="{ active: route.name === 'api' }">调用文档</router-link>
           </li>
           <li class="nav-item">
             <a class="btn btn-sm btn-outline-light" href="https://cnb.cool/yanzhiming/CEFNest" target="_blank" rel="noopener">
