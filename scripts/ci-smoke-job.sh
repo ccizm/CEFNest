@@ -33,4 +33,14 @@ export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC
 $SUDO apt-get update -qq
 $SUDO ./scripts/ci-prepare-tzdata.sh
 $SUDO apt-get install -y --no-install-recommends gcc binutils
-exec ./scripts/ci-smoke-packages.sh
+
+# The smoke script runs the install half only as root, and a sudo runner —
+# GitHub's is one — is exactly the case apt above already covered: elevate the
+# whole script the same way, keeping the release variables it was handed. On a
+# root runner this is the plain exec it always was; on a host whose sudo needs
+# a password this fails loudly here instead of shrinking the coverage quietly.
+if [ "$(id -u)" = 0 ]; then
+  exec ./scripts/ci-smoke-packages.sh
+fi
+exec $SUDO --preserve-env=CEFNEST_PACKAGE_RELEASE,CI_SMOKE_SKIP_INSTALL \
+  ./scripts/ci-smoke-packages.sh
