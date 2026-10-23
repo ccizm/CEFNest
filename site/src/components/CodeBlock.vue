@@ -1,9 +1,26 @@
 <script setup>
-import { onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
+import hljs from 'highlight.js/lib/core'
+import bash from 'highlight.js/lib/languages/bash'
+import c from 'highlight.js/lib/languages/c'
+import { i18n, messages } from '../i18n'
+
+hljs.registerLanguage('bash', bash)
+hljs.registerLanguage('c', c)
 
 const props = defineProps({
   code: { type: String, required: true },
-  label: { type: String, default: '代码' },
+  label: { type: String, default: '' },
+  lang: { type: String, default: '' },
+})
+
+const m = computed(() => messages[i18n.locale])
+
+const highlighted = computed(() => {
+  if (props.lang && hljs.getLanguage(props.lang)) {
+    return hljs.highlight(props.code, { language: props.lang }).value
+  }
+  return hljs.highlightAuto(props.code).value
 })
 
 const copied = ref(false)
@@ -29,18 +46,20 @@ onBeforeUnmount(() => {
 <template>
   <div class="code-card">
     <div class="code-head">
-      <span class="code-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-      <span class="code-label">{{ label }}</span>
-      <button
-        class="code-copy"
-        type="button"
-        :aria-label="copied ? '已复制' : '复制代码'"
-        @click="copy"
-      >
-        <i :class="['bi', copied ? 'bi-check2' : 'bi-clipboard']"></i>
-        <span>{{ copied ? '已复制' : '复制' }}</span>
-      </button>
+      <span class="code-title">{{ label }}</span>
+      <div class="code-actions">
+        <button
+          class="code-copy"
+          type="button"
+          :aria-label="copied ? m.code.copiedAria : m.code.copyAria"
+          @click="copy"
+        >
+          <i :class="['bi', copied ? 'bi-check2' : 'bi-clipboard']"></i>
+          <span>{{ copied ? m.code.copied : m.code.copy }}</span>
+        </button>
+        <span class="code-close" aria-hidden="true"><i class="bi bi-x-lg"></i></span>
+      </div>
     </div>
-    <pre class="code-body" tabindex="0"><code>{{ code }}</code></pre>
+    <pre class="code-body" tabindex="0"><code class="hljs" v-html="highlighted"></code></pre>
   </div>
 </template>

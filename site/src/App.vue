@@ -1,7 +1,14 @@
 <script setup>
+import { computed } from 'vue'
 import SiteNavbar from './components/SiteNavbar.vue'
 import CodeBlock from './components/CodeBlock.vue'
-import { embed, links, quickstart, repo } from './data/content'
+import { embed, quickstart, repo } from './data/content'
+import { i18n, messages } from './i18n'
+
+const m = computed(() => messages[i18n.locale])
+const quick = computed(() => quickstart[i18n.locale])
+const logo = `${import.meta.env.BASE_URL}cefnest.svg`
+const ga = `${import.meta.env.BASE_URL}ga-beian.webp`
 </script>
 
 <template>
@@ -9,24 +16,19 @@ import { embed, links, quickstart, repo } from './data/content'
 
   <header id="top" class="hero">
     <div class="container narrow">
-      <p class="eyebrow">GTK 4.14+ · 原生 Wayland · CEF 154.0.34</p>
-      <h1>CEFNest</h1>
-      <p class="tagline">在 GTK 4 里嵌入真正的 Chromium</p>
-      <p class="lead">
-        一个 GTK 4 控件：页面由真正的 Chromium 渲染，经同一进程内的 Wayland
-        合成器直接合成进控件。没有 XWayland，也没有离屏渲染。
-      </p>
+      <img class="hero-logo" :src="logo" alt="CEFNest logo" width="104" height="104" />
+      <p class="eyebrow">{{ m.hero.eyebrow }}</p>
+      <h1><span class="cef-c">C</span><span class="cef-e">E</span><span class="cef-f">F</span>Nest</h1>
+      <p class="tagline">{{ m.hero.tagline }}</p>
+      <p class="lead">{{ m.hero.lead }}</p>
       <div class="actions">
-        <a class="btn btn-dark px-4" href="#start">快速开始</a>
+        <a class="btn btn-dark px-4" href="#start">{{ m.hero.start }}</a>
         <a class="btn btn-outline-secondary px-4" :href="repo" target="_blank" rel="noopener">
-          浏览源码
+          {{ m.hero.source }}
         </a>
       </div>
       <ul class="keypoints">
-        <li><i class="bi bi-check2"></i>真 Chromium</li>
-        <li><i class="bi bi-check2"></i>原生 Wayland</li>
-        <li><i class="bi bi-check2"></i>无离屏渲染</li>
-        <li><i class="bi bi-check2"></i>一个 helper 多标签</li>
+        <li v-for="p in m.hero.points" :key="p"><i class="bi bi-check2"></i>{{ p }}</li>
       </ul>
     </div>
   </header>
@@ -34,25 +36,25 @@ import { embed, links, quickstart, repo } from './data/content'
   <main>
     <section id="start" class="section">
       <div class="container narrow">
-        <h2>快速开始</h2>
-        <p class="section-note">第一次会下载约 330 MB，解包后约 1.5 GB。</p>
-        <CodeBlock label="build & run" :code="quickstart" />
+        <h2>{{ m.start.title }}</h2>
+        <p class="section-note">{{ m.start.note }}</p>
+        <CodeBlock :label="m.start.runLabel" :code="quick" lang="bash" />
 
-        <h3 class="subhead">嵌入自己的应用</h3>
-        <CodeBlock label="embed" :code="embed" />
+        <h3 class="subhead">{{ m.start.embedTitle }}</h3>
+        <CodeBlock :label="m.start.embedLabel" :code="embed" lang="c" />
         <p class="hint">
-          顺序很重要：view 必须先进入窗口，再启动 session。关闭窗口时调用
-          <code>chromium_session_stop()</code>。
+          {{ m.start.hintLead }}
+          <code>chromium_session_stop()</code>{{ m.start.hintTail }}
         </p>
       </div>
     </section>
 
     <section id="docs" class="section">
       <div class="container narrow">
-        <h2>文档</h2>
-        <p class="section-note">完整内容在仓库里。</p>
+        <h2>{{ m.docs.title }}</h2>
+        <p class="section-note">{{ m.docs.note }}</p>
         <ul class="doc-links">
-          <li v-for="link in links" :key="link.href">
+          <li v-for="link in m.docs.links" :key="link.href">
             <a :href="link.href" target="_blank" rel="noopener">
               <span>{{ link.label }}</span>
               <small>{{ link.note }}</small>
@@ -64,13 +66,19 @@ import { embed, links, quickstart, repo } from './data/content'
   </main>
 
   <footer class="site-footer">
-    <div class="container narrow d-flex flex-wrap justify-content-between gap-2">
+    <div class="container narrow footer-cols">
       <span>CEFNest · LGPL-2.1</span>
-      <span>
-        <a :href="repo" target="_blank" rel="noopener">源码</a>
-        <span class="mx-2">·</span>
-        Vite + Vue + Bootstrap
-      </span>
+      <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">
+        皖ICP备2023011518号-1
+      </a>
+      <a
+        href="https://www.beian.gov.cn/portal/registerSystemInfo?recordcode=32050802011692"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        <img :src="ga" alt="公安备案" width="14" height="14" />
+        <span>苏公网安备32050802011692号</span>
+      </a>
     </div>
   </footer>
 </template>

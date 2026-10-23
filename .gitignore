@@ -24,6 +24,8 @@ compile_commands.json
 *.a
 *.so
 *.png
+# The site's icons are real assets, not build droppings.
+!site/public/*.png
 *.log
 .ninja_deps
 .ninja_log
