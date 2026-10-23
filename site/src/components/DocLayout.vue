@@ -2,6 +2,7 @@
 defineProps({
   items: { type: Array, required: true }, // [{ key, label }]
   heading: { type: String, required: true },
+  base: { type: String, default: 'dev' },
 })
 </script>
 
@@ -16,7 +17,8 @@ defineProps({
               <li v-for="it in items" :key="it.key" class="nav-item">
                 <router-link
                   class="nav-link"
-                  :to="`/${heading === '开发者文档' ? 'dev' : 'api'}/${it.key}`"
+                  :to="`/${base}/${it.key}`"
+                  active-class="active"
                 >
                   {{ it.label }}
                 </router-link>

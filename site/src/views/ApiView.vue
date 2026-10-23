@@ -5,6 +5,7 @@ import DocLayout from '../components/DocLayout.vue'
 import CodeBlock from '../components/CodeBlock.vue'
 import ApiEntry from '../components/ApiEntry.vue'
 import { apiSections, entries, signalRows } from '../data/apiData.js'
+import { release } from '../data/release.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -22,10 +23,11 @@ on_activate (GtkApplication *app, gpointer data)
   GtkWidget       *window  = gtk_application_window_new (app);
   ChromiumView    *view    = g_object_new (CHROMIUM_TYPE_VIEW, NULL);
   ChromiumSession *session = chromium_session_new (NULL);
+  GError          *error   = NULL;
 
   /* 顺序是硬性的：先绑定，后启动 —— helper 要从视图的合成器取 WAYLAND_DISPLAY */
   chromium_session_set_view (session, view);
-  gtk_window_set_child (GTK_WINDOW (window), view);
+  gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (view));
   gtk_window_present (GTK_WINDOW (window));
 
   if (!chromium_session_start (session, "https://cnb.cool/yanzhiming/CEFNest", &error))
@@ -342,14 +344,13 @@ on_browser_closed (ChromiumSession *s, int id, gpointer data)
 {
   remove_tab_ui (id);
   g_hash_table_remove (tabs, GINT_TO_POINTER (id));
-  /* 注意：只有窗口模式的浏览器报 ::browser-closed。关标签是静默的——
-     helper 摘视图后 CEF 不回 OnBeforeClose，close_tab () 要自己摘 UI */
+  /* 标签与窗口都会走到这里，::browser-closed 只发一次 */
 }
 
 /* 三个动作 */
 chromium_session_new_browser    (session, "https://example.org", FALSE); /* 新标签 */
 chromium_session_select_browser (session, id);                           /* 激活 */
-chromium_session_close_browser  (session, id);                           /* 关闭 */`
+chromium_session_close_browser  (session, id);                           /* 关闭标签或窗口 */`
 
 const exWindows = `/* 窗口模式：TRUE 让 helper 建独立的 CefWindow——
    它经嵌套合成器成为桌面上的独立顶层窗口，不在你的 GTK 部件树里。
@@ -359,14 +360,13 @@ chromium_session_new_browser (session, "https://example.net", TRUE);
 static void
 on_browser_closed (ChromiumSession *s, int id, gpointer data)
 {
-  remove_window_ui (id);   /* 窗口模式的关闭走这里，标签不会 */
+  remove_window_ui (id);   /* 标签同样走 ::browser-closed；这里收掉窗口 UI */
 }
 
-/* 只有窗口模式的浏览器能被宿主关掉；关标签不回报 */
+/* 窗口与标签都能被宿主关掉；未知 id 答 status: no-such-browser */
 chromium_session_close_browser (session, id);
 
-/* 拿不准 id 还在不在就先探后关——helper 答一次 status: no-such-browser，
-   这就是"已经没了"与"静默拒绝"的分界 */
+/* 关掉最后一个 browser 会结束 helper：::closed 之后还有 ::helper-exited */
 
 /* 多会话 = 多 helper：每个 ChromiumSession 拉起自己的 helper 进程。
    要两个视图各嵌一处才建两个会话；标签切换应该用上面的多标签 API */`
@@ -437,16 +437,26 @@ on_renderer_exited (ChromiumSession *s, int status, int error_code,
   show_crash_banner (status, message);   /* 例如提供"重新加载"按钮 */
 }
 
-/* ::closed (reason) —— helper 永别，不会复活。reason 说明死因 */
+/* ::closed (reason) —— 页面没了，本会话不会复活。reason 说明死因；
+   进程何时真正收走看 ::helper-exited */
 static void
 on_closed (ChromiumSession *s, const char *reason, gpointer data)
 {
   show_fatal_banner (reason);   /* 唯一确定的事：别再对这个会话发命令 */
 }
 
+/* ::helper-exited —— 子进程已被 wait 收走。拆与 helper 共用的合成器等这一条：
+   ::closed 触发时，CefShutdown() 可能还在用那条 Wayland 连接 */
+static void
+on_helper_exited (ChromiumSession *s, gpointer data)
+{
+  teardown_shared_compositor ();
+}
+
   g_signal_connect (session, "load-error",      G_CALLBACK (on_load_error), NULL);
   g_signal_connect (session, "renderer-exited", G_CALLBACK (on_renderer_exited), NULL);
-  g_signal_connect (session, "closed",          G_CALLBACK (on_closed), NULL);`
+  g_signal_connect (session, "closed",          G_CALLBACK (on_closed), NULL);
+  g_signal_connect (session, "helper-exited",   G_CALLBACK (on_helper_exited), NULL);`
 
 const exProgress = `/* ::download-progress (id, received, total, percent, speed)
    跟进在途下载；percent 在总长未知时为 -1，speed 单位字节/秒 */
@@ -508,25 +518,30 @@ on_zoom_changed (ChromiumSession *session, double level, gpointer data)
 </script>
 
 <template>
-  <DocLayout :items="apiSections" heading="调用文档">
+  <DocLayout :items="apiSections" heading="调用文档" base="api">
     <!-- ============ 最小宿主 ============ -->
     <template v-if="section === 'quickstart'">
       <h1>最小宿主</h1>
       <p>
         接入这个库只需要三个对象：<strong>窗口</strong>、<strong>ChromiumView</strong>（拥有嵌套合成器的部件）、
-        <strong>ChromiumSession</strong>（拥有 helper 与页面状态的控制面）。库随 meson install
-        装出头文件与 <code>cefnest.pc</code>，宿主一行编译：
+        <strong>ChromiumSession</strong>（拥有 helper 与页面状态的控制面）。当前版本
+        <strong>{{ release.version }}</strong>；库随安装装出头文件与 <code>cefnest.pc</code>，
+        宿主一行编译：
       </p>
       <CodeBlock label="bash" lang="bash" :code="`cc host.c -o host \$(pkg-config --cflags --libs cefnest)`" />
       <div class="doc-note">
-        这行编译对应<strong>方法一</strong>（deb / rpm 包安装）；<strong>方法二</strong>（项目包含部署）
-        装出的前缀里同样有 <code>cefnest.pc</code>，同一行命令即可。下文的示例程序两种方法都适用。
+        从<router-link to="/downloads">下载页</router-link>安装 <code>libcefnest0</code> 与
+        <code>libcefnest-dev</code>，或按<router-link to="/dev/build">从源码构建</router-link>
+        装进同一个 prefix——两条路都会留下 <code>cefnest.pc</code>，同一行命令即可。渲染页面还需要
+        <code>cefnest-helper</code>（安装包已带；源码构建时开 <code>install-helper</code>）。
+        下文的示例程序两种路径都适用。
       </div>
       <h2>三个对象，一条硬性顺序</h2>
       <CodeBlock label="examples/minimal.c · 节选" :code="quickCode" lang="c" />
       <div class="doc-note">
-        视图必须先于 <code>start()</code> 进窗口——helper 的 <code>WAYLAND_DISPLAY</code>
-        取自视图的合成器。完整源码在 <code>examples/minimal.c</code>，运行：
+        顺序是硬性的：先创建视图并 <code>chromium_session_set_view()</code>，再
+        <code>start()</code>——helper 的 <code>WAYLAND_DISPLAY</code> 取自视图的合成器。
+        完整源码在 <code>examples/minimal.c</code>，运行：
         <code>CEFNEST_URL=https://cnb.cool/yanzhiming/CEFNest ./builddir/examples/cefnest-minimal</code>
       </div>
       <h2>会话的契约</h2>
@@ -539,7 +554,7 @@ on_zoom_changed (ChromiumSession *session, double level, gpointer data)
       <h2>动手前值得知道</h2>
       <ul>
         <li>页面站在宿主的回答上：下载、查找、右键菜单、权限请求都要宿主应答，左侧各节逐一给出回复形状与不回答的代价。</li>
-        <li>API 尚不稳定；已知边角行为见<a href="#/dev/limits">已知限制</a>。</li>
+        <li>API 尚不稳定；已知边角行为见<router-link to="/dev/limits">已知限制</router-link>。</li>
       </ul>
     </template>
 
@@ -603,7 +618,8 @@ on_zoom_changed (ChromiumSession *session, double level, gpointer data)
     <template v-else-if="section === 'signals'">
       <h1>信号总表</h1>
       <p>
-        ChromiumSession 的全部信号，按 <code>src/chromium-session.c</code> 的注册顺序。
+        ChromiumSession 的全部 24 个信号，按主题排列；参数与语义以
+        <code>src/chromium-session.c</code> 的注册为准。
         两个返回 <code>gboolean</code> 的信号（context-menu、permission-request）是
         "宿主回答"型：返回 TRUE 即接管回答义务，FALSE 交回 session 默认行为。
       </p>
@@ -636,8 +652,10 @@ on_zoom_changed (ChromiumSession *session, double level, gpointer data)
       />
       <template v-if="section === 'lifecycle'">
         <div class="doc-note">
-          装好的库直接可用：demo 无需环境变量即可找到 helper（cmake 构建过的话）。
-          想强制走脚本假 helper，设 <code>CHROMIUM_HELPER</code> 为任意值即可切进会话模式。
+          <code>start()</code> 之前用 <code>chromium_session_new(path)</code> 指名 helper，
+          或让它按 <code>CEFNEST_HELPER</code> → <code>CHROMIUM_HELPER</code> → 编入的安装路径
+          → cmake 开发产物解析。完整的五步规则与失败形态见
+          <router-link to="/dev/run">运行与调试</router-link>。
         </div>
       </template>
     </template>

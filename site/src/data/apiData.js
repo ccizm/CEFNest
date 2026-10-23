@@ -37,7 +37,12 @@ export const entries = {
     {
       sig: 'signal ::closed (reason)',
       kind: 'signal',
-      desc: 'helper 永久离开，本会话不会重来；要新页面须再次 start()。reason 四选一："stopped by the host" / "helper closed the browser" / "control channel closed" / "process exited"。后两者是同一次死亡的两个侧面，先到先报——除宿主自己的 stop 外，一律按"页面没了，且不是我要求的"处理。',
+      desc: '页面没了，本会话不会重来；要新页面须再次 start()。reason 四选一："stopped by the host" / "helper closed the browser" / "control channel closed" / "process exited"。后两者是同一次死亡的两个侧面，先到先报——除宿主自己的 stop 外，一律按"页面没了，且不是我要求的"处理。进程本身何时消失看 ::helper-exited。',
+    },
+    {
+      sig: 'signal ::helper-exited ()',
+      kind: 'signal',
+      desc: 'helper 进程已被 wait 收走，::closed 之后至多一次；宿主拥有 helper 正在画的嵌套 compositor 时等它再拆，因为信号触发的 CefShutdown() 还在用那条 Wayland 连接。',
     },
     {
       sig: 'signal ::ready ()',
@@ -199,7 +204,7 @@ export const entries = {
     { sig: 'void chromium_session_select_browser (ChromiumSession *self, int id)', desc: '切换焦点 browser。id 由 CEF 分配，宿主应以 ::browser-created 为键建立自己的标签/窗口映射。' },
     {
       sig: 'void chromium_session_close_browser (ChromiumSession *self, int id)',
-      desc: '今天只对 windowed browser 生效。标签会静默：helper 只摘视图并 CloseBrowser，没有 OnBeforeClose，因此也没有 ::browser-closed。未知 id 会得到 status: no-such-browser 应答——宿主借此区分"已经没了"与"被无声拒绝"。',
+      desc: '关闭一个 browser，标签与窗口式都生效，对应 ::browser-closed 一次。关掉最后一个 browser 会结束 helper。未知 id 会得到 status: no-such-browser 应答——宿主借此区分"已经没了"与"从未存在"。',
     },
     { sig: 'signal ::browser-created (id, url, windowed)', kind: 'signal', desc: '新 browser 上线。' },
     {
@@ -207,7 +212,7 @@ export const entries = {
       kind: 'signal',
       desc: '焦点转移。它可能先于 ::browser-created 到达——helper 会对"创建事件还在路上"的 browser 报告选中，宿主必须能为还没见过的 id 先立一个标签。',
     },
-    { sig: 'signal ::browser-closed (id)', kind: 'signal', desc: 'browser 消亡（见 close_browser 的标签例外）。' },
+    { sig: 'signal ::browser-closed (id)', kind: 'signal', desc: 'browser 消亡；标签与窗口都会发一次。关掉最后一个后 helper 结束，随后是 ::helper-exited。' },
   ],
   misc: [
     {
@@ -268,7 +273,7 @@ export const entries = {
   ],
 }
 
-// 信号总表（按 src/chromium-session.c g_signal_new 注册顺序与参数类型）
+// 信号总表：覆盖 src/chromium-session.c 注册的全部 24 个信号，按主题排列；参数类型取自 g_signal_new
 export const signalRows = [
   { name: 'changed', args: '—', desc: 'URI / 标题 / 加载态 / 静音回读等属性批变时发出' },
   { name: 'ready', args: '—', desc: 'helper 连上控制通道，初始 URL 即将加载' },
@@ -281,7 +286,7 @@ export const signalRows = [
   { name: 'primary-selection', args: 'text: string', desc: '页面选择变化的主选区镜像；空串即清除' },
   { name: 'browser-created', args: 'id: int, url: string, windowed: gboolean', desc: '新 browser 上线' },
   { name: 'browser-selected', args: 'id: int', desc: '焦点转移；可能先于 created 到达' },
-  { name: 'browser-closed', args: 'id: int', desc: 'browser 消亡（windowed 之外有静默例外）' },
+  { name: 'browser-closed', args: 'id: int', desc: 'browser 消亡；标签与窗口都会发一次' },
   { name: 'download-begin', args: 'id: int, url: string, suggested_name: string, mime_type: string, total_bytes: int64', desc: '下载之问；不回答则停靠不落盘' },
   { name: 'download-progress', args: 'id: int, received: int64, total: int64, percent: int, speed: int64', desc: '每整百分比一条；speed 为 bytes/s' },
   { name: 'download-end', args: 'id: int, state: string, path: string, received: int64', desc: '唯一收尾：complete / cancelled / interrupted' },
@@ -292,5 +297,6 @@ export const signalRows = [
   { name: 'zoom-changed', args: 'level: double', desc: '缩放级上报；0.0 = 100%' },
   { name: 'copy-text', args: 'text: string', desc: '宿主策略：复制链接/图片地址上剪贴板' },
   { name: 'open-url', args: 'url: string', desc: '宿主策略：开新窗口' },
-  { name: 'closed', args: 'reason: string', desc: 'helper 永久离开；每次 start 至多一次' },
+  { name: 'closed', args: 'reason: string', desc: '页面没了；每次 start 至多一次，进程可能还在 CefShutdown()' },
+  { name: 'helper-exited', args: '—', desc: '子进程已被 wait 收走；拆与 helper 共用的合成器等这一条' },
 ]

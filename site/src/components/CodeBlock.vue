@@ -3,10 +3,12 @@ import { ref, onMounted } from 'vue'
 import hljs from 'highlight.js/lib/core'
 import c from 'highlight.js/lib/languages/c'
 import bash from 'highlight.js/lib/languages/bash'
+import plaintext from 'highlight.js/lib/languages/plaintext'
 import 'highlight.js/styles/github-dark.css'
 
 hljs.registerLanguage('c', c)
 hljs.registerLanguage('bash', bash)
+hljs.registerLanguage('plaintext', plaintext)
 
 const props = defineProps({
   code: { type: String, required: true },
@@ -18,7 +20,7 @@ const copied = ref(false)
 
 onMounted(() => {
   const el = root.value?.querySelector('code')
-  if (el && props.lang) {
+  if (el && props.lang && hljs.getLanguage(props.lang)) {
     el.classList.add(`language-${props.lang}`)
     hljs.highlightElement(el)
   }
