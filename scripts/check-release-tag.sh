@@ -6,7 +6,7 @@
 # only thing that could notice a wrong version was the attachment upload: the
 # names in .cnb.yml are static (that step cannot expand shell variables), so a
 # tag pushed without bumping CEFNEST_PACKAGE_RELEASE — or a bump that forgot one
-# of the ten asset names — spends the full 90 minutes and then fails on a missing
+# of the nine asset names — spends the full 90 minutes and then fails on a missing
 # file, or worse, publishes a Release whose title and whose package versions
 # describe different builds.
 #
@@ -25,7 +25,7 @@
 #
 # Run from anywhere in the checkout:
 #
-#   CEFNEST_PACKAGE_RELEASE=5 CEFNEST_EXPECTED_TAG=v154.0.34-5 \
+#   CEFNEST_PACKAGE_RELEASE=6 CEFNEST_EXPECTED_TAG=v154.0.34-6 \
 #     ./scripts/check-release-tag.sh
 
 set -eu

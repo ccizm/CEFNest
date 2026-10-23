@@ -280,7 +280,25 @@ void               chromium_session_permission_respond (ChromiumSession *self,
  * (the socket hung up), "process exited" (the child was reaped). The last two
  * are the same death seen from two sides and whichever arrives first reports
  * it, so a host should treat every reason but its own as "the page is gone,
- * and I did not ask for that" rather than branch on the difference. */
+ * and I did not ask for that" rather than branch on the difference.
+ *
+ * ::helper-exited () follows once the helper process itself has been reaped —
+ * not when it announced it was leaving, but when the wait has completed and no
+ * process is left. The gap matters to a host that owns the display: a helper
+ * stopped by SIGTERM/SIGHUP/SIGINT says {"event":"closed"} and then spends
+ * CefShutdown() still reading the Wayland connection its CefWindow was given,
+ * so a host that destroys the nested compositor on ::closed makes the helper's
+ * GDK end the process with "Lost connection to Wayland compositor" before the
+ * tail of main() runs. Destroy the display here instead.
+ *
+ * Emitted once for the helper that was still this session's child when its
+ * wait completed, after ::closed and after the exit status has been logged.
+ * Not emitted when the session is disposed before its child is reaped — the
+ * host has already dropped the session — nor for a child that a ::closed
+ * handler replaced with a fresh chromium_session_start (), since the new
+ * helper has its own exit to report. chromium_session_stop () still reaches
+ * it, because stopping force-exits the child unless the helper was already on
+ * its way out. */
 
 const char        *chromium_session_get_helper_path (ChromiumSession *self);
 const char        *chromium_session_get_uri         (ChromiumSession *self);

@@ -13,14 +13,29 @@
 # So the gate signals the helper from outside, the way a session manager does,
 # and reads back what the helper and the host each reported.
 #
-# The last two assertions are the pair that matters. A handler that runs but
-# leaves the shutdown incomplete is the same bug with better logging, and the
-# first version of this gate caught exactly that: the helper announced
-# "caught signal 15", released its SingletonLock, and then died inside
-# CefShutdown() — because the host, seeing the helper's own {"event":"closed"},
-# ended its run and its dispose force-exited the child over that announcement.
-# chromium-session.c now leaves a helper that said it is leaving alone, and the
-# tail of main() runs to "helper: exited".
+# The tail-of-main and clean-exit assertions are the pair that matters. A
+# handler that runs but leaves the shutdown incomplete is the same bug with
+# better logging, and the first version of this gate caught exactly that: the
+# helper announced "caught signal 15", released its SingletonLock, and then died
+# inside CefShutdown() — because the host, seeing the helper's own
+# {"event":"closed"}, ended its run and its dispose force-exited the child over
+# that announcement. chromium-session.c now leaves a helper that said it is
+# leaving alone, and the tail of main() runs to "helper: exited".
+#
+# The host also has to outlive the shutdown. Its nested compositor is what the
+# helper's CefWindow talks to; when a scripted run ended on ::closed, the demo
+# quit and took the compositor with it while CefShutdown() was still running.
+# The helper's GDK then ended the process with "Lost connection to Wayland
+# compositor" before the tail printed. That made this gate red about one run in
+# five (2026-10-23, 2 of 11), reported as the misleading "CefShutdown did not
+# run".
+#
+# The fix is in the API, not in this script: ::closed says the page is gone,
+# and the new ::helper-exited follows once the process itself has been reaped.
+# The demo defers its quit on the first until the second. The script below
+# keeps a pending `wait`/`quit`, so the signal lands on a page and the demo has
+# a reason to stay alive; if the deferral regresses, the demo quits inside
+# CefShutdown() and the tail assertions fail again.
 #
 # Run it inside a nested session so nothing lands on the desktop of whoever is
 # sitting here:
@@ -67,8 +82,12 @@ signal_case() {
   local log=$RUN/$name.log
   local session=$RUN/$name.session
 
-  # Long enough that the signal lands on a helper with a page showing, and the
-  # demo is still around to report how the process ended.
+  # A page up when the signal lands, and a step still pending after it. The
+  # trailing `quit` is what makes ::closed take the cut-short path; without it
+  # the `wait` step is the last consumed index, the demo sees nothing left to
+  # do, and neither the failure nor the deferred quit is exercised. Do not end
+  # the script at `load` either — the runner quits at the end of a script,
+  # before the signal ever lands. See the comment at the top of the file.
   { echo "load $PAGE"; echo "wait 12000"; echo "quit"; } > "$session"
 
   # The previous case's profiles: SingletonLock is found by name below, so an
@@ -148,6 +167,41 @@ signal_case() {
     && ok "$name: reached the tail of main() after CefShutdown" \
     || { bad "$name: 'helper: exited' missing — CefShutdown did not run"
          tail -25 "$log" | sed 's/^/         /'; }
+
+  # The host defers its quit to ::helper-exited, so it is still alive to reap
+  # the child and say how it ended. Checking the log line rather than the raw
+  # status is deliberate: the host is the child's parent and owns that
+  # observation; grepping the shared transcript for "helper: exited" alone
+  # cannot tell a clean exit from a process that GDK ended after printing it.
+  local reaped=0
+  for _ in $(seq 1 50); do
+    grep -q "session: helper exited with status 0" "$log" && { reaped=1; break; }
+    sleep 0.1
+  done
+  [ "$reaped" = 1 ] \
+    && ok "$name: the host reaped the helper with status 0" \
+    || { bad "$name: the host did not report a clean helper exit"
+         tail -10 "$log" | sed 's/^/         /'; }
+
+  # ::helper-exited is what the demo waits for before dropping the display.
+  grep -q "demo: helper process reaped" "$log" \
+    && ok "$name: the demo saw ::helper-exited" \
+    || { bad "$name: the demo never saw ::helper-exited"
+         tail -10 "$log" | sed 's/^/         /'; }
+
+  # And it leaves by itself once that arrives. A demo that quit at ::closed
+  # was already gone before the helper was reaped; one that never leaves would
+  # turn the deferral into a hang and wait here for the kill this gate should
+  # not have to send.
+  local demo_gone=0
+  for _ in $(seq 1 50); do
+    kill -0 "$demo" 2>/dev/null || { demo_gone=1; break; }
+    sleep 0.1
+  done
+  [ "$demo_gone" = 1 ] \
+    && ok "$name: the demo left on its own after the helper" \
+    || { bad "$name: the demo was still running 5 s after ::helper-exited"
+         tail -10 "$log" | sed 's/^/         /'; }
 
   # The host's own read of the wait status: a signal death is what this gate is
   # there to prevent, and the host reports it in its words, not the helper's.

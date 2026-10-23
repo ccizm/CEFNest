@@ -122,7 +122,7 @@ CNB 的发版流水线还会把安装树打成 `libcefnest0`、`libcefnest-dev`�
 `pkg-config --cflags --libs cefnest` 构建宿主。依赖严格分层、无循环：
 `cefnest-helper`（CEF 运行时）在底层、最先安装，`libcefnest0` 精确依赖对应版本的
 helper，`libcefnest-dev` 与 `cefnest-demo` 精确依赖对应版本的库。四个包共用一个
-版本号——CEF stable `X.Y.Z` 加修订号（`154.0.34-5`）——同一次构建一起发布，
+版本号——CEF stable `X.Y.Z` 加修订号（`154.0.34-6`）——同一次构建一起发布，
 升级时整体联动。流水线只在版本 tag 上构建，详见 `docs/testing/cnb-ci.md`。
 
 `cefnest-helper` 默认**开着**沙箱启动 Chromium，而它把 `chrome-sandbox` 原样装成 0755

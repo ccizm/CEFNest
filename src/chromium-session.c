@@ -59,6 +59,7 @@ enum {
   SIG_COPY_TEXT,
   SIG_OPEN_URL,
   SIG_CLOSED,
+  SIG_HELPER_EXITED,
   N_SIGNALS
 };
 static guint signals[N_SIGNALS];
@@ -1929,8 +1930,24 @@ child_waited (GObject *source, GAsyncResult *result, gpointer data)
   if (self->child && source == G_OBJECT (self->child))
     {
       mark_closed (self, "process exited");
-      g_clear_object (&self->child);
-      drop_connection (self);
+
+      /* A ::closed handler may start a fresh helper from inside that emission
+       * (examples/useragent.c does). This wait belongs to the old child; had it
+       * gone on, it would clear the new one's child and close the channel the
+       * new helper is about to use. */
+      if (self->child && source == G_OBJECT (self->child))
+        {
+          g_clear_object (&self->child);
+          drop_connection (self);
+
+          /* ::closed said the page is gone; this says the process that held it
+           * is gone too. The distinction is what lets a host keep its display
+           * alive through the helper's CefShutdown() — see the signal's
+           * documentation in chromium-session.h. Emitted after the child is
+           * cleared so a handler that stops the session cannot address a
+           * process already reaped. */
+          g_signal_emit (self, signals[SIG_HELPER_EXITED], 0);
+        }
     }
   g_object_unref (self);
 }
@@ -2631,6 +2648,9 @@ chromium_session_class_init (ChromiumSessionClass *klass)
   signals[SIG_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_HELPER_EXITED] =
+    g_signal_new ("helper-exited", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_ZOOM_CHANGED] =
     g_signal_new ("zoom-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_DOUBLE);

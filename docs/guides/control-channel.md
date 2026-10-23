@@ -174,7 +174,9 @@ prompt IGNORE，而 IGNORE 传到你手上就是一条永远不 settle 的 promi
 `::download-end`、`::find-result`、`::context-menu`、`::permission-request`、
 `::permission-dismissed`（最后三条新）、`::closed`（带一个原因字符串：`stopped by the
 host` / `helper closed the browser` / `control channel closed` / `process exited`，
-实测与取舍在 `docs/features/session-lifecycle.md` §5）。多浏览器那三条 `::browser-created`
+实测与取舍在 `docs/features/session-lifecycle.md` §5）、`::helper-exited`（无参数，
+`child_waited()` 收走子进程之后才发一次；拥有 helper 正在画的显示就等它再拆，原因
+与实测在 `docs/features/session-lifecycle.md` §7）。多浏览器那三条 `::browser-created`
 （id, url, windowed）、`::browser-selected`（id）、`::browser-closed`（id，tab 上
 永远不来——`close-browser` 的三方实测在 `docs/features/multi-browser.md` §1）和页面侧两条
 `::page-message`（json）、`::popup-requested`（url）在 `src/chromium-session.h` 里

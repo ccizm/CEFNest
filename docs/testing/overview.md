@@ -281,15 +281,17 @@ pinned — it is a sawtooth. Measured run: 40 s, 19 samples, fd 379 → 378 (pea
 `docs/internals/sandbox-policy.md` §7 and §8 are the numbers this keeps from going stale.
 
 `test/helper-signal-gate.sh` is the exit-path half: it signals the helper the way a
-session manager does — SIGTERM, then SIGHUP in a second run — and grades six
+session manager does — SIGTERM, then SIGHUP in a second run — and grades nine
 assertions per signal. Before sending anything it reads `SigCgt` out of
 `/proc/PID/status`, because `CefInitialize()` puts those three signals back to
 `SIG_DFL` on the way through (strace: about 2 ms after an install made before it), and
 without that check "no handler was ever installed" and "one transcript line is missing"
 grade the same. Then: the handler names the signal on the UI thread, `main()` reaches
-its tail after `CefShutdown()`, the host never reports a signal death, and the profile's
-`SingletonLock` is gone — that lock is the user-visible symptom, since the next helper on
-the same profile reads it as "opening in an existing browser session". It runs hosted:
+its tail after `CefShutdown()`, the host reaps the child with status 0, the demo sees
+`::helper-exited`, the demo leaves on its own once it does, the host never reports a
+signal death, and the profile's `SingletonLock` is gone — that lock is the user-visible
+symptom, since the next helper on the same profile reads it as "opening in an existing
+browser session". It runs hosted:
 under `gnome-shell --headless` a standalone helper never returns from `CefInitialize()`
 (measured on the current and the previous binary), which is what
 `docs/internals/sandbox-policy.md` §9 records. Both runs open a real window, so it is a

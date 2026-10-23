@@ -23,6 +23,12 @@ typedef struct {
    * plain Wayland client: then the header bar is a browser toolbar and the
    * session owns the process. */
   ChromiumSession *session;
+  /* A scripted run that loses its helper reports the failure at ::closed but
+   * does not quit there: the helper may still be inside CefShutdown(), drawing
+   * into the nested compositor this process owns. ::helper-exited is the first
+   * moment the display can go without killing that shutdown. */
+  gboolean helper_exited;
+  gboolean quit_when_helper_exits;
   GtkWidget *address;
   GtkWidget *back;
   GtkWidget *forward;
@@ -1631,6 +1637,19 @@ session_closed (ChromiumSession *session, const char *reason, gpointer data)
 }
 
 static void
+session_helper_exited (ChromiumSession *session, gpointer data)
+{
+  demo.helper_exited = TRUE;
+  g_printerr ("demo: helper process reaped\n");
+
+  /* The failure was already reported when ::closed arrived; this is the point
+   * where a quit can no longer pull the nested compositor out from under the
+   * helper's CefShutdown(). */
+  if (demo.quit_when_helper_exits)
+    g_application_quit (G_APPLICATION (demo.app));
+}
+
+static void
 address_activate (GtkEntry *entry, gpointer data)
 {
   const char *text = gtk_editable_get_text (GTK_EDITABLE (entry));
@@ -1756,6 +1775,8 @@ build_toolbar (GtkHeaderBar *header)
   g_signal_connect (demo.session, "permission-dismissed",
                     G_CALLBACK (session_permission_dismissed), NULL);
   g_signal_connect (demo.session, "closed", G_CALLBACK (session_closed), NULL);
+  g_signal_connect (demo.session, "helper-exited",
+                    G_CALLBACK (session_helper_exited), NULL);
   g_signal_connect (demo.session, "browser-created",
                     G_CALLBACK (session_browser_created), NULL);
   g_signal_connect (demo.session, "browser-selected",
@@ -2386,6 +2407,20 @@ script_helper_gone (gpointer data)
               reason, left, session_script.steps->len);
   script_finish ();
   demo.exit_status = 1;
+
+  /* Report now, quit later. On SIGTERM/SIGHUP the helper announces ::closed
+   * from inside its shutdown and then stays alive through CefShutdown(), still
+   * drawing into this process's nested compositor. Quitting here destroys that
+   * compositor and the helper's GDK ends the process with "Lost connection to
+   * Wayland compositor" before the tail of main() — the same bug with a better
+   * log. ::helper-exited is the first moment there is no process left to need
+   * the display. */
+  if (!demo.helper_exited)
+    {
+      demo.quit_when_helper_exits = TRUE;
+      return G_SOURCE_REMOVE;
+    }
+
   g_application_quit (G_APPLICATION (demo.app));
 
   return G_SOURCE_REMOVE;
@@ -3031,6 +3066,11 @@ start_session_script (void)
 static void
 session_ready (ChromiumSession *session, gpointer data)
 {
+  /* A helper that reports ready is a new process; the previous child's exit,
+   * if there was one, says nothing about this one. */
+  demo.helper_exited = FALSE;
+  demo.quit_when_helper_exits = FALSE;
+
   if (session_script.steps && session_script.index == 0)
     g_idle_add (script_wait_done, NULL);
 }

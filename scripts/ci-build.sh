@@ -139,35 +139,25 @@ CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION)
 
 ## 中文
 
-本版变更：
+本版变更（相对 154.0.34-5）：
 
-- helper 现在真的收 SIGTERM/SIGHUP/SIGINT：\`systemctl stop\` 与桌面注销会走完
-  \`CefShutdown()\`，不再在 profile 里留下一枚没人释放的 SingletonLock；新门禁
-  \`test/helper-signal-gate.sh\` 从 \`SigCgt\`、日志、退出与锁释放四处量这条路径。
-- 发版流水线多了两道当场失败的检查：推 tag 先由 \`scripts/check-release-tag.sh\`
-  比版本串、修订号与 9 个静态附件名（漏改一处的结论从 90 分钟后提到几十秒），
-  构建完再由 \`scripts/ci-smoke-packages.sh\` 用 apt 真装一遍、对安装路径跑 \`ldd\`、
-  不带显示起一次 helper 读它的沙箱横幅。
-- \`cefnest-build.tar.gz\` 现在对得上它自己的说明：\`src/\`、\`examples/\`（全部示例）、
-  \`test/\` 三层保持原样，二进制用自身的 \`\$ORIGIN\` rpath 找到同批的库，库版本与包版本
-  是同一个串；它**不含 helper、不含 CEF 运行时**，说明里就这么写。
-- 运行前提写进文档与包描述：helper 默认开沙箱，\`chrome-sandbox\` 以 0755 打包（无
-  setuid 位、无 AppArmor profile）。宿主禁掉非特权用户命名空间时——Ubuntu 24.04 默认
-  如此——helper 在启动那步响亮失败，而不是静默降回无沙箱；两条出路是给
-  \`cefnest-helper\` 一条允许 \`userns\` 的 AppArmor profile，或设
-  \`CHROMIUM_HELPER_NO_SANDBOX=1\`。
-- 许可信息补齐：四个 deb 各带 machine-readable copyright
-  （\`/usr/share/doc/<包名>/copyright\`），helper 那份额外把 CEF 运行时记成
-  BSD-3-clause 并附上 \`LICENSE.cef.txt\`；RPM 的 helper 子包 \`License:\` 写
-  \`LGPL-2.1-only and BSD-3-Clause\`。
-- \`scripts/fetch-cef.sh\` 把两个架构 \`154.0.34\` 归档的 sha256 钉进仓库：下载到的字节
-  必须等于仓库批准的值才解包，不再只信构建服务自己给的摘要。
-- 示例修正：zoom 按 \`100 × 1.2^level\` 显示（此前当线性百分比，放大一档显示 50%）；
-  上下文菜单的 popover 挂到 view 而非窗口（\`::context-menu\` 的 x/y 是 view 内坐标）；
-  下载撞名落名保住扩展名且不再泄漏；paint stack 释放；查找条只在打开时吞 Escape；
-  静音图标随状态更新。
-- \`src/chromium-session.h\` 的 API 文档订正：关标签同样会发 \`::browser-closed\`
-  （上一版文档还在宣称它静默失败）。
+- \`wl_shm\` 的请求槽 1 现在有实现，全局版本升到 2：Wayland 1.22 上客户端正常销毁
+  自己的 \`wl_shm\` 代理不再命中空槽，把嵌套合成器连同宿主一起 \`wl_abort\`。源码
+  审计把显式 \`NULL\`/\`0\` 初始化式也算作空槽；新运行时门禁
+  \`seat-selftest-shm-release\` 发一条裸请求并要求连接继续被服务，\`--wrong-object\`
+  的帧头也按真实布局（对象 id 在前）修正。
+- CEF 子进程改用 \`_exit(code)\` 离开 \`main()\`，不再走栈保护尾言。CEF 154 的
+  fork-without-exec 子进程继承父进程的 canary 槽，正常返回会打出
+  \`*** stack smashing detected ***\` 并以 SIGABRT 收尾；\`test/ci-session.sh\`
+  已把这类行从“容忍的沙箱噪声”改成失败。
+- helper 把“页面没了”和“进程没了”分成两个时刻：\`::closed\` 仍由页面关闭发出，
+  新增的 \`::helper-exited\` 在 \`child_waited()\` 收走子进程之后才发。宿主若拥有
+  helper 正在画的嵌套 compositor，就该等后者再拆——\`systemctl stop\`/注销时
+  helper 先报 \`closed\`、再在 \`CefShutdown()\` 里继续用那条 Wayland 连接，先拆
+  会让它的 GDK 打出 \`Lost connection to Wayland compositor\` 并把进程结束在
+  \`main()\` 尾部之前。demo 的脚本在 helper 主动退出时据此推迟退出，
+  \`test/helper-signal-gate.sh\` 的 \`load\`/\`wait\`/\`quit\` 因此保留 pending 步并
+  真正走到这条路径；每边 9 条断言，改完连跑 10 次全绿（此前 11 次里红 2 次）。
 
 ### 附件说明
 
@@ -189,44 +179,33 @@ CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION)
 
 ## English
 
-Highlights of this release:
+Highlights of this release (relative to 154.0.34-5):
 
-- The helper answers SIGTERM/SIGHUP/SIGINT for real: \`systemctl stop\` and a
-  session logout run \`CefShutdown()\` to the end instead of leaving a
-  SingletonLock nobody will release, and \`test/helper-signal-gate.sh\` grades the
-  whole path from \`SigCgt\`, the transcript, the exit and the released lock.
-- Two new checks that fail on the spot. \`scripts/check-release-tag.sh\` compares
-  the version, the revision and the nine static attachment names before the long
-  build starts (a missed name now costs seconds, not 90 minutes), and
-  \`scripts/ci-smoke-packages.sh\` installs the debs with apt, runs \`ldd\` on the
-  installed paths and starts the packaged helper headless to read its sandbox
-  banner.
-- \`cefnest-build.tar.gz\` matches its own description: \`src/\`, \`examples/\` (every
-  example) and \`test/\` keep the three directories the binaries' \`\$ORIGIN\` rpaths
-  expect, and the library inside carries the same version the packages do. It
-  holds **no helper and no CEF runtime**, and the notes say so.
-- The runtime requirement is documented and in the package descriptions: the
-  helper starts Chromium with the sandbox on and installs \`chrome-sandbox\` 0755 —
-  no setuid bit, no AppArmor profile. On a host that restricts unprivileged user
-  namespaces (Ubuntu 24.04 by default) it fails loudly at startup rather than
-  silently dropping the sandbox. Two ways out: an AppArmor profile allowing
-  \`userns\` for \`cefnest-helper\`, or \`CHROMIUM_HELPER_NO_SANDBOX=1\`.
-- Licensing metadata: all four debs ship a machine-readable copyright at
-  \`/usr/share/doc/<package>/copyright\`, the helper's records the CEF runtime as
-  BSD-3-clause and installs \`LICENSE.cef.txt\`; the RPM helper subpackage declares
-  \`License: LGPL-2.1-only and BSD-3-Clause\`.
-- \`scripts/fetch-cef.sh\` pins the sha256 of both \`154.0.34\` archives in the
-  repository: the downloaded bytes must equal the value this tree approved before
-  anything is unpacked, instead of trusting only the digest the build service
-  serves next to the file.
-- Example fixes: zoom is shown as \`100 × 1.2^level\` (it was read as a linear
-  percent, so one step in displayed "50%"); a context-menu popover parents to the
-  view, not the window, because \`::context-menu\` x/y are view coordinates;
-  collision-free download names keep their extension and no longer leak; the
-  paint stack is freed; the find bar swallows Escape only while open; the mute
-  icon follows the state.
-- \`src/chromium-session.h\` corrected: closing a tab does emit
-  \`::browser-closed\` — the previous API text still claimed it failed in silence.
+- Request slot 1 of \`wl_shm\` is implemented and the global is advertised at
+  version 2: on Wayland 1.22 a client that destroys its own \`wl_shm\` proxy no
+  longer hits an empty slot and \`wl_abort\`s the nested compositor together with
+  the host. The source audit now counts explicit \`NULL\`/\`0\` initializers as
+  empty slots, a new runtime gate (\`seat-selftest-shm-release\`) sends the raw
+  request and requires the connection to keep being served, and the
+  \`--wrong-object\` frame header was corrected to the real layout (object id
+  first).
+- CEF subprocesses leave \`main()\` with \`_exit(code)\` instead of returning
+  through the stack protector. CEF 154's fork-without-exec children inherit the
+  parent's canary slot, so a normal return printed
+  \`*** stack smashing detected ***\` and ended in SIGABRT; \`test/ci-session.sh\`
+  now treats that line as a failure instead of a tolerated sandbox message.
+- The helper now separates "the page is gone" from "the process is gone":
+  \`::closed\` still comes when the browser closes, and the new
+  \`::helper-exited\` follows once \`child_waited()\` has reaped the child. A host
+  that owns the nested compositor the helper draws into should tear it down on
+  the latter — on \`systemctl stop\` or a logout the helper reports \`closed\`
+  and then spends \`CefShutdown()\` still using that Wayland connection, so
+  tearing the display down first makes its GDK print
+  \`Lost connection to Wayland compositor\` and end the process before the tail
+  of \`main()\`. The demo now defers its scripted quit, and
+  \`test/helper-signal-gate.sh\` keeps a pending \`wait\`/\`quit\` step so it
+  exercises that path; nine assertions per signal, 10 consecutive green runs
+  after the fix (the old shape failed 2 of 11).
 
 ### Assets
 

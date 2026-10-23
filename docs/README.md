@@ -47,7 +47,7 @@
 
 | 文档 | 关于 |
 | --- | --- |
-| `docs/features/session-lifecycle.md` | 与 helper 一起启动、停止和死亡，含 helper 收 SIGTERM/SIGHUP/SIGINT 的那一条（handler 只能装在 `CefInitialize()` 之后）与它的 12 条断言门禁 |
+| `docs/features/session-lifecycle.md` | 与 helper 一起启动、停止和死亡，含 helper 收 SIGTERM/SIGHUP/SIGINT 的那一条（handler 只能装在 `CefInitialize()` 之后）、`::closed`/`::helper-exited` 的分工与它的 18 条断言门禁 |
 | `docs/features/multi-browser.md` | 单 helper 的 browser 注册表、标签条、独立宿主窗口、协议 id、按窗口的输入交还规则及其门禁，以及剩下的弹窗警告 |
 | `docs/features/clipboard-bridge.md` | `wl_data_device` ↔ `GdkClipboard` 双向 |
 | `docs/features/drag-loop.md` | 页面内拖拽的编排、"wl_data_device.enter 到得了页面"的实测证明、目的地真正接受什么、为什么 fd 中继不是同页 payload 的载体、跨越窗口边缘的拖拽怎么从页面的 source 上读出来交给宿主（图片字节落成以文件列表提供的临时文件）、反方向的同一跨越怎么让 compositor 当 source——包括"页面在被 enter 的一刻就读宿主 drag"那条测量，所以只有 `finish` 能定判定 |

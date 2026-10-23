@@ -303,17 +303,49 @@ headless 显示器上重跑，全过、断言数不变。
    `child_waited` 持有引用，进程该收还是收。显式的宿主停止（通道还开着）照旧 force-exit。
 
 门禁：`test/helper-signal-gate.sh`，两个信号各跑一遍完整场景（TERM、HUP），
-每边 6 条断言 = 12 条。它在 nested session 里跑（`./test/ci-session.sh
+每边 9 条断言 = 18 条。它在 nested session 里跑（`./test/ci-session.sh
 ./test/helper-signal-gate.sh`），已进 `test/ci-all.sh` 的 `signal` 一行。它用的是
 **hosted** 模式：standalone 在那套 headless 下 `CefInitialize()` 不返回
 （`docs/internals/sandbox-policy.md` §9，当前与上一版二进制都试过），所以 helper 必须按真宿主
-的方式拉起来。三条值得单独说的判据：
+的方式拉起来。六条值得单独说的判据：
 
 * 动手之前先读 `/proc/PID/status` 的 `SigCgt`，确认这个信号**确实被捕获着**。少了这一步，
   "handler 没装上"和"转录里少一行日志"在断言里长一个样。
 * 断言的是"跑到 `main()` 的尾巴"（`helper: exited` 在 `CefShutdown()` 之后）和
   "profile 的 `SingletonLock` 没了"——后者是这条 bug 原本的用户可见症状。
+* 宿主必须活到子进程被 reap，并报出 `session: helper exited with status 0`。这一条不是
+  重复：`helper: exited` 只是一行 stderr，宿主自己的 wait 状态才能区分干净退出和
+  打印完尾巴又被 GDK 结束的进程。
+* demo 自己印出 `helper process reaped`，即真的收到了 `::helper-exited`。只看 helper
+  的转录分不清"宿主等到了这个信号"和"宿主一直没退、最后被门禁杀掉"。
+* demo 随后**自己**退出。等信号如果退化成永远不等，这道门在 5 秒后红，而不是把一次
+  挂起留给整轮 CI 的超时。
 * 转录里不许出现 `session: helper killed by signal`：那是宿主自己观察到进程被信号打死。
+
+**2026-10-23 补的一条门禁竞态，以及把它修在 API 上**：原来的 session 脚本是
+`load` → `wait 12000` → `quit`。helper 在 `wait` 还没走完时退出，
+`script_helper_gone` 看见还有 pending step，就按"这一跑失败"直接
+`g_application_quit()`；demo 一退，它持有的嵌套 compositor 消失，helper 的 GDK
+打出 `Lost connection to Wayland compositor.` 并把进程结束在 `CefShutdown()` 尾部
+之前。全量加单独重跑共 11 次，2 次红（约 1/5），报错却是
+`'helper: exited' missing — CefShutdown did not run`——把宿主拆 compositor 的时序
+误报成了 CefShutdown 没跑。
+
+先试过让脚本在 `load` 后就结束（脚本下标到末尾，`::closed` 不触发那条失败路径），
+但脚本引擎在末尾会自己 `quit`，信号还没落到 helper 上宿主就走了，门禁反而稳定地
+报"页面没装上"。真正的问题是 API 少了一个时刻：`::closed` 只说明**页面**没了，
+helper 进程还在 `CefShutdown()` 里用它拿到的 Wayland 连接。于是新增
+`::helper-exited`（无参数）：`child_waited()` 收走当前子进程、记录退出状态、发完
+`::closed` 之后才发一次。demo 把"脚本被截断"的报告留在 `::closed`，退出推迟到
+`::helper-exited`；`wait`/`quit` 因此可以留在脚本里，门禁真正走到这条路径。转录里
+的顺序是 `helper stopped (helper closed the browser)` → `the helper went away …` →
+`helper: exited` → `helper exited with status 0` → `helper process reaped`。改完连跑
+10 次全绿；此前同一形状 11 次里红 2 次。
+
+**边界**：`::closed` 仍然早于进程退出，这是协议原来的语义，没有改。宿主如果自己拥有
+显示，就该在 `::helper-exited` 里拆；仍在 `::closed` 里同步销毁 compositor 的宿主会
+重演这条竞态。示例宿主在 `::closed` 里保留窗口，demo 现在等 `::helper-exited`，两边
+都不踩。
 
 没修的一条：`kill -9` 依旧什么都来不及做（§8）。
 
