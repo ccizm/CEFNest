@@ -8,7 +8,9 @@
 # installable deb/rpm packages (including the helper and its CEF runtime) as
 # Release assets. Push a version tag such as v154.0.34-9 to publish one.
 # Ordinary branch pushes build nothing here — the full gate (test/ci-all.sh)
-# runs locally or on a prepared self-hosted runner.
+# runs locally or on a prepared self-hosted runner — except the site, which
+# deploys to EdgeOne Pages on every push to main (see the main: block at the
+# bottom).
 #
 # The CEFNEST_PACKAGE_RELEASE / CEFNEST_EXPECTED_TAG pair and the asset names
 # below are static (the attachment list cannot expand shell variables), so they
@@ -56,3 +58,31 @@ $:
               - "./dist/cefnest-154.0.34-9.x86_64.rpm"
               - "./dist/cefnest-devel-154.0.34-9.x86_64.rpm"
               - "./dist/SHA256SUMS"
+
+# The documentation site (site/) deploys to Tencent EdgeOne Pages on every
+# push to main. EO_SECRET is not stored in this repository: the deploy stage
+# imports it from the private EO repository (a one-line file,
+# `EO_SECRET: "<token>"`), the same config-repo pattern as hotel/mmt-web, so
+# only that stage ever sees the value. The EdgeOne Pages project name is
+# fixed: cefnest.
+main:
+  push:
+    site_deploy:
+      name: site deploy
+      runner:
+        cpus: 2
+      docker:
+        image: node:22
+      stages:
+        - name: build the site
+          script:
+            - cd site && npm ci --no-audit --no-fund && npm run build
+        - name: deploy to EdgeOne Pages
+          imports:
+            - https://cnb.cool/yanzhiming/EO/-/blob/main/eo.yml
+          image: tencentcom/deploy-eopages:latest
+          script:
+            - test -n "$EO_SECRET" || { echo "EO_SECRET was not imported"; exit 1; }
+            - cd site && edgeone pages deploy dist -n cefnest -t "$EO_SECRET"
+          retry: 1
+          allowFailure: false
