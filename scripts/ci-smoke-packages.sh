@@ -29,6 +29,10 @@
 #
 #   ./scripts/ci-smoke-packages.sh
 #
+# The release pipeline runs scripts/ci-smoke-job.sh instead, which prepares the
+# host (tzdata, then the compiler and binutils this script's own two checks need)
+# and then calls this script.
+#
 # Not root? The inspection half still runs and the install half is skipped out
 # loud — CI has to say so, so CI fails unless the caller says the skip is meant:
 #
@@ -233,19 +237,18 @@ if [ "$AS_ROOT" = 1 ]; then
   echo "== smoke: apt installs these Depends"
   # This is the check the hand-written Depends strings have never had: apt
   # resolves each name against the archive and refuses the install if one is
-  # wrong, invented, or older than the library needs. tzdata's postinst is the
-  # same bind-mounted /etc/localtime problem ci-build.sh works around, so it is
-  # worked around here too.
+  # wrong, invented, or older than the library needs.
+  #
+  # tzdata goes first, through the same script the build stage uses. It is not
+  # decoration: the -8 run's only failure had tzdata at the head of its
+  # `dpkg: error processing package … (--configure)` chain, and python3.12, the
+  # GTK -dev chain and cefnest-dev itself unconfigured behind it — none of which
+  # names our Depends. Configured on its own beforehand, tzdata is out of the way
+  # and a failure here is about our packages again. docs/testing/cnb-ci.md §1 is
+  # the mechanism (a postinst renaming over a bind-mounted /etc/localtime).
   export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC
-  if command -v debconf-set-selections >/dev/null 2>&1; then
-    printf 'tzdata tzdata/Areas select Etc\ntzdata tzdata/Zones/Etc select UTC\n' |
-      debconf-set-selections
-  fi
-  if awk '$2 == "/etc/localtime" { found = 1 } END { exit !found }' \
-       /proc/mounts 2>/dev/null; then
-    umount /etc/localtime 2>/dev/null || true
-  fi
   apt-get update -qq
+  ./scripts/ci-prepare-tzdata.sh
   if apt-get install -y --no-install-recommends "$MAIN_DEB" "$DEV_DEB" \
        >"$DIST/smoke-install.log" 2>&1; then
     ok "apt resolved and installed cefnest and cefnest-dev"
@@ -255,16 +258,26 @@ if [ "$AS_ROOT" = 1 ]; then
     # unconfigured — names none: it does not say which package broke or why. The
     # 2026-10-23 -7 run failed on exactly that, with 17 distro postinsts in the
     # error list, our own two packages installed and ldd-clean on the next lines,
-    # and nothing readable about the cause. So print the first error, the state
-    # our packages reached, and the disk the container had.
-    bad "the install failed — the three lines after this one name the cause"
-    grep -m3 -E '^dpkg: error|^E:|[Nn]o space left on device' \
+    # and nothing readable about the cause. So print the head of the error chain
+    # with the reason above it, the state our packages reached, and the disk the
+    # container had.
+    bad "the install failed — the lines after this one name the cause"
+    first=$(grep -n -m1 -E '^dpkg: error processing package' \
+              "$DIST/smoke-install.log" 2>/dev/null | cut -d: -f1 || true)
+    if [ -n "$first" ]; then
+      # dpkg prints the summary line "error processing package X" *after* the
+      # postinst output that says why, so the reason is a few lines above it.
+      from=$((first - 8))
+      if [ "$from" -lt 1 ]; then from=1; fi
+      sed -n "${from},$((first + 1))p" "$DIST/smoke-install.log" | sed 's/^/         /'
+    fi
+    grep -m3 -E '^E:|[Nn]o space left on device' \
       "$DIST/smoke-install.log" | sed 's/^/         /' || true
-    printf '         our packages: %s\n' \
-      "$(dpkg -l cefnest cefnest-dev 2>/dev/null |
-           sed -n '/^[a-z][a-z] /p' | tr '\n' '|')"
+    state=$(dpkg -l cefnest cefnest-dev 2>/dev/null |
+              awk '$1 ~ /^[a-z][a-zA-Z]$/ { printf "%s %s %s|", $1, $2, $3 }')
+    printf '         our packages: %s\n' "${state:-dpkg has no record of them}"
     printf '         disk: %s\n' \
-      "$(df -h /usr /var 2>/dev/null | sed -n '1!p' | tr '\n' '|')"
+      "$(df -h / /usr /var 2>/dev/null | sed -n '1!p' | sort -u | tr '\n' '|')"
     tail -20 "$DIST/smoke-install.log" | sed 's/^/         /'
   fi
 

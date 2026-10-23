@@ -15,51 +15,11 @@ export TZ=Etc/UTC
 SUDO=""
 if [ "$(id -u)" != 0 ]; then SUDO=sudo; fi
 
-# tzdata's postinst asks debconf for a zone even in a bare Ubuntu image.
-# Preseed it as well as setting the frontend: a postinst that cannot answer
-# aborts the whole apt transaction, and every package after it is left
-# unpacked.
-if command -v debconf-set-selections >/dev/null 2>&1; then
-  printf 'tzdata tzdata/Areas select Etc\n' |
-    $SUDO debconf-set-selections
-  printf 'tzdata tzdata/Zones/Etc select UTC\n' |
-    $SUDO debconf-set-selections
-fi
-
-# The runner bind-mounts /etc/localtime from the host. tzdata's postinst
-# renames /etc/localtime.dpkg-new over it; rename(2) of a mount point is EBUSY
-# and takes the whole apt transaction down. Try to unmount it first; if that
-# is not permitted, unpack tzdata and skip only that rename. /etc/timezone
-# still gets written and TZ is exported for every later command.
-if awk '$2 == "/etc/localtime" { found = 1 } END { exit !found }' \
-     /proc/mounts 2>/dev/null; then
-  $SUDO umount /etc/localtime 2>/dev/null || true
-fi
+# tzdata is dealt with on its own, before anything else can drag it into a
+# transaction: see scripts/ci-prepare-tzdata.sh for why the bind-mounted
+# /etc/localtime takes the whole apt run down with it.
 $SUDO apt-get update
-if awk '$2 == "/etc/localtime" { found = 1 } END { exit !found }' \
-     /proc/mounts 2>/dev/null; then
-  TZ_TMP=$(mktemp -d)
-  (cd "$TZ_TMP" && apt-get download tzdata)
-  set -- "$TZ_TMP"/tzdata_*.deb
-  $SUDO dpkg --unpack "$1"
-  TZ_POSTINST=/var/lib/dpkg/info/tzdata.postinst
-  if ! $SUDO grep -q 'if test "$(get_timezone)" != "$TIMEZONE"; then' \
-       "$TZ_POSTINST"; then
-    echo "cnb: unexpected tzdata postinst; refusing to guess" >&2
-    exit 1
-  fi
-  $SUDO sed -i \
-    's|if test "$(get_timezone)" != "$TIMEZONE"; then|if false; then|' \
-    "$TZ_POSTINST"
-  $SUDO dpkg --configure tzdata
-  rm -rf "$TZ_TMP"
-else
-  $SUDO apt-get install -y --no-install-recommends tzdata
-fi
-# Repair anything the failed run left unpacked, now that tzdata can be
-# configured without touching the mount.
-$SUDO dpkg --configure -a
-$SUDO apt-get -f install -y
+$SUDO ./scripts/ci-prepare-tzdata.sh
 
 $SUDO apt-get install -y --no-install-recommends \
   build-essential meson ninja-build pkg-config git linux-libc-dev \

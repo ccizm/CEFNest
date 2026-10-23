@@ -34,6 +34,12 @@ python3/GTK 依赖链一起报错。
 tzdata`。`/etc/timezone` 仍会被写入，后续命令用导出的 `TZ`，不依赖
 `/etc/localtime`。之后跑 `dpkg --configure -a` 和 `apt-get -f install -y` 收尾。
 
+这一段现在整份住在 `scripts/ci-prepare-tzdata.sh` 里，build 与装包冒烟两个 stage 都
+调它。之前不是这样：冒烟脚本只抄了"试一次 umount"那一半，而这半在**不允许 umount
+的 runner 上等于没做**——tzdata 于是被拖进"装我们两个包 + GTK 全家"那一个巨型事务里
+当场配置失败，把 16 个包一起带崩。`-8` 那条红就是它（§4.4）。教训写进脚本头部：**共享
+要连兜底一起共享，抄一半不如不抄。**
+
 ## 2. 产物里有什么
 
 `cefnest-build.tar.gz`（`dist/` 里，Release 资产从那里上传）保持构建目录的三层布局：
@@ -146,7 +152,7 @@ pinned 版本拉回来，要么明说 `CI_SKIP_HELPER_BUILD=1 ./test/ci-all.sh u
 | --- | --- | --- |
 | `check the release strings` | `scripts/check-release-tag.sh`：`PINNED` × `CEFNEST_PACKAGE_RELEASE` × `.cnb.yml` 的 `CEFNEST_EXPECTED_TAG` 与静态附件名必须互相一致 | 10m |
 | `build` | `scripts/ci-build.sh`：apt 依赖、`fetch-cef.sh`、helper、`builddir`（带 `-Dprefix=/usr` 与 `-Dcefnest-version`）、`dist/` 与 `RELEASE-NOTES.md` | 90m |
-| `install and smoke the packages` | `scripts/ci-smoke-packages.sh`：见 §4.1 | 30m |
+| `install and smoke the packages` | `scripts/ci-smoke-job.sh`：先 `scripts/ci-prepare-tzdata.sh`，再 `gcc`/`binutils`，然后 `scripts/ci-smoke-packages.sh`，见 §4.1 | 30m |
 | `create release` + `upload release assets` | `git:release` 用 `RELEASE-NOTES.md` 建 Release，`cnbcool/attachments` 上传 `dist/` 里那 6 个名字 | — |
 
 第一个 stage 存在的理由很简单：附件名是静态的，漏改一个是 90 分钟后才炸；把检查提到
@@ -181,8 +187,10 @@ CNB 没有流水线级 timeout，只有 job 级；`build` 那 90 分钟约束的
   依旧报 `E: no-copyright-file`。判据直接从 `.deb` 的数据流里 `tar -xO` 那一个成员
   （一次 1.5 GB 的读流，十几秒），所以不装包也能量到；
 - 以 root 安装本地的 `cefnest` 与 `cefnest-dev`：这一条是手写 `Depends` 唯一的真判据，
-  名字写错、版本约束写错、依赖一个归档里不存在的包，都在这里当场失败。**但 apt 非零退出
-  不等于 `Depends` 写错**——见 §4.2，第一次真跑就是这么判错的；
+  名字写错、版本约束写错、依赖一个归档里不存在的包，都在这里当场失败。装之前先跑
+  `scripts/ci-prepare-tzdata.sh`（§1），否则 tzdata 会在这一趟里第一次被配置、撞上挂载点、
+  把整条事务带走。**但 apt 非零退出不等于 `Depends` 写错**——见 §4.2，第一次真跑就是这么
+  判错的；
 - 装完之后对 `/usr/lib/*/libcefnest.so.0` 与安装路径上的 `cefnest-helper` 跑 `ldd`，
   任何 `not found` 都算失败；
 - 用安装后的 `cefnest.pc` 编译一个最小宿主，断言 `chromium_session_get_helper_path()`
@@ -243,6 +251,9 @@ this container: no`、`helper: sandbox=on`、`no sandbox FATAL on this host`—�
 AppArmor 那种宿主（`docs/internals/sandbox-policy.md` §4），但打包默认值在这台上是"开"
 且没有当场炸。
 
+> 这三条候选后来由 `-8` 判掉了两个半：磁盘有 254G 可用，`Depends` 走到了 unpack 之后。
+> 见 §4.4。
+
 ### 4.3 于是出了 `-8`：同一次源码，换一次机会把那条红读出来
 
 `v154.0.34-7` 的 tag 已经在 `8f39e67` 上，而 CNB 的 tag push 不会重跑：同一条线要再看
@@ -264,6 +275,63 @@ Releases 页上；`-8` 的包内容就是当时本该发布的那一份。
 `CEFNEST_PACKAGE_RELEASE=8 CEFNEST_EXPECTED_TAG=v154.0.34-8 ./scripts/check-release-tag.sh`
 确认那 8 个位置确实一起动了。
 
+### 4.4 第二次真跑（`v154.0.34-8`）：一条红，而且它报名了
+
+先说被这次验证的部分：`gcc` 与 `binutils` 装上之后，`-7` 那两条假红变成了真绿——
+`a host compiles with pkg-config --cflags --libs cefnest`、`the installed library names the
+packaged helper path`、`the build-tree library was compiled with the package helper path`
+全过，`ldd` 两条、`no demo binary was installed`、构建树那四条、沙箱那两条也都在过的那
+一边。降级成 note 的那两条确实跑成了 ok，所以"缺工具算环境的事实"这个口径没有把覆盖偷偷
+丢掉。整段 1 分 39 秒。
+
+只剩一条红，而这次它把名字打出来了：
+
+```
+FAIL the install failed — the three lines after this one name the cause
+       dpkg: error processing package tzdata (--configure):
+       dpkg: error processing package libpython3.12-stdlib:amd64 (--configure):
+       dpkg: error processing package python3.12 (--configure):
+       our packages: ii  cefnest        154.0.34-8   amd64        CEFNest GTK 4 component library|
+       disk: overlay 256G  2.3G  254G   1% /|overlay 256G  2.3G  254G   1% /|
+```
+
+三件事当场定下来：
+
+1. **链条头部是 `tzdata`**，后面的 `libpython3.12-stdlib` → `python3.12` → `python3` →
+   `libglib2.0-dev*` → `libgtk-4-dev` → `cefnest-dev` 全是它的下游。这就是 §1 记过的
+   bind-mounted `/etc/localtime` 那一件事：同一个包、同一步（`--configure`）。诚实的部分
+   要说清：这一跑的转录里**没有** postinst 自己那行 `mv: …`——当时的判词只
+   `grep '^dpkg: error'`，而原因行在它上面——所以"`EBUSY` 是原因"是按 §1 的机制加上
+   "头部包正是 tzdata"推出来的，不是这一跑直接量到的。`-9` 的判词会把它量到（下面第 2 条
+   reporting 改动）。
+2. **磁盘排除了**：256G 的卷只用了 2.3G，1%。§4.2 排第一的那个候选不是原因。
+3. **`Depends` 也无罪**：apt 已经走到"解包 + 配置"，说明解析阶段过了；一个写错的依赖名
+   根本到不了 `--configure`。
+
+而 tzdata 这件事上我们自己有个坑：`ci-build.sh` 为它做过绕行，冒烟脚本却只抄了"试一次
+umount"那一半。不允许 umount 的 runner 上，那一半等于没做，tzdata 于是被拖进"装我们两个
+包 + GTK 全家"那一个事务里**第一次**被配置。修法不是再抄一遍，而是把整段绕行抽成
+`scripts/ci-prepare-tzdata.sh`，两个 stage 都调它（§1）。同一次改动把冒烟 job 的命令序列
+从 `.cnb.yml` 里那串引号体操搬进 `scripts/ci-smoke-job.sh`，因为 tzdata 必须排在
+`apt-get install gcc binutils` **前面**——上一条提交把装工具放在最前面，等于给同一个坑开了
+第二条入口，而且 YAML 里那一行也没法 `sh -n`。
+
+判词本身还有两个 bug，是读这次输出时发现的：
+
+- `sed -n '/^[a-z][a-z] /p'` 把状态位第二格是大写的行整行丢掉，于是
+  `iU cefnest-dev`（解了包、没配上）根本不出现，`our packages:` 那行只报了一个包，看着像
+  dev 包压根没落地。现在按第一格匹配 `[a-z][a-zA-Z]`，并且只打 `状态 名字 版本`。
+- 原因行的位置：dpkg 把 postinst 的 stderr 打在 `dpkg: error processing package X`
+  **上面**，所以判词改成"首条错误往上 8 行、往下 1 行"，`mv: cannot move
+  '/etc/localtime.dpkg-new'` 这一类下次会直接落在转录里。
+
+上面那段引文是 `-8` 当时的真实输出，不是改完之后的样子。
+
+`-8` 也是红在第 3 个 job 上，`create release` 与上传排在它后面——所以站点链接的那批
+`v154.0.34-7` / `-8` 附件，在下一次跑绿之前都不存在。这一步本机判不了（私有仓库，匿名
+一律 404，带 git 凭据 GET 附件直链回 400），只能看 Releases 页；跑完 `-9` 若绿，两个旧
+tag 到底有没有 Release 就一目了然了。
+
 ## 5. 发版（tag push）
 
 普通分支推送不触发任何构建。发版推一个与包版本-修订一致的 tag：
@@ -276,7 +344,8 @@ git push origin v154.0.34-8
 `.cnb.yml` 的 `$: tag_push` 按 §4 那些 stage 依次跑：`scripts/check-release-tag.sh`
 先比版本串与 tag，`scripts/ci-build.sh` 才做重活（导出 `CEFNEST_PACKAGE_RELEASE=8`，
 构建时生成中英双语的 `RELEASE-NOTES.md`，含"本版变更"清单与附件说明表格），
-`scripts/ci-smoke-packages.sh` 把 `dist/` 里的包装一遍，然后：
+`scripts/ci-smoke-job.sh` 备一次干净宿主（tzdata、`gcc`、`binutils`）再让
+`scripts/ci-smoke-packages.sh` 把 `dist/` 里的包装一遍冒烟，然后：
 
 - `git:release` 用该 tag 创建 Release，描述从 `RELEASE-NOTES.md` 读取；
 - `cnbcool/attachments` 把 `dist/` 里那 6 个文件上传到该 tag 的 Release。
