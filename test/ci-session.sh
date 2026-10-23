@@ -184,17 +184,18 @@ else
     if grep -qE "$want" "$RUN/demo.out" "$RUN/demo.log"; then ok "transcript has /$want/"
     else bad "transcript lacks /$want/"; fi
   done
-  # An abort in a sandboxed Chromium subprocess shows up here and nowhere else —
-  # there is no crash handler in this tree (docs/internals/sandbox-policy.md §8). It is
-  # reported, not failed: straced, the aborter is a fork-without-exec child of
-  # the zygote that self-terminates with tgkill(1, 1, SIGABRT) — pid 1 of its own
-  # namespace, so libcef's code, not ours, whose own buffers are bounds-checked.
-  # What is pinned instead is that it cost nothing: the three checks above are
-  # the page still loading and answering.
+  # A stack-canary abort in any process of this tree is now a failure, and the
+  # reason it used to be tolerated is the reason it can be pinned: the aborter is
+  # a fork-without-exec child of the zygote returning through the helper's own
+  # main(), whose frame still holds the canary main copied out of TLS while the
+  # child's TLS holds a different one. Nothing was smashed; glibc's message just
+  # cannot tell the two apart. The helper exits such a child with _exit() now, so
+  # a line here means either that fix came back or something really did overwrite
+  # a frame — both are worth stopping for (docs/internals/stack-canary-after-fork.md).
   aborts=$(grep -c 'stack smashing' "$RUN/demo.out" "$RUN/demo.log" |
              awk -F: '{s+=$2} END{print s+0}')
   if [ "$aborts" = 0 ]; then ok "no subprocess aborted during the run"
-  else ok "$aborts abort line(s) from a libcef sandbox child, and the page above survived it"; fi
+  else bad "$aborts stack-canary abort line(s): the zygote child left through main's epilogue"; fi
 
   # A scripted run that cannot show its page has to say so and fail, in seconds
   # and with a reason, rather than standing there until the payload timeout or —

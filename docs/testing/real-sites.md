@@ -52,9 +52,12 @@ compositor、隔离 HOME/XDG/D-Bus 和超时；`test/ci-all.sh` 只需把 `real`
 
 所有截图都是非纯色（颜色数 898–244k），rAF 在 3 秒内 269–272 次（约 90 Hz，headless 的
 节拍，不是 60 Hz 目标）。搜索/Maps/Excalidraw 的转录里各有 2 条
-`*** stack smashing detected ***: terminated`：那是 CEF 的 sandbox 子进程 abort，
-页面仍继续加载、回答 JS、出图；`ci-session` 的 proof 把它当作“libcef sandbox child”
-报告，不计主进程失败。不要把它和用户页面崩溃混为一谈，但发布前值得单独归因。
+`*** stack smashing detected ***: terminated`：**那是本轮量出来的东西，本表记录时它还在**。
+第六轮把它归因完并消掉了——abort 的是 helper 自己 `main()` 的栈保护检查，发生在 zygote 的
+fork-without-exec 子进程正常返回的路上（`docs/internals/stack-canary-after-fork.md`）；
+它不影响页面：这三站照样加载、回答 JS、出图，所以当初没有把它和用户页面崩溃混为一谈。
+用改后的 helper 重跑这三站，这两行不该再出现；`test/real-sites.sh` 仍然数它们，
+`ci-session` 的 proof 现在见一条就失败。
 
 ### 3.1 视频编解码
 

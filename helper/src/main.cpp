@@ -2530,8 +2530,23 @@ int main(int argc, char** argv) {
 
   CefRefPtr<HelperApp> app(new HelperApp);
   const int exit_code = CefExecuteProcess(main_args, app, nullptr);
-  if (exit_code >= 0)
-    return exit_code;  // This was a Chromium subprocess.
+  if (exit_code >= 0) {
+    // This was a Chromium subprocess, and it must not reach main's epilogue.
+    // CEF's subprocesses here are the zygote's fork-without-exec children: they
+    // inherit this stack, including this frame with the canary its prologue
+    // copied out of TLS, but %fs:0x28 holds something else by the time
+    // CefExecuteProcess returns. Measured on CEF 154 with the helper printing
+    // both sides in its own main(): three runs of a bing search, two such
+    // children each, every one reporting %fs:0x28 unchanged at main's entry and
+    // changed — by a value specific to that child — on the way out, and
+    // `*** stack smashing detected ***` immediately after each of those lines.
+    // Nothing was smashed: glibc's message cannot tell an overwritten frame slot
+    // from a canary that moved, and a plain fork() moves nothing (both checked,
+    // docs/internals/stack-canary-after-fork.md). CefExecuteProcess blocks until
+    // the process should exit and hands back its exit code, so there is nothing
+    // left to unwind here — _exit takes the code out without the check.
+    _exit(exit_code);
+  }
 
   PrintEnvironment();
 

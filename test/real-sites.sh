@@ -86,8 +86,10 @@ while IFS=$'\t' read -r name url wait_ms; do
     site_note=$(python3 -c 'import json,sys; d=json.loads(sys.stdin.read()); print(", ".join(f"{k}={d[k]}" for k in ("videos","mp4","vp9","videoReady","canvas","webgl","input","article","main","buttons","text") if k in d))' <<<"$js" 2>/dev/null || true)
     [ -n "$site_note" ] && note="${note:+$note; }$site_note"
   fi
+  # Reported, not asserted: the gate that fails on this line is `ci-session`'s
+  # proof. What the line means is docs/internals/stack-canary-after-fork.md.
   aborts=$(grep -ac 'stack smashing' "$OUT/$name.out" 2>/dev/null || true)
-  [ "${aborts:-0}" -gt 0 ] 2>/dev/null && note="${note:+$note; }cef subprocess abort lines=$aborts"
+  [ "${aborts:-0}" -gt 0 ] 2>/dev/null && note="${note:+$note; }stack-canary abort lines=$aborts"
   if [ $bad = 1 ]; then
     printf '  note: %s\n' "$note"
   else

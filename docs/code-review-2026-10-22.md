@@ -450,7 +450,8 @@ CNB runner 上验证。
   `release`，libwayland-server 会当场 abort 合成器。修它要在 compositor 核心动 6 行，
   不在本轮范围，等决定。**→ 下一条（第五轮）已修掉，含门禁与变异。**
 - helper 有一条**先前就存在的偶发 `*** stack smashing detected ***`**：在改动前的旧二进制上
-  同样能复现，本轮未定位。
+  同样能复现，本轮未定位。**→ 第六轮（同一天）归因完毕并消除，`test/ci-session.sh` 里那条
+  "报出来但不算失败"的容忍同时改成红；详见 `docs/internals/stack-canary-after-fork.md`。**
 - RPM 分支本机零测量（无 `rpmbuild`）；`License:` 覆写、`%files` 新行、`Requires` 自动发现
   都要等 CI。
 - 装包 + `ldd` + 起 helper 那半边只会在 CI/root 容器里真跑；AppArmor 限制宿主复现不了。
@@ -563,4 +564,76 @@ Ubuntu 24.04 装机用的头文件，客户端只是正常关掉自己的 shm �
 还没做的：1.22 那条日常路径本机量不到（这台只有 1.23），依据是 1.23 头文件里的
 `WL_SHM_RELEASE=1 / since 2`、`wl_shm_interface` 成员顺序和 libwayland-server 里那两条
 版本检查字符串；剩下第二条"等决定"（helper 的偶发 `*** stack smashing detected ***`）
-见下一节。
+见第六轮。
+
+## 第六轮：2026-10-23 补掉那两条"等决定"的第二条
+
+对象是 helper 那条偶发的 `*** stack smashing detected ***`。**它不是栈被写坏**：abort 的是
+glibc 的哨兵检查，落在**我们自己那份 `main()` 的尾言**上，而走到那里的进程是 zygote 的
+fork-without-exec 子进程——它继承了 `main` 的帧（连同序言从 TLS 抄出来的 canary），退出时
+`%fs:0x28` 里已经是另一个值。整条链、模型复现和三条没量到的边界都在
+`docs/internals/stack-canary-after-fork.md`；这里记决定和代价。
+
+定这件事靠的是一次"让进程自己报名"的测量，关键是不猜帧偏移：**`main` 序言抄进帧里的值，按
+构造就是 `%fs:0x28` 在 `main` 被进入那一刻的值**，所以只要在 `main()` 里前后各读一次。CEF 154、
+bing 搜索那三条跑，每条两个子进程，形状完全一样：入口报 `unchanged`、`CefExecuteProcess()`
+返回时报一个各自不同的新值，紧跟一行 `*** stack smashing detected ***`；同一次跑里每一条
+`entry` 报告都是 `unchanged`（包括被 `exec` 起来的那些）；那两个报名的进程是 `pid=1 ppid=0`
+（自己的 PID namespace），
+`comm` 读不出来是因为非 dumpable。模型程序把剩下两种解释判开：普通 `fork()` 不动哨兵（所以新值
+来自那个孩子的 TLS 建立路径，不是 fork 语义），真越界改掉自己帧里的槽会产生**一模一样**的一行
+（所以光凭消息不能定罪），而"槽合法 + TLS 换新值"这个状态下 `return` 是 rc 134、`_exit` 是 rc 0。
+
+改动：
+
+- `helper/src/main.cpp`：`if (exit_code >= 0) return exit_code;` → `_exit(exit_code)`。依据是
+  `third_party/cef/dist/include/cef_app.h:56-58`——对子进程 `CefExecuteProcess` "will block until
+  the process should exit and then return the process exit code"，返回时帧上没有任何东西需要展开，
+  不走尾言就没有检查；`cef_app.h:73-75` 那句 "the application should exit immediately" 是同一条
+  纪律的另一半。代价写进注释：`_exit` 不跑静态析构、不冲 stdio 缓冲，但这条分支上 helper 在
+  `CefExecuteProcess` 之前一行 stdout 都没写过，而改之前那个进程本来就是被 abort 的。
+- `test/ci-session.sh:195`：这条从"报告而不失败"改成 **1 条就红**。敢收紧是因为来源已经定到位，
+  再出现要么是那个改动被回退，要么是真有人写坏了一个帧——两种都该拦住。
+- `test/real-sites.sh:91`：它只报告不判失败，把 note 文案从 `cef subprocess abort lines=` 改成
+  `stack-canary abort lines=` 并指向那篇 internals。
+- `docs/testing/headless-ci.md` §4 与 `docs/testing/real-sites.md` §3：那"每站 2 行"现在标成
+  **修前二进制的历史测量**；`docs/internals/stack-canary-after-fork.md` 新增，`docs/README.md`
+  索引加一行。
+
+本轮自己写下又订正掉的两条（都归到"没量到"那一节，没留在结论里）：
+
+1. **渲染进程里插不了探针。** 在 `OnContextCreated` 里 `fprintf` + 读 `/proc`，换来的是
+   `demo: renderer exited status=2 error=11 11`，探针一行都没出来；钩子删掉了。
+2. **`LD_PRELOAD` 拦 `__stack_chk_fail` 那一版靠硬编码偏移。** 留在 `/tmp` 的两个二进制
+   `objdump -d` 一比就明白：带探针那份 `main` 是 `sub $0x4a8,%rsp` + 槽 `0x498(%rsp)`，
+   现在这份是 `sub $0x4b8,%rsp` + 槽 `0x4a8(%rsp)`——每重编一次都得重算。那一次沙箱对照
+   实验的输出又被后续 A/B 覆盖了，所以"关掉沙箱还换不换"现在是**未量到**，文档里没写成结论。
+
+还有一件事没法收尾：**触发器本身停了**。10:40 那三次跑每次撞两个子进程，11:06 起那 20 次
+（4 轮 + 6 轮，control 与 fixed 交替，同样的 payload）一个 `subprocess-return` 事件都没有，
+原因未知；这也是修法改用模型程序做确定性验证、而不是在线 A/B 的原因——control 那半边连
+abort 行都没出现，说明后面那 20 次不是"修好了所以不报"，而是根本没走到那条返回。
+
+### 验证状态
+
+- `helper/src/main.cpp` 里那条 `_exit(exit_code)` 编译通过，`objdump -d` 复核 `main` 的尾言还在
+  （`sub %fs:0x28,%rax` @ `21c79`、`call __stack_chk_fail@plt` @ `22383`）——浏览器进程照常走它，
+  只是子进程不再走到那儿。
+- `/tmp/canarymodel`（本轮重跑，三条都是当场量的）：`fork` → 父子同值、孩子 `exit=0`；`poison` →
+  一行 `*** stack smashing detected ***`；"帧里合法 + TLS 换新值" → `MODEL_RETURN=1` 时 **rc 134**
+  并打那一行，`_exit` 时 **rc 0**。
+- `./test/ci-session.sh`（清理完探针、重编之后）：`demo exited 0` + 三条转录 grep +
+  **`no subprocess aborted during the run`**（就是那条新变红的门禁）+ 四条失败形状 + 残留检查，
+  全 ok，**`ci session: passed`**。
+- `meson test -C builddir`：**28 ok / 0 fail / 0 skip**。
+- `./test/ci-all.sh`（13 跑全量）：`proof 8`（这个数是 ci-all 扣掉 harness 三行之后数的；上一轮
+  记的 7 是命中容错分支时的口径，见 `docs/testing/headless-ci.md` §6）、`unit 28`、`framing 13`、`pixel 12`、`find 34`、
+  `permission 58`、`download 54`、`dnd 59`、`primary 2`、`multi 10`、`signal 12`、`soak 12` 全 PASS，
+  `menu` SKIP（同第三、四、五轮：headless 不映射 popover，`exit 77`），**总退出码 0**。
+  注意别把它读成"整条 battery 零命中那行消息"：`ci-all` 只在失败/SKIP 时留转录，这一轮目录里
+  只剩 `menu.log`，所以全量零命中没被单独统计过，统计到的是 `proof` 那一跑。
+- 探针与草稿都清掉了：`helper/build/Release/cefnest-helper-ab` 删除，`main.cpp` 的 diff 只剩
+  那一条 `_exit` 分支和它的注释。作为偏移证据留下的两份旧二进制在 `/tmp`（`helper-ab`、
+  `helper-exit`），不属于仓库。
+
+

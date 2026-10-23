@@ -41,6 +41,7 @@
 | `docs/internals/protocol-ceilings.md` | 真实 client 对嵌套 compositor 绑定什么，以及每个未通告的协议与版本上限的实测判定 |
 | `docs/internals/dmabuf-formats.md` | feedback 格式表由本进程能导入什么——GDK 通告的集合——决定，而不是静态四格式通告，附带对 CEF 全线性 buffer 的实测后果 |
 | `docs/internals/map-cycle.md` | 每次 map 挂的东西都得有拆下的路（M11 发现：N 次 map 周期，N 份 handler）；守住这条规则的两个门禁及各自被验证过的变异 |
+| `docs/internals/stack-canary-after-fork.md` | 那条"偶发 `*** stack smashing detected ***`"的归因：zygote 的 fork-without-exec 子进程继承 `main` 的帧却换掉了 `%fs:0x28`，于是 glibc 在我们自己的尾言里报警；修法是不走尾言，附三条未量到的边界 |
 
 ## features/ —— 功能行为记录（实测形状）
 

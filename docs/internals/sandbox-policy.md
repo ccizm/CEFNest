@@ -267,6 +267,13 @@ demo 退出后 helper 剩 0 个。
 真正要写进部署文档的是**它的后果**：一次崩溃能给到宿主的只有 OS 那层的死法。`::renderer-exited`
 给的是 `status=1 error=9`——CEF 的终止状态加一个信号号，没有 minidump，没有栈，没有崩溃时的
 URL。第 7 节那两次击杀量的就是这个上限：宿主能确定"死了几个、怎么死的"，不能确定"为什么"。
+
+这个上限有一个不需要崩溃处理器的用法，第五轮用过一次：`*** stack smashing detected ***` 那行
+不带 pid、不带栈，光看它既不知道是谁的进程也不知道是哪个帧。让**自己的代码**在被判定失败的那一刻
+之前把身份和证据打出来（`main()` 里进出的两次 TLS 读数），一行崩溃日志就变成了一条能核对的链。
+整套做法、量到的形状和三条没量到的边界在 `docs/internals/stack-canary-after-fork.md`；顺带一条
+同源的观察：每个子进程的命令行都带 `--change-stack-guard-on-fork=enable`，而父进程没有——
+Chromium 自己就知道 fork-without-exec 的孩子要在孩子这一侧重设栈边界。
 `chrome-sandbox` 随安装落到 prefix 里时权限没变（`mode=0o755`、uid 还是装机的人、
 `security.capability` 无），装这个包本身不产生任何提权面——第 6 节那条"不需要 setuid 安装步骤"
 在打包之后依然成立。

@@ -59,11 +59,13 @@ D-Bus，激活了 nautilus 与 Tracker3 文件索引器，还自动重排了应�
 
 **proof（默认）**：起 demo 打 `test/dnd-page.html`，断言三层——嵌套 compositor 拿到
 了 `WAYLAND_DISPLAY=`、页面 `HTTP 200`、`js` 从 Blink 读回页面标题（脚本步骤的 id
-按脚本行计数，所以是匹配而不是钉死）。然后统计 `stack smashing` 行数：一个沙箱化的
-libcef 子进程偶尔会 abort（strace 定位到是 zygote 的 fork-without-exec 子进程在自己
-namespace 里 `tgkill(1, 1, SIGABRT)`，而我们自己的缓冲区都有边界检查），它不影响
-前面三条，于是**报告而不失败**——这里没有崩溃处理器可以修或关，见
-`docs/internals/sandbox-policy.md` §8。
+按脚本行计数，所以是匹配而不是钉死）。然后数 `stack smashing` 行数，**现在有 1 条就
+算失败**：那一条过去被当作"libcef 沙箱子进程偶发 abort"报告而不失败，第六轮把它归因
+完了——abort 的是 helper 自己 `main()` 的栈保护检查，发生在 zygote 的 fork-without-exec
+子进程正常返回的路上，TLS 里的 canary 已经换了一个、`main` 帧里存的还是老的，谁也没
+写坏谁的栈（`docs/internals/stack-canary-after-fork.md`）。子进程改用 `_exit()` 离开，
+这条检查就不再有机会说话；因此它回来一次，要么是那个改动被回退，要么是真有人写坏了
+一个帧。这里没有崩溃处理器可以修或关，见 `docs/internals/sandbox-policy.md` §8。
 
 最后是"这一跑做不到它被要求做的事"那四跑（一条 `broken_run` 函数）：同一个脚本，helper
 分别换成①连上 socket 就 `exit(1)`、什么都不发的 `test/fake-helper.py`（`CefInitialize`
@@ -199,6 +201,14 @@ ok 行，不含 harness 那几行记账（socket 起来了 / payload 退出 0 / 
 `unit` 也已经是 27 项（新增 `seat-selftest-popup-cycle`、
 `seat-selftest-popup-overflow` 等）；2026-10-23 再加 `seat-selftest-shm-release`，
 现在 **28 项**。
+
+同一天（2026-10-23）`proof` 那一行变成 **8** 条断言，原因值得记下来别读错：
+`no subprocess aborted during the run` 一直是一条真断言，只是当命中"容错"分支时它打的是
+`N abort line(s) from a libcef sandbox child…`，而 `ci-all` 扣记账更正则
+（`^  ok   (…|[0-9]+ abort line)`）会把那一行当 harness 的话扣掉。第六轮把这条改成
+`bad`（`docs/internals/stack-canary-after-fork.md` §6）之后，它只会以断言的形式出现。
+上表那一跑数到 7，说明当时命中的是容错分支——这个推断是从两边的代码读出来的，
+2026-10-21 那份转录没留。
 
 两条补充测量：
 
