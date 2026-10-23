@@ -141,12 +141,33 @@ CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION)
 
 本版变更：
 
-- 新增自定义 User-Agent：宿主把 \`CHROMIUM_USER_AGENT\` 放进环境即可，HTTP 头与页面 JS 同时生效（examples/cefnest-useragent 演示运行中切换）。
-- 修复窗口焦点与选中：点击页面/窗口即切换 browser-selected，右键菜单落在正确的窗口；切标签不再藏掉独立窗口。
-- 修复并发宿主的 CEF 缓存冲突：缓存目录按宿主 socket 派生，多宿主并发互不影响。
-- 新增 11 个完整示例（examples/）：单页浏览器、多标签、多窗口、JS 控制台、查找条、下载、自绘菜单、权限、错误恢复、帧率观测、UA 切换。
-- helper 现在收 SIGTERM/SIGHUP/SIGINT：\`systemctl stop\` 与桌面注销会走完 CefShutdown()，不再在 profile 里留下 SingletonLock（docs/features/session-lifecycle.md §7）。
-- 打包产物统一携带版本与修订号（$V）：构建树里的 \`libcefnest.so.$PACKAGE_VERSION\` 与包名里的版本是同一个串。
+- helper 现在真的收 SIGTERM/SIGHUP/SIGINT：\`systemctl stop\` 与桌面注销会走完
+  \`CefShutdown()\`，不再在 profile 里留下一枚没人释放的 SingletonLock；新门禁
+  \`test/helper-signal-gate.sh\` 从 \`SigCgt\`、日志、退出与锁释放四处量这条路径。
+- 发版流水线多了两道当场失败的检查：推 tag 先由 \`scripts/check-release-tag.sh\`
+  比版本串、修订号与 9 个静态附件名（漏改一处的结论从 90 分钟后提到几十秒），
+  构建完再由 \`scripts/ci-smoke-packages.sh\` 用 apt 真装一遍、对安装路径跑 \`ldd\`、
+  不带显示起一次 helper 读它的沙箱横幅。
+- \`cefnest-build.tar.gz\` 现在对得上它自己的说明：\`src/\`、\`examples/\`（全部示例）、
+  \`test/\` 三层保持原样，二进制用自身的 \`\$ORIGIN\` rpath 找到同批的库，库版本与包版本
+  是同一个串；它**不含 helper、不含 CEF 运行时**，说明里就这么写。
+- 运行前提写进文档与包描述：helper 默认开沙箱，\`chrome-sandbox\` 以 0755 打包（无
+  setuid 位、无 AppArmor profile）。宿主禁掉非特权用户命名空间时——Ubuntu 24.04 默认
+  如此——helper 在启动那步响亮失败，而不是静默降回无沙箱；两条出路是给
+  \`cefnest-helper\` 一条允许 \`userns\` 的 AppArmor profile，或设
+  \`CHROMIUM_HELPER_NO_SANDBOX=1\`。
+- 许可信息补齐：四个 deb 各带 machine-readable copyright
+  （\`/usr/share/doc/<包名>/copyright\`），helper 那份额外把 CEF 运行时记成
+  BSD-3-clause 并附上 \`LICENSE.cef.txt\`；RPM 的 helper 子包 \`License:\` 写
+  \`LGPL-2.1-only and BSD-3-Clause\`。
+- \`scripts/fetch-cef.sh\` 把两个架构 \`154.0.34\` 归档的 sha256 钉进仓库：下载到的字节
+  必须等于仓库批准的值才解包，不再只信构建服务自己给的摘要。
+- 示例修正：zoom 按 \`100 × 1.2^level\` 显示（此前当线性百分比，放大一档显示 50%）；
+  上下文菜单的 popover 挂到 view 而非窗口（\`::context-menu\` 的 x/y 是 view 内坐标）；
+  下载撞名落名保住扩展名且不再泄漏；paint stack 释放；查找条只在打开时吞 Escape；
+  静音图标随状态更新。
+- \`src/chromium-session.h\` 的 API 文档订正：关标签同样会发 \`::browser-closed\`
+  （上一版文档还在宣称它静默失败）。
 
 ### 附件说明
 
@@ -170,21 +191,42 @@ CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION)
 
 Highlights of this release:
 
-- Custom User-Agent: put \`CHROMIUM_USER_AGENT\` in the host environment and the
-  helper bakes it into CefSettings.user_agent — HTTP headers and page JS alike
-  (examples/cefnest-useragent switches it live).
-- Window focus and selection: clicks move browser-selected, so context menus
-  land in the right window; tab switches no longer blank independent windows.
-- Concurrent-host CEF cache collisions are gone: the cache directory is derived
-  from the host socket path.
-- 11 new complete examples under examples/: browser, tabs, windows, JS console,
-  find bar, downloads, custom menus, permissions, error recovery, frame
-  observation, UA switching.
-- The helper now answers SIGTERM/SIGHUP/SIGINT: \`systemctl stop\` and a session
-  logout run CefShutdown() to the end instead of leaving a SingletonLock in the
-  profile (docs/features/session-lifecycle.md §7).
-- One version string everywhere ($V): the \`libcefnest.so.$PACKAGE_VERSION\` in
-  the build tarball is the same version the packages carry.
+- The helper answers SIGTERM/SIGHUP/SIGINT for real: \`systemctl stop\` and a
+  session logout run \`CefShutdown()\` to the end instead of leaving a
+  SingletonLock nobody will release, and \`test/helper-signal-gate.sh\` grades the
+  whole path from \`SigCgt\`, the transcript, the exit and the released lock.
+- Two new checks that fail on the spot. \`scripts/check-release-tag.sh\` compares
+  the version, the revision and the nine static attachment names before the long
+  build starts (a missed name now costs seconds, not 90 minutes), and
+  \`scripts/ci-smoke-packages.sh\` installs the debs with apt, runs \`ldd\` on the
+  installed paths and starts the packaged helper headless to read its sandbox
+  banner.
+- \`cefnest-build.tar.gz\` matches its own description: \`src/\`, \`examples/\` (every
+  example) and \`test/\` keep the three directories the binaries' \`\$ORIGIN\` rpaths
+  expect, and the library inside carries the same version the packages do. It
+  holds **no helper and no CEF runtime**, and the notes say so.
+- The runtime requirement is documented and in the package descriptions: the
+  helper starts Chromium with the sandbox on and installs \`chrome-sandbox\` 0755 —
+  no setuid bit, no AppArmor profile. On a host that restricts unprivileged user
+  namespaces (Ubuntu 24.04 by default) it fails loudly at startup rather than
+  silently dropping the sandbox. Two ways out: an AppArmor profile allowing
+  \`userns\` for \`cefnest-helper\`, or \`CHROMIUM_HELPER_NO_SANDBOX=1\`.
+- Licensing metadata: all four debs ship a machine-readable copyright at
+  \`/usr/share/doc/<package>/copyright\`, the helper's records the CEF runtime as
+  BSD-3-clause and installs \`LICENSE.cef.txt\`; the RPM helper subpackage declares
+  \`License: LGPL-2.1-only and BSD-3-Clause\`.
+- \`scripts/fetch-cef.sh\` pins the sha256 of both \`154.0.34\` archives in the
+  repository: the downloaded bytes must equal the value this tree approved before
+  anything is unpacked, instead of trusting only the digest the build service
+  serves next to the file.
+- Example fixes: zoom is shown as \`100 × 1.2^level\` (it was read as a linear
+  percent, so one step in displayed "50%"); a context-menu popover parents to the
+  view, not the window, because \`::context-menu\` x/y are view coordinates;
+  collision-free download names keep their extension and no longer leak; the
+  paint stack is freed; the find bar swallows Escape only while open; the mute
+  icon follows the state.
+- \`src/chromium-session.h\` corrected: closing a tab does emit
+  \`::browser-closed\` — the previous API text still claimed it failed in silence.
 
 ### Assets
 

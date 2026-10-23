@@ -397,7 +397,8 @@ CNB runner 上验证。
 
 ## 第四轮：2026-10-23 报告与处置
 
-- 报告基线 `358dcfa`，当时 HEAD `b011d39`；本轮的改动都在工作树上，**尚未提交**。
+- 报告基线 `358dcfa`，当时 HEAD `b011d39`；本轮改动已合入并推送为 `c7004f5`，随后的
+  修订号升 `154.0.34-4` → `-5` 单独一条提交。
 - 报告的两处落点都成立：旧记录“已闭环”的 14 项里 **S5 是虚报**（helper 全文与全部 git
   历史里没有任何 `signal`/`sigaction`），**M22 只剩文档残留**（代码与门禁都对，头文件还在
   宣称 tab 关不掉）。新风险集中在发布管线与示例。
@@ -467,8 +468,28 @@ CNB runner 上验证。
   `-rwxr-xr-x`。
 - `scripts/ci-smoke-packages.sh`（`CI_SMOKE_SKIP_INSTALL=1`）：19 ok / 0 fail / 1 note。
 - `scripts/check-release-tag.sh`：绿；两处变异（附件名改 `-3`、`CEFNEST_EXPECTED_TAG` 写错）都红。
+  升 `-5` 后重跑同样绿，把 `cefnest-packages` 一名改回 `-4` 依旧红。
+- `scripts/ci-build.sh` 生成的 `RELEASE-NOTES.md`：单独把 heredoc 抽出来用样本变量渲染。
+  这一步查出一个只在看源码时才不显眼的错——中文条目里写 `` `$ORIGIN` `` 少转义了 `$`，
+  渲染后那对反引号里是空的；英文条目写的是 `` `\$ORIGIN` ``，所以只有中文说明掉字。
+  `libcefnest.so.0` 与 `.so.$PACKAGE_VERSION` 两个名字对照 `src/meson.build:26` 的
+  `soversion: '0'` 与 `builddir/src/` 实际文件核过；示例数量由 `$EXAMPLE_COUNT` 现算
+  （13 个可执行文件），说明里没有写死的数字。
 - `scripts/check-cef-pin.sh`：真树绿，`/tmp/pinroot` 变异红。
 - `scripts/fetch-cef.sh`：stub CDN 变异红（不解包）。
 - P1 的版本串：两次 `meson setup` 对比 `build.ninja`（`154.0.34` vs `0.0.1`）。
 - P3-1 的换算：三个 dpr 值，人工测量。
-- 本轮所有改动仍未提交。
+- 本轮改动随 `c7004f5` 发布；发版还差推 tag（见下节）。
+
+## 发版：`154.0.34-4` → `154.0.34-5`
+
+远端已有的 `v154.0.34-4` 指向 `1e70f54`（本轮之前），重推同名 tag 不会重跑流水线，
+所以这一轮的产物要发就得升修订号。一起动的 13 个位置见 docs/testing/cnb-ci.md §5：
+`.cnb.yml` 里 3 个 `CEFNEST_PACKAGE_RELEASE`、1 个 `CEFNEST_EXPECTED_TAG`、9 个静态
+附件名，外加 `README*` 与 `scripts/check-release-tag.sh` 的默认值。升完后
+`check-release-tag.sh` 绿、附件名改回 `-4` 红，说明这 13 个位置真被一道检查钉住了。
+
+`scripts/ci-build.sh` 里生成 `RELEASE-NOTES.md` 的两段清单（中/英）重写成这一版的
+实际内容：信号处理、两道新检查、诚实的构建树说明、沙箱运行前提、许可元数据、
+CEF 摘要钉值、示例修正与 `chromium-session.h` 订正。上一版清单还停留在 `-4` 的
+叙述，与本轮产物无关。

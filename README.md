@@ -133,7 +133,7 @@ dependencies are strictly layered, never circular: `cefnest-helper` (the CEF
 runtime) sits at the bottom and installs first, `libcefnest0` depends on the
 exact helper version, and `libcefnest-dev` and `cefnest-demo` depend on the
 exact library version. All four share one version — CEF stable `X.Y.Z` plus a
-revision (`154.0.34-4`) — and are built and released together, so an upgrade
+revision (`154.0.34-5`) — and are built and released together, so an upgrade
 moves all of them at once. The pipeline builds on version tags only; see
 `docs/testing/cnb-ci.md`.
 
