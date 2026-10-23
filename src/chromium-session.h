@@ -107,12 +107,12 @@ void               chromium_session_run_javascript_expression (ChromiumSession *
  * string back whole. The schema inside is the host's; this channel only carries a
  * string. Going back, there is no dedicated command: the host reaches the page
  * with chromium_session_run_javascript () and a dispatched MessageEvent
- * (docs/guides/control-channel.md).
+ * (docs/control-channel.md).
  *
  * Unlike the js-result relay, neither side of this path puts a size limit in its
  * own code, so a big message is a full-length line on the channel and the host's
  * 4 MiB ceiling applies to it as to any other event — over the line the session
- * closes instead of truncating (docs/guides/control-channel.md "通道读这一侧"). What a
+ * closes instead of truncating (docs/control-channel.md "通道读这一侧"). What a
  * very large payload does *inside* CEF's process-to-process message has never
  * been measured here, so treat delivery of an oversized one as unverified. */
 
@@ -121,7 +121,7 @@ void               chromium_session_run_javascript_expression (ChromiumSession *
  * gesture stay on the socket event, so the host cannot tell from here whether the
  * page wanted a background tab or a foreground window, and the helper has already
  * acted — foreground requests navigate this view in place, a background tab is
- * reported and left alone (docs/guides/control-channel.md). */
+ * reported and left alone (docs/control-channel.md). */
 
 /* The page's sound leaves the helper through its own audio process and lands on
  * the host's speakers (docs/features/audio-path.md), so this is the only switch the

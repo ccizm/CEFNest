@@ -8,8 +8,7 @@
 # installable deb/rpm packages (including the helper and its CEF runtime) as
 # Release assets. Push a version tag such as v154.0.34-9 to publish one.
 # Ordinary branch pushes build nothing here — the full gate (test/ci-all.sh)
-# runs locally or on a prepared self-hosted runner; docs/testing/cnb-ci.md
-# describes both paths.
+# runs locally or on a prepared self-hosted runner.
 #
 # The CEFNEST_PACKAGE_RELEASE / CEFNEST_EXPECTED_TAG pair and the asset names
 # below are static (the attachment list cannot expand shell variables), so they
@@ -35,9 +34,9 @@ $:
           # script here decides for itself whether it needs sudo, so the command
           # stays one line. scripts/ci-smoke-job.sh is that line's content:
           # tzdata first — the -8 run's single failure had tzdata at the head of
-          # its `dpkg: error processing package … (--configure)` chain, and the
-          # mechanism (a postinst renaming over the runner's bind-mounted
-          # /etc/localtime) is docs/testing/cnb-ci.md §1 — then gcc and binutils
+          # its `dpkg: error processing package … (--configure)` chain, caused
+          # by a postinst renaming over the runner's bind-mounted
+          # /etc/localtime — then gcc and binutils
           # for the smoke script's own two checks, then the smoke script.
           script: CEFNEST_PACKAGE_RELEASE=9 ./scripts/ci-smoke-job.sh
           timeout: 30m

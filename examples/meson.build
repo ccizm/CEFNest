@@ -14,7 +14,7 @@ executable(
   install: false,
 )
 
-# One focused, runnable demo per task, in the order docs/guides builds on:
+# One focused, runnable demo per task:
 examples_files = [
   'browser.c',     # single page: toolbar, entry, zoom, mute
   'tabs.c',        # multi-tab in the shared tab window
