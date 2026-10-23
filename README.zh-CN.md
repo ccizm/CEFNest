@@ -12,7 +12,7 @@ Wayland compositor 直接合成进控件。既不使用 XWayland，也不做离�
 - 一个 helper 进程即可服务多个标签页和独立窗口
 - 可由宿主应答的 API：下载、查找、右键菜单、权限提示、页面 ↔ 宿主消息、
   跨窗口边界的剪贴板与拖放
-- 缩放、静音、无障碍（ORCA 可直接使用的 AT-SPI）、帧指标
+- 缩放、静音、无障碍（ORCA 可直接使用的 AT-SPI）、帧计数
 
 ## 工作原理
 
@@ -61,8 +61,8 @@ cmake --build helper/build -j
 meson setup builddir && ninja -C builddir                    # 3. 控件、demo、测试
 ```
 
-第 1 步会下载约 500 MB。跳过它，其余部分照样能构建——此时 demo 会改为驱动一个
-协议级测试客户端，而不是 Chromium。
+第 1 步会下载约 330 MB（解包后约 1.5 GB）。跳过它，其余部分照样能构建——此时
+demo 会改为驱动一个协议级测试客户端，而不是 Chromium。
 
 ## 安装
 
@@ -74,11 +74,12 @@ ninja -C builddir install
 | 选项 | 默认值 | 作用 |
 | --- | --- | --- |
 | `install-helper` | `false` | 同时安装 helper 和 CEF 运行时（约 1.5 GB） |
-| `install-demo` | `true` | 安装 `cefnest-demo` |
+| `install-demo` | `true` | 安装 `cefnest-demo` 和回退用的测试客户端 |
 
 发版流水线（`.cnb.yml`，只在版本 tag 上触发）打两个包，每个都有 deb 和 rpm 两种
-格式：`cefnest` 包含库、helper 和 CEF 运行时，`cefnest-dev` 则额外提供头文件和
-`cefnest.pc`。宿主程序用 `pkg-config --cflags --libs cefnest` 构建。
+格式：`cefnest` 包含库、helper 和 CEF 运行时；`cefnest-dev`（deb）/`cefnest-devel`
+（rpm）额外提供头文件和 `cefnest.pc`。宿主程序用
+`pkg-config --cflags --libs cefnest` 构建。
 
 库不依赖环境变量也能找到 helper：先看 `CEFNEST_HELPER` 或 `CHROMIUM_HELPER`
 （必须包含 `/`），再看编译时写入的 `prefix + libexecdir + <架构>` 路径，最后
@@ -124,7 +125,7 @@ User-Agent 切换。每个示例演示什么，见
 | --- | --- |
 | 生命周期 | `chromium_session_new()` · `set_view()` · `start()` · `stop()` |
 | 导航 | `load_uri()` · `go_back()` · `go_forward()` · `reload()` · `stop_loading()` |
-| 状态 | `get_uri()` · `get_title()` · `get_loading()` · `get_can_go_back()` · `get_can_go_forward()` · `get_running()` · `get_muted()` · `get_zoom_level()` · `get_frame_count()` |
+| 状态 | `get_uri()` · `get_title()` · `get_loading()` · `get_can_go_back()` · `get_can_go_forward()` · `get_running()` · `get_muted()` · `get_zoom_level()` · `get_frame_count()` · `get_helper_path()` |
 | JavaScript | `run_javascript()` · `run_javascript_expression()` → 结果通过 `::script-result` 返回 |
 | 下载 | 用 `accept_download()` / `reject_download()` 应答 `::download-begin`；进行中的下载可用 `pause_download()` / `resume_download()` |
 | 查找 | `find()` · `stop_finding()` → 结果通过 `::find-result` 返回 |
@@ -137,7 +138,7 @@ User-Agent 切换。每个示例演示什么，见
 
 | 信号 | 参数 | 说明 |
 | --- | --- | --- |
-| `::changed` | — | URI / 标题 / 加载状态 / 前进后退状态发生变化 |
+| `::changed` | — | URI / 标题 / 加载状态 / 前进后退状态 / 静音状态发生变化 |
 | `::ready` | — | helper 握手完成 |
 | `::load-end` | `url, http_code` | 失败时也会触发，此时 `http_code` 为 0 |
 | `::load-error` | `error_code, url, message` | 一次未能完成提交的导航 |
@@ -147,7 +148,7 @@ User-Agent 切换。每个示例演示什么，见
 | `::download-progress` / `::download-end` | 见头文件 | 每跨过一个整数百分比就上报一次进度 |
 | `::find-result` | `identifier, count, active_ordinal, final` | 一次请求可能产生多条结果 |
 | `::context-menu` | `x, y, items` | 返回 TRUE 表示由你自行绘制菜单，之后必须应答 |
-| `::permission-request` | `id, kind, origin, permissions` | 返回 TRUE 表示由你负责应答；默认行为是拒绝 |
+| `::permission-request` | `id, kind, origin, permissions, raw` | 返回 TRUE 表示由你负责应答；默认行为是拒绝 |
 | `::permission-dismissed` | `id, result` | 一个挂起的提示已被页面替换 |
 | `::browser-created` / `::browser-selected` / `::browser-closed` | `id, …` | 标签页与窗口的生命周期 |
 | `::popup-requested` | `url` | target=_blank；前台弹窗已就地导航 |
@@ -162,12 +163,17 @@ User-Agent 切换。每个示例演示什么，见
 | 变量 | 作用 |
 | --- | --- |
 | `CHROMIUM_URL` | 要打开的页面 |
-| `CEFNEST_HELPER` / `CHROMIUM_HELPER` | 强制指定 helper 路径（必须包含 `/`）；如果指向不存在的路径，demo 会回退到测试客户端 |
+| `CEFNEST_HELPER` | helper 路径（必须包含 `/`）；路径不存在时 demo 回退到测试客户端 |
+| `CHROMIUM_HELPER` | 设为任意值即强制进入 session 模式；含 `/` 的值会作为 helper 路径原样使用，即使它不存在 |
 | `CHROMIUM_SESSION_SCRIPT` | 脚本文件，一行一条命令（`load`、`js`、`find`、`menu-pick`、`download-accept`……） |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | N 毫秒后把控件截图写成 PNG 并退出 |
 | `CHROMIUM_HELPER_NO_SANDBOX` | `1` 表示不带 Chromium 沙箱运行 helper |
 | `CHROMIUM_USER_AGENT` | 在 helper 启动时写入的默认 User-Agent |
 | `G_MESSAGES_DEBUG` | **空格分隔**的日志域：`all`，或 `nested chromium-view chromium-session` |
+
+demo 还会读取一些额外的开关（`CEFNEST_DOWNLOAD_*`、`CEFNEST_PERMISSION`、
+`CEFNEST_DRAG_OUT`、`CHROMIUM_WINDOW`、`CHROMIUM_FRAME_METRICS`、剪贴板 seed/watch
+变量、`CHROMIUM_A11Y`），见 `src/main.c`。
 
 ## 常见问题
 

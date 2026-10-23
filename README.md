@@ -13,7 +13,7 @@ surface, and the widget paints it like any other content.
 - One helper process serves many tabs and standalone windows
 - Host-answerable APIs: downloads, find, context menu, permission prompts,
   page ↔ host messages, clipboard and drag & drop across the window edge
-- Zoom, mute, accessibility (ORCA-ready AT-SPI), frame metrics
+- Zoom, mute, accessibility (ORCA-ready AT-SPI), frame count
 
 ## How it works
 
@@ -63,8 +63,9 @@ cmake --build helper/build -j
 meson setup builddir && ninja -C builddir                    # 3. widget, demo, tests
 ```
 
-Stage 1 downloads ~500 MB. Skip it and everything still builds — the demo then
-drives a protocol-level test client instead of Chromium.
+Stage 1 downloads ~330 MB (about 1.5 GB unpacked). Skip it and everything
+still builds — the demo then drives a protocol-level test client instead of
+Chromium.
 
 ## Install
 
@@ -76,17 +77,17 @@ ninja -C builddir install
 | Option | Default | What it decides |
 | --- | --- | --- |
 | `install-helper` | `false` | also install the helper + the CEF runtime (~1.5 GB) |
-| `install-demo` | `true` | install `cefnest-demo` |
+| `install-demo` | `true` | install `cefnest-demo` and the fallback test client |
 
-The release pipeline (`.cnb.yml`, version tags only) packs two packages, deb
-and rpm: `cefnest` is the library + helper + CEF runtime, `cefnest-dev` adds
-headers and `cefnest.pc`. A host builds with
-`pkg-config --cflags --libs cefnest`.
+The release pipeline (`.cnb.yml`, version tags only) packs two packages, each
+as a deb and an rpm: `cefnest` is the library + helper + CEF runtime,
+`cefnest-dev` (deb) / `cefnest-devel` (rpm) adds headers and `cefnest.pc`. A
+host builds with `pkg-config --cflags --libs cefnest`.
 
-The library finds its helper without any environment: `CEFNEST_HELPER` or
-`CHROMIUM_HELPER` (must contain `/`), else the path compiled in from
-`prefix + libexecdir + <arch>`, else the development tree. See
-`docs/control-channel.md` for what the helper process itself is given.
+The library finds its helper without requiring any environment variables:
+`CEFNEST_HELPER` or `CHROMIUM_HELPER` (must contain `/`), else the path
+compiled in from `prefix + libexecdir + <arch>`, else the development tree.
+See `docs/control-channel.md` for what the helper process itself is given.
 
 ## Quick start
 
@@ -129,7 +130,7 @@ inline in `src/chromium-session.h`.
 | --- | --- |
 | Lifecycle | `chromium_session_new()` · `set_view()` · `start()` · `stop()` |
 | Navigation | `load_uri()` · `go_back()` · `go_forward()` · `reload()` · `stop_loading()` |
-| State | `get_uri()` · `get_title()` · `get_loading()` · `get_can_go_back()` · `get_can_go_forward()` · `get_running()` · `get_muted()` · `get_zoom_level()` · `get_frame_count()` |
+| State | `get_uri()` · `get_title()` · `get_loading()` · `get_can_go_back()` · `get_can_go_forward()` · `get_running()` · `get_muted()` · `get_zoom_level()` · `get_frame_count()` · `get_helper_path()` |
 | JavaScript | `run_javascript()` · `run_javascript_expression()` → answer on `::script-result` |
 | Downloads | answer `::download-begin` with `accept_download()` / `reject_download()`; in flight: `pause_download()` / `resume_download()` |
 | Find | `find()` · `stop_finding()` → answers on `::find-result` |
@@ -142,7 +143,7 @@ inline in `src/chromium-session.h`.
 
 | Signal | Carries | Notes |
 | --- | --- | --- |
-| `::changed` | — | uri / title / loading / back-forward state moved |
+| `::changed` | — | uri / title / loading / back-forward / mute state moved |
 | `::ready` | — | helper handshake done |
 | `::load-end` | `url, http_code` | fires on failure too, with code 0 |
 | `::load-error` | `error_code, url, message` | a navigation that never committed |
@@ -152,7 +153,7 @@ inline in `src/chromium-session.h`.
 | `::download-progress` / `::download-end` | see header | progress per whole percent |
 | `::find-result` | `identifier, count, active_ordinal, final` | one request may answer more than once |
 | `::context-menu` | `x, y, items` | return TRUE to draw your own menu, then answer |
-| `::permission-request` | `id, kind, origin, permissions` | return TRUE to own the answer; default is deny |
+| `::permission-request` | `id, kind, origin, permissions, raw` | return TRUE to own the answer; default is deny |
 | `::permission-dismissed` | `id, result` | a held prompt was replaced by the page |
 | `::browser-created` / `::browser-selected` / `::browser-closed` | `id, …` | tab and window lifecycle |
 | `::popup-requested` | `url` | target=_blank; foreground ones already navigated in place |
@@ -167,12 +168,17 @@ inline in `src/chromium-session.h`.
 | Variable | What it does |
 | --- | --- |
 | `CHROMIUM_URL` | page to open |
-| `CEFNEST_HELPER` / `CHROMIUM_HELPER` | force a helper path (must contain `/`); a nonexistent one makes the demo fall back to the test client |
+| `CEFNEST_HELPER` | helper path (must contain `/`); if it does not exist, the demo falls back to the test client |
+| `CHROMIUM_HELPER` | set to anything forces session mode; a value with `/` names the helper and is used as written, even when it does not exist |
 | `CHROMIUM_SESSION_SCRIPT` | script file, one command per line (`load`, `js`, `find`, `menu-pick`, `download-accept`, …) |
 | `CHROMIUM_DUMP` / `CHROMIUM_DUMP_DELAY` | write a PNG of the widget after N ms and exit |
 | `CHROMIUM_HELPER_NO_SANDBOX` | `1` runs the helper without Chromium's sandbox |
 | `CHROMIUM_USER_AGENT` | default User-Agent baked in at helper startup |
-| `G_MESSAGES_DEBUG` | space-separated log domains: `all`, or `nested chromium-view chromium-session` |
+| `G_MESSAGES_DEBUG` | **space**-separated log domains: `all`, or `nested chromium-view chromium-session` |
+
+The demo also reads extra knobs (`CEFNEST_DOWNLOAD_*`, `CEFNEST_PERMISSION`,
+`CEFNEST_DRAG_OUT`, `CHROMIUM_WINDOW`, `CHROMIUM_FRAME_METRICS`, the clipboard
+seed/watch variables, `CHROMIUM_A11Y`); see `src/main.c`.
 
 ## Troubleshooting
 

@@ -242,7 +242,7 @@ void               chromium_session_context_menu_dismiss (ChromiumSession *self)
  * never arrives until the first is answered. See docs/control-channel.md for the
  * interaction shape.
  *
- * ::permission-request (id, kind, origin, permissions) arrives first. @kind is
+ * ::permission-request (id, kind, origin, permissions, raw) arrives first. @kind is
  * "media" for a getUserMedia ask and "prompt" for one of Chromium's permission
  * prompts, and @permissions is a GList of owned-by-the-session name strings
  * ("device-audio", "geolocation", "clipboard", "midi-sysex", …) — @raw is the

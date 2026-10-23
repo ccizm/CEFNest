@@ -24,11 +24,12 @@
 
 | 命令 | 载荷 | 说明 |
 | --- | --- | --- |
-| `new-browser` | `url`、`mode`（`tab`/`window`） | 在同一 helper 中新建一个 CEF browser |
+| `new-browser` | `url`、`mode`（`tab`/`window`，默认 `tab`） | 在同一 helper 中新建一个 CEF browser |
 | `select-browser` | `browser` | 激活该标签页；窗口模式下还会聚焦窗口 |
-| `close-browser` | `browser` | 只关闭这一个；关闭最后一个会结束 helper |
-| `load` | `url`，可选 `browser` | 默认为当前激活的 browser |
-| `back` `forward` `reload` `stop` `quit` | `reload` 多一个 `hard` | 导航 |
+| `close-browser` | `browser`（可选；默认当前激活） | 只关闭这一个；关闭最后一个会结束 helper |
+| `load` | `url` | 作用于当前激活的 browser |
+| `back` `forward` `reload` `stop` | `reload` 多一个 `hard` | 导航；作用于当前激活的 browser |
+| `quit` | — | 关闭所有 browser 并结束 helper |
 | `zoom-in` `zoom-out` `zoom-reset` | — | 步进 0.5；reset 回到 0.0 |
 | `js` | `code`、`id` | 语句形式，在页面中求值（需要 CSP 允许 `unsafe-eval`） |
 | `js-expr` | `code`、`id` | 表达式直接嵌入，不经过 `eval` |
@@ -48,7 +49,9 @@
 | 事件 | 载荷 |
 | --- | --- |
 | `ready` | `cef`、`pid`、`url`（握手） |
-| `browser-created` / `browser-selected` / `browser-closed` | `browser`（另带 `url`、`windowed`） |
+| `browser-created` | `browser`、`url`、`windowed` |
+| `browser-selected` | `browser`、`windowed` |
+| `browser-closed` | `browser` |
 | `address` / `title` | `url` / `title`（`address` 只在导航真正提交后发出） |
 | `loading` | `loading`、`can_go_back`、`can_go_forward` |
 | `load-end` | `url`、`http_code`（**失败时也会触发，此时 `http_code` 为 0**） |
@@ -58,6 +61,7 @@
 | `zoom` | `level`（回读；每次主框架加载后也会触发一次——Chromium 按 origin 持久化缩放级别） |
 | `copy-text` | `text`（菜单中的“复制链接/图片/媒体地址”） |
 | `open-url` | `url`、`disposition`（菜单中的“在新窗口打开…”） |
+| `popup-requested` | `url`、`disposition`、`gesture`、`browser` |
 | `page-message` | `json`（页面调用 `cefnestPostMessage` 时传入的原始字符串） |
 | `primary-selection` | `text`（页面选区；空字符串表示清除选区） |
 | `js-result` | `id`、`ok`、`value`、`message` |
@@ -69,10 +73,11 @@
 | `context-menu-dismissed` | 无（只在 helper 仍持有回调时发出） |
 | `permission-request` | `id`、`kind`（`media`/`prompt`）、`origin`、`permissions[]`、`raw` |
 | `permission-dismissed` | `id`、`result`（仅 prompt 有；media 没有 dismiss 回调） |
-| `status` / `closed` | 文本 / 无 |
+| `status` | `message` |
+| `closed` | — |
 
-凡是携带页面信息的事件（helper → 宿主）都会带 `browser` 字段；命令中的
-`browser` 字段是可选的，默认为当前激活的 browser。
+凡是携带页面信息的事件（helper → 宿主）都会带 `browser` 字段。只有
+`select-browser` 和 `close-browser` 会读取该字段；其余命令都作用于当前激活的 browser。
 
 ## 四种交互形态
 

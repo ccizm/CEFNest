@@ -16,7 +16,7 @@ helper 的查找方式见仓库根目录 `README.zh-CN.md` 的**安装**一节�
 | 示例 | 演示什么 |
 | --- | --- |
 | `minimal.c` | 最小宿主：窗口 + `ChromiumView` + `ChromiumSession`，约 56 行 |
-| `host.c` | 页面需要等宿主应答的四个信号（下载、权限、JS、`::browser-created`）；通过 `CEFNEST_HOST_SCRIPT` 脚本驱动，可无头运行 |
+| `host.c` | 宿主必须应答的四个信号（下载、权限、JS、右键菜单——菜单故意不接）；通过 `CEFNEST_HOST_SCRIPT` 脚本驱动，可在无键盘下运行 |
 | `browser.c` | 单页浏览器外壳：地址栏、前进后退、缩放、静音——全部依赖 `::changed` 和各个 getter，无需逐事件维护状态 |
 | `tabs.c` | 多标签页：多个 browser 共用一个 helper，以及 `::browser-created` / `::browser-selected` 如何驱动标签栏 |
 | `windows.c` | 窗口模式的 browser：`chromium_view_new_shared()` 为每个 CefWindow 提供一个真正的 GTK 窗口 |

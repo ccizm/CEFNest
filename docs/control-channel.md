@@ -26,11 +26,12 @@ whoever spawns the helper.
 
 | Command | Payload | Notes |
 | --- | --- | --- |
-| `new-browser` | `url`, `mode` (`tab`/`window`) | a new CEF browser inside the same helper |
+| `new-browser` | `url`, `mode` (`tab`/`window`, default `tab`) | a new CEF browser inside the same helper |
 | `select-browser` | `browser` | activate the tab; window mode also focuses |
-| `close-browser` | `browser` | close this one only; the last one ends the helper |
-| `load` | `url`, optional `browser` | defaults to the active browser |
-| `back` `forward` `reload` `stop` `quit` | `reload` adds `hard` | navigation |
+| `close-browser` | `browser` (optional; default active) | close this one only; the last one ends the helper |
+| `load` | `url` | the active browser |
+| `back` `forward` `reload` `stop` | `reload` adds `hard` | navigation; the active browser |
+| `quit` | — | close every browser and end the helper |
 | `zoom-in` `zoom-out` `zoom-reset` | — | step 0.5; reset returns to 0.0 |
 | `js` | `code`, `id` | statement form, evaluated in the page (needs CSP `unsafe-eval`) |
 | `js-expr` | `code`, `id` | expression embedded directly, no `eval` |
@@ -50,7 +51,9 @@ whoever spawns the helper.
 | Event | Payload |
 | --- | --- |
 | `ready` | `cef`, `pid`, `url` (handshake) |
-| `browser-created` / `browser-selected` / `browser-closed` | `browser` (plus `url`, `windowed`) |
+| `browser-created` | `browser`, `url`, `windowed` |
+| `browser-selected` | `browser`, `windowed` |
+| `browser-closed` | `browser` |
 | `address` / `title` | `url` / `title` (`address` only for committed navigations) |
 | `loading` | `loading`, `can_go_back`, `can_go_forward` |
 | `load-end` | `url`, `http_code` (**fires on failure too, with code 0**) |
@@ -60,6 +63,7 @@ whoever spawns the helper.
 | `zoom` | `level` (read back; also once after each main-frame load — Chromium persists zoom per origin) |
 | `copy-text` | `text` (the menu's "copy link/image/media address") |
 | `open-url` | `url`, `disposition` (the menu's "open in a new window…") |
+| `popup-requested` | `url`, `disposition`, `gesture`, `browser` |
 | `page-message` | `json` (the raw string from the page's `cefnestPostMessage`) |
 | `primary-selection` | `text` (the page's selection; an empty string clears it) |
 | `js-result` | `id`, `ok`, `value`, `message` |
@@ -71,10 +75,12 @@ whoever spawns the helper.
 | `context-menu-dismissed` | — (only while the helper still holds the callback) |
 | `permission-request` | `id`, `kind` (`media`/`prompt`), `origin`, `permissions[]`, `raw` |
 | `permission-dismissed` | `id`, `result` (prompt only: media has no dismiss callback) |
-| `status` / `closed` | text / none |
+| `status` | `message` |
+| `closed` | — |
 
-Page-carrying helper → host events all carry a `browser` field; the `browser`
-field on commands is optional and defaults to the active browser.
+Page-carrying helper → host events all carry a `browser` field. Only
+`select-browser` and `close-browser` read one; every other command acts on the
+active browser.
 
 ## The four interaction shapes
 

@@ -17,7 +17,7 @@ protocol between session and helper: [`docs/control-channel.md`](../docs/control
 | Example | What it shows |
 | --- | --- |
 | `minimal.c` | the minimal host: window + `ChromiumView` + `ChromiumSession`, ~56 lines |
-| `host.c` | the four signals a page stands on an answer for (download, permission, JS, `::browser-created`); script-driven via `CEFNEST_HOST_SCRIPT`, runs headless |
+| `host.c` | the four signals a host has to answer (download, permission, JS, context menu — the menu is deliberately left unconnected); script-driven via `CEFNEST_HOST_SCRIPT`, tested without a keyboard |
 | `browser.c` | a single-page browser shell: address entry, back/forward, zoom, mute — all riding on `::changed` and the getters, no per-event bookkeeping |
 | `tabs.c` | multi-tab: several browsers in one helper, and how `::browser-created` / `::browser-selected` drive a tab row |
 | `windows.c` | windowed browsers: `chromium_view_new_shared()` gives each CefWindow a real GTK window |
