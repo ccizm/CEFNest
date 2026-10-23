@@ -24,10 +24,73 @@
     <link rel="icon" type="image/x-icon" href="./favicon.ico" />
     <link rel="icon" type="image/svg+xml" href="./cefnest.svg" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+
+    <link rel="canonical" href="https://cefnest.yanzhiming.com/" />
+    <meta name="robots" content="index, follow" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="CEFNest" />
+    <meta property="og:url" content="https://cefnest.yanzhiming.com/" />
+    <meta property="og:title" content="CEFNest — 在 GTK 4 里嵌入真正的 Chromium" />
+    <meta
+      property="og:description"
+      content="CEFNest：用真正的 Chromium 渲染网页的 GTK 4 控件。原生 Wayland，无 XWayland，无离屏渲染。"
+    />
+    <meta property="og:image" content="https://cefnest.yanzhiming.com/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:locale:alternate" content="en_US" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="CEFNest — 在 GTK 4 里嵌入真正的 Chromium" />
+    <meta
+      name="twitter:description"
+      content="CEFNest：用真正的 Chromium 渲染网页的 GTK 4 控件。原生 Wayland，无 XWayland，无离屏渲染。"
+    />
+    <meta name="twitter:image" content="https://cefnest.yanzhiming.com/og-image.png" />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareSourceCode",
+        "name": "CEFNest",
+        "url": "https://cefnest.yanzhiming.com/",
+        "image": "https://cefnest.yanzhiming.com/og-image.png",
+        "description": "一个 GTK 4 控件：页面由真正的 Chromium 渲染，经同一进程内的 Wayland 合成器直接合成进控件。没有 XWayland，也没有离屏渲染。",
+        "codeRepository": "https://cnb.cool/yanzhiming/CEFNest",
+        "programmingLanguage": "C",
+        "license": "https://opensource.org/licenses/LGPL-2.1",
+        "author": {
+          "@type": "Person",
+          "name": "YAN ZHIMING",
+          "url": "https://yanzhiming.com/"
+        }
+      }
+    </script>
+
     <title>CEFNest — 在 GTK 4 里嵌入真正的 Chromium</title>
   </head>
   <body>
     <div id="app"></div>
+    <noscript>
+      <h1>CEFNest — 在 GTK 4 里嵌入真正的 Chromium</h1>
+      <p>
+        一个 GTK 4 控件：页面由真正的 Chromium 渲染，经同一进程内的 Wayland
+        合成器直接合成进控件。没有 XWayland，也没有离屏渲染。
+      </p>
+      <ul>
+        <li><a href="https://cnb.cool/yanzhiming/CEFNest">源码仓库</a></li>
+        <li>
+          <a href="https://cnb.cool/yanzhiming/CEFNest/-/blob/main/README.md">README</a>
+        </li>
+        <li>
+          <a href="https://cnb.cool/yanzhiming/CEFNest/-/blob/main/README.zh-CN.md">
+            中文文档
+          </a>
+        </li>
+      </ul>
+    </noscript>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

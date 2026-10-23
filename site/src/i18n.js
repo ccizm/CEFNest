@@ -105,5 +105,18 @@ watchEffect(() => {
   const m = messages[i18n.locale]
   document.title = m.meta.title
   document.documentElement.lang = i18n.locale
-  document.querySelector('meta[name="description"]')?.setAttribute('content', m.meta.description)
+  document
+    .querySelector('meta[name="description"]')
+    ?.setAttribute('content', m.meta.description)
+  for (const [key, content] of [
+    ['property og:title', m.meta.title],
+    ['property og:description', m.meta.description],
+    ['name twitter:title', m.meta.title],
+    ['name twitter:description', m.meta.description],
+  ]) {
+    const [attr, name] = key.split(' ')
+    document
+      .querySelector(`meta[${attr}="${name}"]`)
+      ?.setAttribute('content', content)
+  }
 })
