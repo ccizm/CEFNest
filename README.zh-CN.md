@@ -124,7 +124,7 @@ CNB 的发版流水线把安装树打成两个包，各有 deb 与 rpm 两种格
 `cefnest.pc`，精确依赖对应版本的 `cefnest`；装好后用
 `pkg-config --cflags --libs cefnest` 构建宿主。demo 与 `shm-client` 是开发测试工具，
 不打包，只随 `cefnest-build.tar.gz` 发布。两个包共用一个版本号——CEF stable `X.Y.Z`
-加修订号（`154.0.34-8`）——同一次构建一起发布。从 -6 的四包布局升级由 deb 的
+加修订号（`154.0.34-9`）——同一次构建一起发布。从 -6 的四包布局升级由 deb 的
 `Replaces`/`Breaks` 与 rpm 的 `Obsoletes` 处理，不需要手工卸载旧包。流水线只在
 版本 tag 上构建，详见 `docs/testing/cnb-ci.md`。
 

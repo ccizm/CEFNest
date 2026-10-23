@@ -136,7 +136,7 @@ it depends on the exact `cefnest` version, and a host builds with
 `pkg-config --cflags --libs cefnest`. The demo and `shm-client` are
 development/test tools and are not packaged — they travel in
 `cefnest-build.tar.gz`. Both packages share one version — CEF stable `X.Y.Z`
-plus a revision (`154.0.34-8`) — and are built and released together. Upgrades
+plus a revision (`154.0.34-9`) — and are built and released together. Upgrades
 from the four-package -6 layout are handled by deb `Replaces`/`Breaks` and rpm
 `Obsoletes`, so they need no manual removal. The pipeline builds on version
 tags only; see `docs/testing/cnb-ci.md`.

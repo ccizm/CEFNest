@@ -18,7 +18,7 @@
 #
 # Run from the checkout, in the same workspace as scripts/ci-build.sh:
 #
-#   CEFNEST_PACKAGE_RELEASE=8 ./scripts/ci-smoke-job.sh
+#   CEFNEST_PACKAGE_RELEASE=9 ./scripts/ci-smoke-job.sh
 
 set -eu
 

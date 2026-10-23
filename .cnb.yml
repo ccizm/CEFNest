@@ -6,7 +6,7 @@
 # cefnest-helper against it, installs and smoke-tests the deb packages, then
 # creates the Release for that tag and uploads the build tarball plus the
 # installable deb/rpm packages (including the helper and its CEF runtime) as
-# Release assets. Push a version tag such as v154.0.34-8 to publish one.
+# Release assets. Push a version tag such as v154.0.34-9 to publish one.
 # Ordinary branch pushes build nothing here — the full gate (test/ci-all.sh)
 # runs locally or on a prepared self-hosted runner; docs/testing/cnb-ci.md
 # describes both paths.
@@ -23,22 +23,23 @@ $:
       stages:
         - name: check the release strings
           image: ubuntu:24.04
-          script: CEFNEST_PACKAGE_RELEASE=8 CEFNEST_EXPECTED_TAG=v154.0.34-8 ./scripts/check-release-tag.sh
+          script: CEFNEST_PACKAGE_RELEASE=9 CEFNEST_EXPECTED_TAG=v154.0.34-9 ./scripts/check-release-tag.sh
           timeout: 10m
         - name: build
           image: ubuntu:24.04
-          script: CEFNEST_PACKAGE_RELEASE=8 ./scripts/ci-build.sh
+          script: CEFNEST_PACKAGE_RELEASE=9 ./scripts/ci-build.sh
           timeout: 90m
         - name: install and smoke the packages
           image: ubuntu:24.04
           # The runner is root on some pools and a sudo user on others; every
           # script here decides for itself whether it needs sudo, so the command
           # stays one line. scripts/ci-smoke-job.sh is that line's content:
-          # tzdata first (its postinst renames over the bind-mounted
-          # /etc/localtime and takes the whole apt transaction down — the -8
-          # run's single failure), then gcc and binutils for the smoke script's
-          # own two checks, then the smoke script.
-          script: CEFNEST_PACKAGE_RELEASE=8 ./scripts/ci-smoke-job.sh
+          # tzdata first — the -8 run's single failure had tzdata at the head of
+          # its `dpkg: error processing package … (--configure)` chain, and the
+          # mechanism (a postinst renaming over the runner's bind-mounted
+          # /etc/localtime) is docs/testing/cnb-ci.md §1 — then gcc and binutils
+          # for the smoke script's own two checks, then the smoke script.
+          script: CEFNEST_PACKAGE_RELEASE=9 ./scripts/ci-smoke-job.sh
           timeout: 30m
         - name: create release
           type: git:release
@@ -51,8 +52,8 @@ $:
           settings:
             attachments:
               - "./dist/cefnest-build.tar.gz"
-              - "./dist/cefnest_154.0.34-8_amd64.deb"
-              - "./dist/cefnest-dev_154.0.34-8_amd64.deb"
-              - "./dist/cefnest-154.0.34-8.x86_64.rpm"
-              - "./dist/cefnest-devel-154.0.34-8.x86_64.rpm"
+              - "./dist/cefnest_154.0.34-9_amd64.deb"
+              - "./dist/cefnest-dev_154.0.34-9_amd64.deb"
+              - "./dist/cefnest-154.0.34-9.x86_64.rpm"
+              - "./dist/cefnest-devel-154.0.34-9.x86_64.rpm"
               - "./dist/SHA256SUMS"
