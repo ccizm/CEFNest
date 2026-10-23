@@ -25,7 +25,7 @@
 #
 # Run from anywhere in the checkout:
 #
-#   CEFNEST_PACKAGE_RELEASE=7 CEFNEST_EXPECTED_TAG=v154.0.34-7 \
+#   CEFNEST_PACKAGE_RELEASE=8 CEFNEST_EXPECTED_TAG=v154.0.34-8 \
 #     ./scripts/check-release-tag.sh
 
 set -eu

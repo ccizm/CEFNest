@@ -5,7 +5,7 @@
 //   /-/releases/download/<tag>/<file>
 // 版本号只在这里写一次；改名或升修订号时，页面上的文件名、直链与命令一起动。
 const repository = 'https://cnb.cool/yanzhiming/CEFNest'
-const version = '154.0.34-7'
+const version = '154.0.34-8'
 const tag = `v${version}`
 
 export const release = {
