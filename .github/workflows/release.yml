@@ -1,0 +1,53 @@
+# GitHub's counterpart of the CNB tag pipeline (.cnb.yml): pushing a v* tag
+# builds the same artifacts with the same scripts and publishes them as a
+# GitHub Release. The release number is read out of the tag itself
+# (v154.0.34-7 -> 7), so this file carries no version of its own and the two
+# pipelines cannot drift apart — check-release-tag.sh still guards every name.
+#
+# The build needs no secrets: actions/checkout and the Release step use the
+# workflow's own GITHUB_TOKEN. The first run downloads CEF (~330 MB) from the
+# build service; actions/cache keeps later runs from paying for it again.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: check the release strings
+        run: |
+          CEFNEST_PACKAGE_RELEASE="${GITHUB_REF_NAME##*-}" \
+            CEFNEST_EXPECTED_TAG="$GITHUB_REF_NAME" \
+            ./scripts/check-release-tag.sh
+
+      - name: cache the CEF distribution
+        uses: actions/cache@v4
+        with:
+          path: third_party/cef/dist
+          key: cef-${{ hashFiles('scripts/fetch-cef.sh') }}
+
+      - name: build
+        run: CEFNEST_PACKAGE_RELEASE="${GITHUB_REF_NAME##*-}" ./scripts/ci-build.sh
+
+      - name: smoke the packages
+        run: CEFNEST_PACKAGE_RELEASE="${GITHUB_REF_NAME##*-}" ./scripts/ci-smoke-job.sh
+
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "CEFNest" \
+            --notes-file RELEASE-NOTES.md \
+            dist/*
