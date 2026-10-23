@@ -185,7 +185,7 @@ helper 侧对称缺陷：`helper/src/main.cpp:279-291` 的 `Send()` 靠 SO_SNDTI
 | S2 | dispose 补清 `primary_replay_id` | `test/audit-loop-sources.py`（静态：每个 idle/timeout 要么持引用要么被 dispose 取消） |
 | S3 | 事后缩小的 pool 直接拒绝读取 | `--pool-shrink`（两种 pool 生命周期各一遍） |
 | S4 | 宿主与 helper 两侧都补写循环 | `test/framing-gate.sh` |
-| S5 | `CloseEveryBrowser()` + 信号处理 | `test/sandbox-soak.sh`、`test/multi-browser-gate.sh` |
+| S5 | `CloseEveryBrowser()` + 信号处理 | `test/sandbox-soak.sh`、`test/multi-browser-gate.sh`、`test/helper-signal-gate.sh`（信号那半，见下方订正） |
 | S6 | `assigned_surfaces` 生命周期 | `test/multi-browser-gate.sh` |
 | M2 | popup 深度上限 `NESTED_POPUP_MAX_DEPTH` | `--popup-depth`（第 33 层被拒） |
 | M8 | `start_drag` 必须引一次还按着的按下 | `--drag-fake-serial`（`docs/drag-loop.md` §6.7 附两次变异） |
@@ -233,6 +233,19 @@ helper 侧对称缺陷：`helper/src/main.cpp:279-291` 的 `Send()` 靠 SO_SNDTI
 - **L11 成立，而且比报告说的更安静**：`gtk_widget_unparent()` 作用在**没有 parent** 的 widget 上
   （GTK 4.18 实测）什么都不做、浮游引用还在，所以空菜单那条路每次都留下一个 popover 加它的 box，
   且没有任何告警。已 `g_object_ref_sink` + `unref`。
+- **S5 的信号那一半是虚报**：本节原先把「`CloseEveryBrowser()` + 信号处理」记成已闭环，但
+  2026-10-23 那份复核在 `helper/src/main.cpp` 里 `grep` 不到 `signal`/`sigaction`/`SIGTERM`——
+  报告那条「helper 全程无 SIGTERM/SIGINT 处理」当时只修了 `CloseEveryBrowser()`，信号处理从未写下去。
+  现在补上了，并且是按量出来的形状补的：`CefInitialize()` 一路走出去会把 SIGHUP/SIGINT/SIGTERM
+  改回 `SIG_DFL`（strace：装好之后约 2 ms 被重置），所以 handler 必须装在它**之后**；装在前面的一版
+  门禁跑出来就是退出码 143/130、转录里没有 `caught signal`。门禁 `test/helper-signal-gate.sh`
+  会先读 `/proc/PID/status` 的 `SigCgt` 再动手，将来 CEF 再把这三个收回去会当场响，而不是只少一行日志。
+  量的过程里还翻出两个原有缺陷，见 `docs/features/session-lifecycle.md` §7：
+  `HelperWindowDelegate` 多持有一份 browser view 的所有权，导致**第一个 tab 永远关不掉**
+  （`CloseBrowser(true)` 被 Alloy 读成「关窗口」，`OnBeforeClose` 不来）——不修它，信号处理只能
+  走到「开始关浏览器」；以及 helper 自报 `{"event":"closed"}` 之后，宿主的 dispose 仍会
+  `g_subprocess_force_exit()`，正好把 `CefShutdown()` 砍在半路（profile lock 已经放了，但
+  `main()` 的尾巴再也不跑）。两处都已修。
 
 ### 仍在处理
 
@@ -381,3 +394,81 @@ CNB runner 上验证。
   清理改动没有破坏真实弹层。
 - 变异：`popup-cycle` 去掉环检查 → FAIL；`framing` 的 eof 段退回“只 mark_closed、
   不 drop” → 201 CPU ticks → FAIL。
+
+## 第四轮：2026-10-23 报告与处置
+
+- 报告基线 `358dcfa`，当时 HEAD `b011d39`；本轮的改动都在工作树上，**尚未提交**。
+- 报告的两处落点都成立：旧记录“已闭环”的 14 项里 **S5 是虚报**（helper 全文与全部 git
+  历史里没有任何 `signal`/`sigaction`），**M22 只剩文档残留**（代码与门禁都对，头文件还在
+  宣称 tab 关不掉）。新风险集中在发布管线与示例。
+- 范围按“全量”处置：P1–P4、M-a…M-g、M22 与轻微项逐条见表。量不到的写在“本轮量不到的”
+  一节里，不含糊带过。
+
+### 严重项
+
+| 条目 | 处置 | 判据 |
+| --- | --- | --- |
+| **P1** `cefnest-build.tar.gz` 只有库、版本还是 `0.0.1`，Release 说明却写“库 + demo + 全部示例 + helper，可整体解包运行”；同一个 Release 里 deb 是 `154.0.34-4`（`scripts/ci-build.sh`） | 构建树配置补 `-Dcefnest-version=$PACKAGE_VERSION`；产物树按 `src/`、`examples/`、`test/` 三层打包，正好对上二进制里的 `$ORIGIN` 推法；示例个数由脚本数出来填进说明；中英文两版说明都删掉“helper 也在这个包里”的暗示，明写**不含 helper、不含 CEF 运行时**，要渲染页面就装 `cefnest-helper` 或用 `CHROMIUM_HELPER` | 各配置一次对比 `build.ninja` 里的产物名：`-Dcefnest-version=154.0.34` → `libcefnest.so.154.0.34`，不设 → `libcefnest.so.0.0.1`。这一条就是报告里“两个版本串”的成因 |
+| **P2** helper 包在 Ubuntu 24.04 默认策略下大概率起不来：`chrome-sandbox` 以 0755 打包、无 postinst、无 AppArmor profile，而沙箱默认开；流水线只构建不安装 | 不走 `chmod 4755`（没量过，而且是给全系统加一个 root SUID 目标）。文档五处写清后果与两条出路（`README.md`、`README.zh-CN.md`、`docs/guides/packaging.md` §1、`docs/internals/sandbox-policy.md` §6、`docs/known-limitations.md`），Ubuntu 那句按发行说明对齐成 **23.10 引入但默认关、24.04 默认开**；`.cnb.yml` 加第三个 stage `install and smoke the packages` 跑 `scripts/ci-smoke-packages.sh`：真 `apt install` 三个 deb → 对装出来的 `libcefnest.so.0` 与安装路径上的 helper 跑 `ldd` → 不带显示起一次 helper 读横幅，`sandbox=on` 必须在，出现 `No usable sandbox!` 即红 | 本机以 `CI_SMOKE_SKIP_INSTALL=1` 跑通 inspect 半边：**19 条 ok、0 FAIL**；安装半边需要 root，本机不是，容器也复现不了别人机器上的 AppArmor 策略——所以文档写的是“后果 + 两条出路”，不是“已测通” |
+| **P3-1** `examples/browser.c:53-57` 把 zoom level 当线性百分比 | 显示改 `(int)(100.0 * pow(1.2, level) + 0.5)`，`examples/meson.build` 给示例补 `m_dep`；`docs/features/zoom-path.md` 新增换算一节并标明是人工测量 | 嵌套会话里读 `window.devicePixelRatio`：level `0` → `1`，`0.5` → `1.0954451560974121`，`1.0` → `1.2000000476837158`，即因子 `1.2^level` |
+| **P3-2** `examples/menus.c:121-133` 把 popover 挂到 GtkWindow，而 `::context-menu` 的 x/y 是 view 内坐标 | parent 改成本次事件的 view（新增 `menus.view`，窗口销毁时置 NULL） | `gtk_popover_set_pointing_to()` 的矩形按父控件自身坐标系读（`/usr/share/gir-1.0/Gtk-4.0.gir` 原文）；仓库内 `examples/windows.c` 早已 parent 到 active view，是同树范本 |
+| **P4** S5 信号处理从未实现（报告虚报） | `helper/src/main.cpp`：`sigaction` 装 TERM/INT/HUP；处理函数只往 `pipe2` 写一字节（async-signal-safe，`CefPostTask` 会取锁，不能在信号里调）；watcher 线程把字节 hop 到 UI 线程后 `CloseEveryBrowser()`，由 `OnBeforeClose` 收尾 → `CefShutdown()` → main 尾部 | 新门禁 `test/helper-signal-gate.sh`（`ci-all` 新增 `signal` 行，**12 条断言**）：`/proc/<pid>/status` 的 `SigCgt` 证明装上了、日志有 `caught signal 15`、走到 `helper: exited`、profile 的 `SingletonLock` 被释放、宿主侧没看到信号死。**第一版门禁当场抓到第二个 bug**：helper 自己宣布 closed 后，宿主结束运行、dispose 里 SIGKILL 孩子，于是死在 `CefShutdown()` 中途——`src/chromium-session.c` 现在不对“自己说要走”的 helper 动手 |
+| **M22** `src/chromium-session.h:48-53` 还在宣称 tab 关闭不发 `::browser-closed` | 重写：tab 与独立窗口都会发（helper 释放 slot 的 view 引用），未知 id 回 `status: no-such-browser`，指向 `docs/features/multi-browser.md` 与 `test/multi-browser-gate.sh` | `multi` 门禁 10 条断言含 `close-browser 2`；`docs/guides/minimal-host.md` §5 把“曾经关不掉”的三方式测量留着并标注已修 |
+
+### 中等项
+
+| 条目 | 处置 | 判据 |
+| --- | --- | --- |
+| **M-a** `check-cef-pin.sh` 比的是同一次 fetch 写出的两个文件，漂移检不出来 | 改成三方比：`fetch-cef.sh` 里的 `PINNED`、`dist/.cef-version`、`dist/include/cef_version.h`；`PINNED` 行抓不到就直接失败（检查丢了对象不算通过）。故意 `CEF_VERSION=latest` 的走 `CI_SKIP_HELPER_BUILD=1`，不在这里加开关 | 造 `/tmp/pinroot`：只把 `PINNED` 改成 153、`third_party` 软链真目录 → 红，且三行 drift 一起打出来；真树绿 |
+| **M-b** RELEASE-NOTES 说“只调库可不装 helper”，同篇末尾和 deb 的 `Depends: cefnest-helper (= …)` 又说必装 | 说明与 control/RPM 描述统一成分层硬依赖（helper 在最底层，库依赖它，dev/demo 依赖库），删掉“只调库”那句；四个包的 control 由同一个 `deb_control()` 写，字段不会各说各话 | 本轮重跑 deb 半边后 `dpkg-deb -f` 逐个看 Version/Depends |
+| **M-c** `examples/downloads.c:100-103` 的 999 次碰撞 fallback：内联 `g_strdup_printf` 交给不接所有权的 `g_build_filename`，每次泄漏；落名 `photo.jpg-1698…` 丢扩展名 | 先生成拥有权的字符串再拼路径；改 `stem-<时间戳>.ext`（仓库范本 `src/main.c:857`） | 现有 `download` 门禁 54 条 |
+| **M-d** 10 个新示例用“ref 且永不释放”，`minimal`/`useragent` 用“转移所有权”，无解释，混抄即 use-after-free | 11 个示例各加同一段四行注释（窗口一份负责窗口销毁，文件全局一份负责处理器永远对着活的 session；`minimal.c` 没有全局，所以把唯一那份交给窗口），`docs/guides/minimal-host.md` 加同一条规则段 | 代码审查 + `ninja` 全量重建 |
+| **M-e** 摘要求来自同一 CDN 同一信道，只防损坏不防源被替换 | `fetch-cef.sh` 按架构把 `154.0.34` 两个归档的 sha256 钉进脚本；请求版本等于 `PINNED` 时必须等于仓库里的值才 `tar -xj`，否则删档退出。注释里写明这仍是 trust-on-first-use——两个初值本身是从构建服务取的 | 造一棵 stub `curl` 服务“自洽但非批准”的归档+摘要：CDN 那关通过、pinned 那关拦下，rc=1 且不落 `dist/` |
+| **M-f** `rpmbuild` 存在性检查排在 1.5 GB deb 全部构建完之后 | 并入开头 `for tool in meson ninja dpkg-deb rpmbuild` 前置检查（本机无 rpm 时第一步就退出，不再白干） | 本轮本地跑就是靠这个顺序：deb 段跑完才在 RPM 段停住 |
+| **M-g** `SHA256SUMS` 自称“全部产物”却不含同批上传的 tarball | `CEFNEST_EXTRA_ARTIFACTS` 把 `cefnest-build.tar.gz` 移进 `dist/` 再一起 `sha256sum`；名字不存在直接失败，不静默跳过 | 冒烟 job 的 `the manifest covers what the pipeline uploads`：清单既要能验，也必须列有 `cefnest-build.tar.gz` |
+
+### 轻微项
+
+| 条目 | 处置 | 判据 |
+| --- | --- | --- |
+| `examples/windows.c:171-174` paint stack 未释放 | `primary` 与 `stack` 两条列表都 `g_list_free_full(…, g_object_unref)`，长度取自 `primary` | `primary` 门禁 2 条 |
+| `examples/findbar.c:107-110` Escape 无条件吞掉 | 只在 revealer 打开时吞，关掉后交回页面 | 现有 `find` 门禁 34 条 |
+| `examples/browser.c:215-221` mute 图标从不随状态变 | `refresh()` 按 `chromium_session_get_muted()` 换图标 + tooltip + active；`on_mute_toggled()` 加回声守卫，避免 setter 再触发一次 toggled | 代码审查（无门禁） |
+| `examples/menus.c:26` 注释写 0=none，实际置 -1 | 该字段换成 `gboolean pending`，注释与取值一致 | 代码审查 |
+| 任意 tag 都会建 Release 并 `latest: true` | 第一个 stage `check the release strings` 比 `PINNED` / `CEFNEST_PACKAGE_RELEASE` / `CEFNEST_EXPECTED_TAG` / 附件清单里 9 个带版本的名字（`.cnb.yml` 里共 **13 个位置**要一起动），并顺带比 `git tag --points-at HEAD`（runner 里有 tag ref 才比） | 本地跑绿；改一个附件名为 `-3` → 红；`CEFNEST_EXPECTED_TAG` 写错 → 红。`docs/testing/cnb-ci.md` §5 同时写明残留边界：`git:release` 用的是**实际推上来的那个 tag**，ref 不在 runner checkout 里时这一步量不到 |
+| RPM 手写依赖只有 glibc，`%global __os_install_post %{nil}` 会不会连 `find-requires` 一起关掉，未验证 | 不改行为，只把不确定性写进 `docs/testing/cnb-ci.md` §2；冒烟 job 打印 `cefnest-helper rpm --requires` 而**不做断言**（红绿都不该由猜决定） | 本机无 `rpmbuild`，仍为零测量——已在文档里点明第一次 CI 跑完要补回这一段 |
+| 四个 deb 没有 copyright | `deb_control()` 为四个包各写 machine-readable copyright，落在**数据层** `/usr/share/doc/<包名>/copyright`；helper 额外一段 `Files: usr/libexec/cefnest/*` = `BSD-3-clause`，并把 CEF 分发的 `LICENSE.txt` 装到 `/usr/share/doc/cefnest-helper/LICENSE.cef.txt`（缺文件就报错退出）。RPM 侧用 spec 的 `License:` 字段，helper 子包覆写成 `LGPL-2.1-only and BSD-3-Clause` 并打包同一份 CEF 文本 | `lintian`：改前 `E: no-copyright-file` + `W: unknown-control-file [copyright]`，改后这几个标签全清；冒烟 job 新增 4 条 + 1 条 helper BSD 段断言，变异（退回 `DEBIAN/copyright`）→ 红。**踩过的坑**：第一版就是写在 `DEBIAN/copyright`，看着像有了，dpkg 根本不安装这个成员 |
+
+### 本轮量不到的（如实记）
+
+- `meson test` 里 `protocol / impl-slot-audit` 是**红的**，且与本轮无关：`src/nested.c`
+  的 `shm_impl` 只填 `.create_pool`，本机 `wayland-server` 是 1.23.1，`wl_shm` 在版本 2
+  多了 `release`，于是审计报 `MISSING … slot 1 = release since 2`；CI 的 Ubuntu 24.04 带
+  1.22，那个槽位还不存在，所以这条只在 Debian 13 这类新头文件宿主上红。`shm_impl` 与
+  审计脚本都不在本轮改动里（`git diff` 可查），报告的原样留着：客户端按 v2 绑定后发
+  `release`，libwayland-server 会当场 abort 合成器。修它要在 compositor 核心动 6 行，
+  不在本轮范围，等决定。
+- helper 有一条**先前就存在的偶发 `*** stack smashing detected ***`**：在改动前的旧二进制上
+  同样能复现，本轮未定位。
+- RPM 分支本机零测量（无 `rpmbuild`）；`License:` 覆写、`%files` 新行、`Requires` 自动发现
+  都要等 CI。
+- 装包 + `ldd` + 起 helper 那半边只会在 CI/root 容器里真跑；AppArmor 限制宿主复现不了。
+
+### 验证状态
+
+- `meson test -C builddir`：**26 ok / 1 fail**（唯一失败是上面那条 `impl-slot-audit`）。
+- `./test/ci-all.sh`：`proof 7`、`framing 13`、`pixel 12`、`find 34`、`permission 58`、
+  `download 54`、`dnd 59`、`primary 2`、`multi 10`、`signal 12`、`soak 12` 全 PASS；
+  `menu` SKIP（headless mutter 不映射 popover，`exit 77`，同第三轮）；`unit` FAIL，
+  失败项就是同一条 `impl-slot-audit`。总退出码非 0。
+- `scripts/build-packages.sh`：deb 半边本地重跑产出四个包（RPM 半边被 stub 的 meson 停在
+  配置步，本机无 `rpmbuild`）。`dpkg-deb -e`/`-c` 复核：四个包都有
+  `usr/share/doc/<包>/copyright`，helper 带 `LICENSE.cef.txt`，`chrome-sandbox` 仍是
+  `-rwxr-xr-x`。
+- `scripts/ci-smoke-packages.sh`（`CI_SMOKE_SKIP_INSTALL=1`）：19 ok / 0 fail / 1 note。
+- `scripts/check-release-tag.sh`：绿；两处变异（附件名改 `-3`、`CEFNEST_EXPECTED_TAG` 写错）都红。
+- `scripts/check-cef-pin.sh`：真树绿，`/tmp/pinroot` 变异红。
+- `scripts/fetch-cef.sh`：stub CDN 变异红（不解包）。
+- P1 的版本串：两次 `meson setup` 对比 `build.ninja`（`154.0.34` vs `0.0.1`）。
+- P3-1 的换算：三个 dpr 值，人工测量。
+- 本轮所有改动仍未提交。

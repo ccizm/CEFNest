@@ -13,6 +13,22 @@
 0.5 是 Chrome UI 的一格；0.0 = 100%。答案统一走 `zoom` 事件（`level`），宿主不能靠本地猜测
 “应该到了哪一级”。
 
+### level 不是百分比：因子是 `1.2^level`
+
+`GetZoomLevel()` / `SetZoomLevel()` 传的是 Blink 的 zoom level，换算到页面缩放因子是
+`1.2^level`。本机量过（2026-10-23）：`./test/ci-session.sh` 里跑 demo，脚本在每两次
+`zoom-in` 之间插一条 `js window.devicePixelRatio`——嵌套 surface 的 scale 是 1，所以 dpr
+读出来就是缩放因子本身。
+
+| level | `window.devicePixelRatio` | `1.2^level` |
+| --- | --- | --- |
+| 0.00 | `1` | 1 |
+| 0.50 | `1.0954451560974121` | 1.0954451 |
+| 1.00 | `1.2000000476837158` | 1.2 |
+
+把 level 当百分比线性换算会读成 50 % 和 100 %，而页面其实是在 110 % 和 120 %——
+`examples/browser.c` 工具栏上那个数字因此是 `100 * pow (1.2, level)`，不是 `level * 100`。
+
 ## 2. Chromium 自己按 origin 记
 
 缩放 level 由 Chromium 持久化到 **origin**，不是整个 browser。换页/重新载入后同一 origin 可能
@@ -47,6 +63,8 @@ release 也在这里补发；普通 F/Esc 没有被 consume 时仍让视图收�
 - **不是 pinch zoom**：没有 `zwp_pointer_gestures`，触控板捏合不会进这条路径；这里只做键盘/API
   的页面缩放。
 - **没有独立门禁**：现阶段靠 `ChromiumSession` 的 `zoom` 回读与 demo 手动验证；不要把它写成
-  “门禁已覆盖”。真正的自动断言需要一条可稳定读到的 CEF level，而现有测试页没有为此加检查。
+  “门禁已覆盖”。§1.1 那组 dpr 是一次手动测量，不是断言——它读的是 demo 打印的脚本结果，跑法
+  记在那里。真正的自动门禁需要一条可稳定读到的 CEF level 与一个页面侧的期望值，现有测试页没有
+  为此加检查。
 - **level 不等于布局宽度**：CEF 的 zoom 改的是页面缩放因子，不改变嵌套 surface 的尺寸；窗口
   resize 仍然走原来的 compositor 路径。

@@ -38,6 +38,8 @@
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
@@ -313,6 +315,134 @@ class CloseTask : public CefTask {
 
  private:
   CefRefPtr<CefBrowser> browser_;
+};
+
+// SIGTERM is how `systemctl stop`, a desktop session logout and a plain `kill`
+// end this process. Left at its default action it stops us inside
+// CefRunMessageLoop, so neither Control::Shutdown() nor CefShutdown() runs and
+// the profile keeps a SingletonLock nobody will ever release.
+//
+// The handler cannot do the work and cannot even post the task: CefPostTask
+// takes locks, so it only drops one byte into a non-blocking pipe the watcher
+// below is sitting on. The byte is the signal number, and writing a single byte
+// is async-signal-safe.
+sig_atomic_t g_signal_wakeup_fd = -1;
+
+extern "C" void OnShutdownSignal(int number) {
+  const int saved_errno = errno;
+  const unsigned char byte = static_cast<unsigned char>(number);
+  while (write(g_signal_wakeup_fd, &byte, 1) < 0 && errno == EINTR) {
+  }
+  errno = saved_errno;
+}
+
+class SignalTask : public CefTask {
+ public:
+  explicit SignalTask(int number) : number_(number) {}
+
+  void Execute() override {
+    fprintf(stderr, "helper: caught signal %d\n", number_);
+    /* Closing the browsers is what ends the loop: OnBeforeClose quits once the
+     * last slot is gone, and the tail of main() then shuts CEF down. QuitOnce()
+     * here would cut that short and leave browsers running over a channel
+     * nobody answers. */
+    CloseEveryBrowser();
+  }
+
+  IMPLEMENT_REFCOUNTING(SignalTask);
+
+ private:
+  int number_;
+};
+
+// The self-pipe and the thread that hops its bytes onto the UI thread. Stop()
+// has to run before CefShutdown(), for the reason Control::Shutdown() gives for
+// joining its reader: a task posted after that lands on a CEF that is already
+// going away.
+class SignalWatcher {
+ public:
+  SignalWatcher() = default;
+  ~SignalWatcher() { Stop(); }
+
+  void Start() {
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) != 0) {
+      fprintf(stderr, "helper: cannot install signal handlers: pipe2: %s\n",
+              std::strerror(errno));
+      return;
+    }
+    read_fd_ = fds[0];
+    write_fd_ = fds[1];
+
+    /* Non-blocking on the write end only, and that asymmetry is the design: a
+     * full pipe must never block a signal handler, while the watcher has to
+     * wait in read() for the next signal instead of coming back with EAGAIN
+     * and quitting its loop on the first empty read. */
+    const int write_flags = fcntl(write_fd_, F_GETFL);
+    if (write_flags < 0 || fcntl(write_fd_, F_SETFL, write_flags | O_NONBLOCK) < 0) {
+      fprintf(stderr, "helper: cannot install signal handlers: fcntl: %s\n",
+              std::strerror(errno));
+      close(read_fd_);
+      close(write_fd_);
+      read_fd_ = write_fd_ = -1;
+      return;
+    }
+
+    struct sigaction action;
+    std::memset(&action, 0, sizeof(action));
+    action.sa_handler = OnShutdownSignal;
+    action.sa_flags = SA_RESTART;
+    sigemptyset(&action.sa_mask);
+    for (int number : {SIGINT, SIGTERM, SIGHUP}) {
+      if (sigaction(number, &action, nullptr) != 0) {
+        fprintf(stderr, "helper: cannot install signal handlers: sigaction(%d): %s\n",
+                number, std::strerror(errno));
+        close(read_fd_);
+        close(write_fd_);
+        read_fd_ = write_fd_ = -1;
+        return;
+      }
+    }
+
+    g_signal_wakeup_fd = write_fd_;
+    thread_ = std::thread([this] {
+      unsigned char byte = 0;
+      bool announced = false;
+      for (;;) {
+        ssize_t read_back = read(read_fd_, &byte, 1);
+        if (read_back == 0)
+          break;  // Stop() closed the write end
+        if (read_back < 0) {
+          if (errno == EINTR)
+            continue;
+          break;
+        }
+        if (announced)
+          continue;  // drain, but the first request is the one that counts
+        announced = true;
+        CefPostTask(TID_UI, new SignalTask(static_cast<int>(byte)));
+      }
+    });
+  }
+
+  void Stop() {
+    if (write_fd_ >= 0) {
+      close(write_fd_);
+      write_fd_ = -1;
+    }
+    if (thread_.joinable())
+      thread_.join();
+    if (read_fd_ >= 0) {
+      close(read_fd_);
+      read_fd_ = -1;
+    }
+    g_signal_wakeup_fd = -1;
+  }
+
+ private:
+  int read_fd_ = -1;
+  int write_fd_ = -1;
+  std::thread thread_;
 };
 
 // The host side of the control channel: a connected SOCK_STREAM unix socket we
@@ -2218,6 +2348,15 @@ class HelperWindowDelegate : public CefWindowDelegate {
     window->AddChildView(browser_view_);
     window->Show();
     browser_view_->RequestFocus();
+    /* The window owns the view from AddChildView on, so this reference is a
+     * second owner — and a second owner is what makes CloseBrowser on *this*
+     * browser read as "close the window" to Alloy instead of "close the
+     * browser". Measured: the tab window's delegate kept its view alive, so the
+     * first tab could never be closed (no OnBeforeClose, no ::browser-closed)
+     * while every later tab, whose view only the window and the slot held,
+     * closed fine. OnWindowCreated runs before CreateTopLevelWindow returns, so
+     * the reference has done its job by here. */
+    browser_view_ = nullptr;
     fprintf(stderr, "helper: window created\n");
   }
 
@@ -2396,6 +2535,11 @@ int main(int argc, char** argv) {
 
   PrintEnvironment();
 
+  // Only the browser process reaches this line: CefExecuteProcess above has
+  // already returned for every Chromium subprocess, whose signal handling stays
+  // Chromium's own. Start() is below, after CefInitialize — see the note there.
+  SignalWatcher signals;
+
   Control control;
   g_control = &control;
   const std::string socket_path = EnvOrEmpty(kSocketEnv);
@@ -2456,6 +2600,12 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // After CefInitialize, not before: that call puts SIGHUP, SIGINT and SIGTERM
+  // back to SIG_DFL on the way through (strace on CEF 154: the three are reset
+  // about 2 ms after an install made before it). A handler installed before it
+  // is simply gone by the time there is a message loop to leave.
+  signals.Start();
+
   // Hosted: no initial navigation. The empty document a browser starts with is
   // not a history entry of its own — the host's first load replaces it, which is
   // why the first page reports can_go_back false — but a URL passed here *does*
@@ -2467,6 +2617,7 @@ int main(int argc, char** argv) {
 
   const int first_slot = CreateNewBrowser(url, false);
   if (first_slot <= 0) {
+    signals.Stop();
     control.Shutdown();
     CefShutdown();
     return 1;
@@ -2474,6 +2625,7 @@ int main(int argc, char** argv) {
   g_select_slot = first_slot;
 
   CefRunMessageLoop();
+  signals.Stop();
   control.Shutdown();
   g_control = nullptr;
   CefShutdown();

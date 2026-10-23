@@ -1052,6 +1052,10 @@ on_activate (GtkApplication *app, gpointer data)
       set_status ("no helper");
     }
 
+  /* Two references, two jobs: the window drops its copy when the window goes,
+   * and this file's global keeps its own so a handler always answers against
+   * a live session. examples/minimal.c has no global and hands its only
+   * reference to the window instead. */
   g_object_set_data_full (G_OBJECT (host.window), "session",
                           g_object_ref (host.session), g_object_unref);
   g_signal_connect (host.window, "close-request", G_CALLBACK (on_close), NULL);

@@ -1,3 +1,5 @@
+#include <math.h>
+
 #include <gtk/gtk.h>
 
 #include "chromium-session.h"
@@ -50,11 +52,28 @@ refresh (void)
   if (uri && *uri && !gtk_widget_has_focus (browser.entry))
     gtk_editable_set_text (GTK_EDITABLE (browser.entry), uri);
 
-  /* "0.0 is 100 %" — the last level ::zoom-changed reported for this page. */
+  /* The level is a Blink zoom level, not a percentage: the factor is
+   * 1.2^level. Measured on this tree — level 0.5 reads window.devicePixelRatio
+   * 1.09544 and level 1.0 reads 1.20000, so a linear *100 would print 50 % and
+   * 100 % for what the page actually renders at 110 % and 120 %. */
   {
     g_autofree char *text =
-      g_strdup_printf ("%d %%", (int) (browser.zoom_level * 100 + 0.5));
+      g_strdup_printf ("%d %%", (int) (100.0 * pow (1.2, browser.zoom_level) + 0.5));
     gtk_button_set_label (GTK_BUTTON (browser.zoom), text);
+  }
+
+  /* The mute row shows what the helper read back, not what was clicked: the
+   * icon, the tooltip and the pressed state all follow the getter, and the
+   * setter's echo is what on_mute_toggled() screens out. */
+  {
+    const gboolean muted = chromium_session_get_muted (browser.session);
+
+    gtk_button_set_icon_name (
+      GTK_BUTTON (browser.mute),
+      muted ? "audio-volume-muted-symbolic" : "audio-volume-high-symbolic");
+    gtk_widget_set_tooltip_text (browser.mute,
+                                 muted ? "Unmute the page" : "Mute the page");
+    gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (browser.mute), muted);
   }
 
   if (running && chromium_session_get_loading (browser.session))
@@ -148,9 +167,14 @@ on_mute_toggled (GtkToggleButton *button, gpointer data)
 {
   /* The page's sound leaves the helper through its own audio process and lands
    * on the host's speakers, so this is the only switch the app has. What the
-   * helper read back moves ::changed a round trip later. */
-  chromium_session_set_muted (browser.session,
-                              gtk_toggle_button_get_active (button));
+   * helper read back moves ::changed a round trip later — and refresh() then
+   * sets this very button, whose "toggled" lands here again. Same value twice
+   * in a row is that echo, not a request. */
+  const gboolean want = gtk_toggle_button_get_active (button);
+
+  if (want == chromium_session_get_muted (browser.session))
+    return;
+  chromium_session_set_muted (browser.session, want);
 }
 
 static gboolean
@@ -212,9 +236,11 @@ on_activate (GtkApplication *app, gpointer data)
   toolbar_button (toolbar, "zoom-in-symbolic", G_CALLBACK (on_zoom_in),
                   "Zoom in");
 
+  /* A fresh helper always starts unmuted, so that is what the row opens with;
+   * refresh() owns it from the first ::changed on. */
   browser.mute = gtk_toggle_button_new ();
   gtk_button_set_icon_name (GTK_BUTTON (browser.mute),
-                            "audio-volume-muted-symbolic");
+                            "audio-volume-high-symbolic");
   gtk_widget_set_tooltip_text (browser.mute, "Mute the page");
   g_signal_connect (browser.mute, "toggled", G_CALLBACK (on_mute_toggled),
                     NULL);
@@ -256,6 +282,10 @@ on_activate (GtkApplication *app, gpointer data)
       browser.gone = TRUE;
     }
 
+  /* Two references, two jobs: the window drops its copy when the window goes,
+   * and this file's global keeps its own so a handler always answers against
+   * a live session. examples/minimal.c has no global and hands its only
+   * reference to the window instead. */
   g_object_set_data_full (G_OBJECT (browser.window), "session",
                           g_object_ref (browser.session), g_object_unref);
   refresh ();

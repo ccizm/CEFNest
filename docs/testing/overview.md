@@ -20,9 +20,10 @@ remaining scripts in `test/` are documented manual gates, which is why none of
 them is a `meson test`: they open real windows on whoever's desktop is in front
 of them — `download-gate.sh`, `find-gate.sh`, `dnd-gate.sh`, `menu-gate.sh`,
 `permission-gate.sh`, `primary-gate.sh`, `pixel-gate.sh`,
-`multi-browser-gate.sh`, `sandbox-soak.sh`, `event-shape-gate.sh`,
-`framing-gate.sh`, the opt-in real-page batch `real-sites.sh`, and
-`real-site-run.sh`, the one-site runner that batch calls per site.
+`multi-browser-gate.sh`, `sandbox-soak.sh`, `helper-signal-gate.sh`,
+`event-shape-gate.sh`, `framing-gate.sh`, the opt-in real-page batch
+`real-sites.sh`, and `real-site-run.sh`, the one-site runner that batch calls
+per site.
 `test/ci-session.sh` is how any of them runs with nobody's desktop touched.
 
 `seat-selftest` starts the nested compositor, launches `shm-client` against it,
@@ -268,6 +269,26 @@ appear, and nothing is left running when the demo exits. RSS is reported and not
 pinned — it is a sawtooth. Measured run: 40 s, 19 samples, fd 379 → 378 (peak
 386), 898 MB, 18 of 20 readbacks answered, 0 leftovers.
 `docs/internals/sandbox-policy.md` §7 and §8 are the numbers this keeps from going stale.
+
+`test/helper-signal-gate.sh` is the exit-path half: it signals the helper the way a
+session manager does — SIGTERM, then SIGHUP in a second run — and grades six
+assertions per signal. Before sending anything it reads `SigCgt` out of
+`/proc/PID/status`, because `CefInitialize()` puts those three signals back to
+`SIG_DFL` on the way through (strace: about 2 ms after an install made before it), and
+without that check "no handler was ever installed" and "one transcript line is missing"
+grade the same. Then: the handler names the signal on the UI thread, `main()` reaches
+its tail after `CefShutdown()`, the host never reports a signal death, and the profile's
+`SingletonLock` is gone — that lock is the user-visible symptom, since the next helper on
+the same profile reads it as "opening in an existing browser session". It runs hosted:
+under `gnome-shell --headless` a standalone helper never returns from `CefInitialize()`
+(measured on the current and the previous binary), which is what
+`docs/internals/sandbox-policy.md` §9 records. Both runs open a real window, so it is a
+documented manual gate, and `test/ci-all.sh` hosts it as the `signal` row.
+`docs/features/session-lifecycle.md` §7 is the write-up, including the two defects this
+gate surfaced while being written: a `HelperWindowDelegate` that kept a second owner of
+its browser view — which made the *first* tab impossible to close, so the signal path
+could never reach `QuitOnce()` — and a host dispose that force-exited a helper over the
+helper's own `{"event":"closed"}`, cutting `CefShutdown()` off mid-call.
 
 `test/pixel-gate.sh` is the only gate that looks at pixels instead of at logs. Every
 other one reads a scroll position, a find count, a menu model — those say the page is

@@ -1,6 +1,6 @@
 # 退出路径：关窗口要停 helper，::closed 只发一次、且带上原因
 
-日期：2026-10-20，§4–§6 补于 2026-10-21
+日期：2026-10-20，§4–§6 补于 2026-10-21，§7 补于 2026-10-23
 问题：任务 #27、#84、#85、#86。demo 里 `chromium_session_stop` 只有 header bar 上那颗「停止」按钮
 能调到，窗口关掉它就当没发生；`demo.session` 又是个从来不 unref 的 static。于是每
 跑一次，`$XDG_RUNTIME_DIR` 里多一个 `cefnest-helper-<uuid>.sock`——名字每次都是新
@@ -255,7 +255,69 @@ headless 显示器上重跑，全过、断言数不变。
 `proof` 的第四跑钉的就是这条：helper 换成一个不存在的路径，脚本 `load` → `js` → `quit`，
 断言 `rc=1` 与那句 `needs a Chromium helper session, so the run ends here`。
 
-## 7. 还没做的
+## 7. helper 那一侧也收信号：装在 `CefInitialize()` 之后
+
+问题：2026-10-23 那份复核指出 §1 那张表只讲了**宿主**怎么处理信号，而 helper 自己
+`grep` 不到 `signal`/`sigaction`/`SIGTERM`。上一轮报告（S5）里"信号处理"那一半其实从未落地。
+`systemctl stop`、桌面会话注销、以及任何人手一次 `kill`，用的都是 SIGTERM/SIGHUP/SIGINT，
+默认处置 = 直接死：不跑 `Control::Shutdown()`、不跑 `CefShutdown()`，profile 里留下一个
+`SingletonLock`，下一个用同一 profile 的 helper 会当成"已有一个浏览器会话在跑"。
+
+补完之后形状是这样（`helper/src/main.cpp`）：
+
+| 部分 | 做什么 | 为什么必须是它 |
+| --- | --- | --- |
+| `OnShutdownSignal()` | 只往管道里写**一个字节**（信号号），保存并恢复 `errno` | `CefPostTask()` 要拿锁，信号上下文里不能调；`write()` 单字节是 async-signal-safe |
+| `SignalWatcher::Start()` | `pipe2(O_CLOEXEC)` + `sigaction{SA_RESTART}` 装 SIGINT/SIGTERM/SIGHUP + 起读线程 | 自管道是"从信号里回到正常线程"的标准跳板 |
+| 读线程 → `SignalTask` | 读到字节才 `CefPostTask(TID_UI, …)`，一次信号只announce一次 | 真正的工作必须在 UI 线程上做 |
+| `SignalTask::Execute()` | `CloseEveryBrowser()`，不是 `QuitOnce()` | 关掉最后一个 slot 时 `OnBeforeClose` 自己会 quit；在这里 quit 会让浏览器挂在一个没人应答的通道上 |
+| `main()` 尾巴 | `CefRunMessageLoop()` 返回后 `signals.Stop()` → `control.Shutdown()` → `CefShutdown()` | 两个线程（watcher、reader）都必须在 `CefShutdown()` **之前**收干净，否则它们能把任务投给一个正在消失的 CEF |
+
+两处只有量一次才知道的事：
+
+* **`CefInitialize()` 会把这三个信号改回 `SIG_DFL`。** 第一版把 `signals.Start()` 放在
+  `CefInitialize()` 之前，门禁跑出来是退出码 143（TERM）/130（INT），转录里没有
+  `caught signal`——不是 handler 没干活，是 handler 已经不在了。strace 看得很清楚：
+  我们装好之后约 2 ms，`rt_sigaction(SIGTERM, {SIG_DFL}, …)` 三连发来。所以现在是
+  **`CefInitialize()` 返回之后**才 `Start()`，`/proc/PID/status` 里 `SigCgt` 读出
+  `0000000100014003`（bit 1/2/15/17/27…，SIGHUP、SIGINT、SIGTERM 都在内）。
+* **`pipe2(fds, O_CLOEXEC \| O_NONBLOCK)` 是错的**：NONBLOCK 加在两个 fd 上，watcher 第一次
+  `read()` 拿到空管道就返回 `EAGAIN`，当致命错误退出线程，信号字节从此写进一个没人读的管道。
+  只有**写端**该非阻塞（管道满时绝不能阻塞信号处理器），读端必须老老实实在 `read()` 里等。
+
+量的过程里翻出两个原有缺陷，都不是信号路径自己的问题，但不修它们这条路径走不完：
+
+1. **第一个 tab 永远关不掉。** `HelperWindowDelegate::OnWindowCreated()` 把 view
+   `AddChildView()` 进窗口之后，还继续把 `browser_view_` 攥在手里——于是同一个 view 有两个
+   所有者，Alloy 对 `CloseBrowser(true)` 的读法就变成「把这个**窗口**关掉」而不是「把这个
+   **浏览器**关掉」。实测：slot 1 的 `CloseBrowser(true)` 返回正常但 `OnBeforeClose` 永不到来
+   （没有 `::browser-closed`），而后建的 tab 个个能关。信号处理加好之后仍然停在
+   `helper: browser 1 closing` 不动，就是被它挡住——`CloseEveryBrowser()` 关不掉最后一个
+   slot，`QuitOnce()` 就永远不会发生。修法是在 `AddChildView()` 之后把 delegate 里那份引用放下。
+2. **helper 自报"我要走了"之后，宿主仍然 SIGKILL 它。** `{"event":"closed"}` 是 helper 退出路径
+   的第一句（`Control::Shutdown()` 紧随其后），宿主收到它就把这一跑判为结束；而 demo 收尾时
+   `chromium_session_dispose()` 无条件 `g_subprocess_force_exit()`，正好砍在 `CefShutdown()`
+   走到一半。profile lock 那时已经放了，所以症状只是 `main()` 的尾巴再也不跑。
+   `src/chromium-session.c` 现在记一个 `helper_is_exiting`：helper 自己报的 `closed`、或控制通道
+   被对端关掉（EOF），都算它已经宣布在退出，`stop()`/`dispose()` 就不动手——留下的
+   `child_waited` 持有引用，进程该收还是收。显式的宿主停止（通道还开着）照旧 force-exit。
+
+门禁：`test/helper-signal-gate.sh`，两个信号各跑一遍完整场景（TERM、HUP），
+每边 6 条断言 = 12 条。它在 nested session 里跑（`./test/ci-session.sh
+./test/helper-signal-gate.sh`），已进 `test/ci-all.sh` 的 `signal` 一行。它用的是
+**hosted** 模式：standalone 在那套 headless 下 `CefInitialize()` 不返回
+（`docs/internals/sandbox-policy.md` §9，当前与上一版二进制都试过），所以 helper 必须按真宿主
+的方式拉起来。三条值得单独说的判据：
+
+* 动手之前先读 `/proc/PID/status` 的 `SigCgt`，确认这个信号**确实被捕获着**。少了这一步，
+  "handler 没装上"和"转录里少一行日志"在断言里长一个样。
+* 断言的是"跑到 `main()` 的尾巴"（`helper: exited` 在 `CefShutdown()` 之后）和
+  "profile 的 `SingletonLock` 没了"——后者是这条 bug 原本的用户可见症状。
+* 转录里不许出现 `session: helper killed by signal`：那是宿主自己观察到进程被信号打死。
+
+没修的一条：`kill -9` 依旧什么都来不及做（§8）。
+
+## 8. 还没做的
 
 * **compositor 自己的 `wayland-N` + `wayland-N.lock` 仍然留在** `$XDG_RUNTIME_DIR`。
   这个不补：只有 `nested_compositor_dispose` 跑到才会 `wl_display_destroy` → unlink，

@@ -29,6 +29,27 @@ libexec/cefnest/x86_64/         cefnest-helper + libcef.so + …，一共 1.5 G
   生成的协议头点名的是宿主没有理由去实现的接口——两者都不该出现在安装树里。
 - **`install-helper` 默认 off。** 那 1.5 G 是整个 Chromium，没人想在一次默认的 `ninja install` 里搬它。
 
+`libexec/cefnest/<arch>/` 里还带着 `chrome-sandbox`，权限和 CEF 分发里一样是 0755——**不是** setuid，
+发版流水线打包时也不动它（`scripts/ci-smoke-packages.sh` 把这个权限位写成判据）。这不是省事，是一个
+决定：这棵树的沙箱走非特权用户命名空间，不需要 setuid 安装步骤（`docs/internals/sandbox-policy.md`
+§2 量过：把 `chrome-sandbox` 整个挪走，页面照跑）。后果是禁掉 userns 的宿主——Ubuntu 24.04 默认把
+`apparmor_restrict_unprivileged_userns` 打开——装完直接起不来，helper 在启动那步打
+`No usable sandbox!` 然后死掉，不会静默降回无沙箱。两条出路：给安装路径上的 `cefnest-helper`
+加一条允许 `userns` 的 AppArmor profile，或设 `CHROMIUM_HELPER_NO_SANDBOX=1`。Chromium 那句 FATAL
+自己给的第三条（`chmod 4755`）本项目不发也不建议——没量过，理由见同一篇 §6。
+
+许可信息按各自生态的规矩放，而且是量过的：
+
+- 四个 deb 各在**数据层**带一份 machine-readable copyright：`/usr/share/doc/<包名>/copyright`
+  （Policy §12.5）。写成 `DEBIAN/copyright` 不算——dpkg 不安装控制层里的这个成员，`lintian`
+  依旧报 `E: no-copyright-file`。helper 那份额外有一段 `Files: usr/libexec/cefnest/*` =
+  `BSD-3-clause`，并把 CEF 分发自带的 `LICENSE.txt` 原样装到
+  `/usr/share/doc/cefnest-helper/LICENSE.cef.txt`。
+- RPM 没有 DEP-5 对应物，靠 spec 的 `License:` 字段：主包 `LGPL-2.1-only`，helper 子包覆写成
+  `LGPL-2.1-only and BSD-3-Clause`，`%files helper` 里打包同一份 CEF 文本。**这条只写在 spec 里，本机
+  没有 rpmbuild，没量过**；rpmbuild 会对未被任何 `%files` 列出的文件报错，所以那个路径一旦
+  写错，是 CI 当场红而不是静默漏掉。
+
 ## 2. helper 路径：一条规则，不是一个默认值
 
 `chromium_session_new (NULL)` 之后，路径由 `session_find_helper()`（`src/chromium-session.c`）按这个顺序定：
@@ -250,6 +271,24 @@ demo: script 3 ok value="DND-PAGE|true"
   `version:` 跟 `cefnest-version` 选项（默认 0.0.1；CNB 包设成 CEF 的 X.Y.Z）。
 - deb/rpm 打包在 `scripts/build-packages.sh`；没有 desktop 文件；`third_party/cef/dist`
   那份分发仍假定与可执行文件并排。
+
+## 11. lintian 的账（本轮第一次跑，记下来没修）
+
+补 copyright 时顺手在装好的包上跑了 `lintian --no-tag-display-limit`，对象是本轮产物里三个小包
+（`libcefnest0`、`libcefnest-dev`、`cefnest-demo`）；296 MB 的 helper 包没跑。报出来的都是与
+许可无关的旧债，一条都没修，如实记在这里：
+
+| 标签 | 落在哪些文件 |
+| --- | --- |
+| `E: lacks-ldconfig-trigger` | `usr/lib/x86_64-linux-gnu/libcefnest.so.154.0.34` |
+| `E: no-changelog`（non-native） | 三个包的 `/usr/share/doc/<包>/changelog.Debian.gz` |
+| `E: shared-library-is-executable` | `libcefnest.so.154.0.34` 是 0755 |
+| `E: unstripped-binary-or-object` | `cefnest-demo`、`shm-client`、`libcefnest.so` |
+| `W: no-manual-page` | `/usr/bin/cefnest-demo` |
+
+`no-changelog` 是「这些包不是用 dpkg-buildpackage 从 debian/ 目录做出来的」的直接后果；
+`unstripped` 与 `.so` 的 0755 都是 meson 安装模式原样搬过去的。要不要收这笔账是产品决定，
+不是本轮范围；RPM 那侧本机没有 `rpmbuild`，同样一条都没量过。
 
 
 ## 架构：linux64 / linuxarm64

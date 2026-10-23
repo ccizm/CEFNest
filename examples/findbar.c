@@ -104,7 +104,12 @@ on_key_pressed (GtkEventControllerKey *controller, guint keyval, guint keycode,
       gtk_widget_grab_focus (find.entry);
       return TRUE;
     }
-  if (keyval == GDK_KEY_Escape)
+  /* Escape closes the bar — and only while the bar is open. This controller
+   * runs in capture phase on the window, so answering unconditionally takes
+   * Escape away from the page on every press (a page that dismisses its own
+   * overlay with it never sees the key). */
+  if (keyval == GDK_KEY_Escape &&
+      gtk_revealer_get_reveal_child (GTK_REVEALER (find.bar)))
     {
       on_close_find (NULL, NULL);
       return TRUE;
@@ -194,6 +199,10 @@ on_activate (GtkApplication *app, gpointer data)
       g_clear_error (&error);
     }
 
+  /* Two references, two jobs: the window drops its copy when the window goes,
+   * and this file's global keeps its own so a handler always answers against
+   * a live session. examples/minimal.c has no global and hands its only
+   * reference to the window instead. */
   g_object_set_data_full (G_OBJECT (find.window), "session",
                           g_object_ref (find.session), g_object_unref);
 }

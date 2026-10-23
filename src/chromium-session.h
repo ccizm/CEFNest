@@ -45,12 +45,14 @@ uint64_t           chromium_session_get_frame_count (ChromiumSession *self);
  * helper can report a selection for a browser whose created event is still on
  * the way, so a host must be able to mark a tab it has not seen yet.
  *
- * chromium_session_close_browser () is only effective for a windowed browser
- * today. For a tab the helper detaches the view and calls CloseBrowser, and
- * nothing comes back: no OnBeforeClose, so no ::browser-closed either
- * (docs/code-review-2026-10-22.md M22). An unknown @id answers
- * status: no-such-browser, which is how a host can tell "already gone" from
- * "silently refused". */
+ * chromium_session_close_browser () works for a tab and for a windowed
+ * browser: the helper drops the slot's reference to the view before
+ * CloseBrowser, so neither the window nor the slot is a co-owner when the close
+ * runs — Alloy reads that as "close the browser" and OnBeforeClose fires, which
+ * is what makes ::browser-closed land for the first tab too
+ * (docs/features/multi-browser.md, measured by test/multi-browser-gate.sh).
+ * An unknown @id answers status: no-such-browser, which is how a host can tell
+ * "already gone" from "nothing was asked". */
 void               chromium_session_new_browser   (ChromiumSession *self,
                                                    const char *url,
                                                    gboolean windowed);

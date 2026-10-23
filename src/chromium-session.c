@@ -106,6 +106,11 @@ struct _ChromiumSession {
   gboolean running;
   gboolean stopping;
   gboolean closed_emitted;
+  /* The helper said it is going away — by name ({"event":"closed"}) or by
+   * hanging up the control channel — while its process may still be running
+   * through CefShutdown(). Teardown must not SIGKILL over that announcement:
+   * see chromium_session_dispose(). */
+  gboolean helper_is_exiting;
 
   /* Screen-reader detection: org.a11y.Status.ScreenReaderEnabled on the session
    * bus is the property Orca/gsd maintains. It drives the helper's runtime
@@ -674,6 +679,9 @@ handle_event (ChromiumSession *self, const char *line)
 
   if (!strcmp (event, "closed"))
     {
+      /* The helper's own words that it is on its way out; the process is still
+       * running for a moment after this line. */
+      self->helper_is_exiting = TRUE;
       mark_closed (self, "helper closed the browser");
       return;
     }
@@ -781,6 +789,9 @@ read_chunk_done (GObject *source, GAsyncResult *result, gpointer data)
       if (length == 0)
         {
           keep_reading = FALSE;
+          /* EOF from the helper's end of the socket: the process is closing up
+           * shop, not dead yet. */
+          self->helper_is_exiting = TRUE;
           drop_connection (self);
           mark_closed (self, "control channel closed");
         }
@@ -2125,6 +2136,7 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
   self->running = TRUE;
   self->stopping = FALSE;
   self->closed_emitted = FALSE;
+  self->helper_is_exiting = FALSE;
   /* A fresh helper is a fresh browser: it starts unmuted and at 100 % zoom
    * whatever the previous one was told. Chromium's own per-origin zoom is
    * applied inside the new helper when that origin loads. */
@@ -2147,7 +2159,7 @@ chromium_session_stop (ChromiumSession *self)
   if (self->cancellable)
     g_cancellable_cancel (self->cancellable);
 
-  if (self->child)
+  if (self->child && !self->helper_is_exiting)
     g_subprocess_force_exit (self->child);
 
   close_listener (self);
@@ -2709,7 +2721,13 @@ chromium_session_dispose (GObject *object)
 
   if (self->child)
     {
-      g_subprocess_force_exit (self->child);
+      /* A helper that announced its own exit is inside CefShutdown() right now,
+       * and its profile lock is already gone — SIGKILLing it here would cut
+       * that shutdown short at the exact moment we are no longer watching. The
+       * pending child_waited holds a reference, so the object still goes away
+       * with the process. */
+      if (!self->helper_is_exiting)
+        g_subprocess_force_exit (self->child);
       g_clear_object (&self->child);
     }
 

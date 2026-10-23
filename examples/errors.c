@@ -192,6 +192,10 @@ on_activate (GtkApplication *app, gpointer data)
       g_clear_error (&error);
     }
 
+  /* Two references, two jobs: the window drops its copy when the window goes,
+   * and this file's global keeps its own so a handler always answers against
+   * a live session. examples/minimal.c has no global and hands its only
+   * reference to the window instead. */
   g_object_set_data_full (G_OBJECT (errors.window), "session",
                           g_object_ref (errors.session), g_object_unref);
 }

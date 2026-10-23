@@ -1,26 +1,41 @@
 # CNB (cnb.cool) entry point.
 #
-# Builds happen on release only: a tag push compiles the library, the demo, the
-# examples and the test clients on a hosted Ubuntu 24.04 runner, fetches the
-# verified stable CEF (154.0.34), builds cefnest-helper against it, creates the
-# Release for that tag and uploads the build tarball plus installable deb/rpm
-# packages (including the helper and its CEF runtime) as Release assets.
-# Push a version tag such as v154.0.34 to publish one. Ordinary branch pushes
-# build nothing here — the full gate (test/ci-all.sh) runs locally or on a
-# prepared self-hosted runner; docs/testing/cnb-ci.md describes both paths.
+# Builds happen on release only: a tag push checks the release strings, compiles
+# the library, the demo, the examples and the test clients on a hosted Ubuntu
+# 24.04 runner, fetches the verified stable CEF (154.0.34), builds
+# cefnest-helper against it, installs and smoke-tests the deb packages, then
+# creates the Release for that tag and uploads the build tarball plus the
+# installable deb/rpm packages (including the helper and its CEF runtime) as
+# Release assets. Push a version tag such as v154.0.34-4 to publish one.
+# Ordinary branch pushes build nothing here — the full gate (test/ci-all.sh)
+# runs locally or on a prepared self-hosted runner; docs/testing/cnb-ci.md
+# describes both paths.
 #
-# The asset names below are static (the attachment list cannot expand shell
-# variables), so they carry the version they pin: when the CEF package version
-# or CEFNEST_PACKAGE_RELEASE changes, update the names to match what
-# scripts/build-packages.sh emits for those values.
+# The CEFNEST_PACKAGE_RELEASE / CEFNEST_EXPECTED_TAG pair and the asset names
+# below are static (the attachment list cannot expand shell variables), so they
+# carry the version they pin: when the CEF package version or the revision
+# changes, all three move together, and scripts/check-release-tag.sh — the first
+# stage — fails in seconds if one of them was forgotten. That check exists
+# because the alternative was finding out 90 minutes later, on the upload.
 $:
   tag_push:
     - name: release
       stages:
+        - name: check the release strings
+          image: ubuntu:24.04
+          script: CEFNEST_PACKAGE_RELEASE=4 CEFNEST_EXPECTED_TAG=v154.0.34-4 ./scripts/check-release-tag.sh
+          timeout: 10m
         - name: build
           image: ubuntu:24.04
           script: CEFNEST_PACKAGE_RELEASE=4 ./scripts/ci-build.sh
           timeout: 90m
+        - name: install and smoke the packages
+          image: ubuntu:24.04
+          # The runner is root on some pools and a sudo user on others; the
+          # script only installs its own packages when it really is root, so
+          # escalate first and let it fail loudly if neither works.
+          script: CEFNEST_PACKAGE_RELEASE=4 sh -c 'if [ "$(id -u)" = 0 ]; then exec ./scripts/ci-smoke-packages.sh; else exec sudo -E ./scripts/ci-smoke-packages.sh; fi'
+          timeout: 30m
         - name: create release
           type: git:release
           options:
@@ -31,7 +46,7 @@ $:
           image: cnbcool/attachments:latest
           settings:
             attachments:
-              - "./cefnest-build.tar.gz"
+              - "./dist/cefnest-build.tar.gz"
               - "./dist/libcefnest0_154.0.34-4_amd64.deb"
               - "./dist/libcefnest-dev_154.0.34-4_amd64.deb"
               - "./dist/cefnest-demo_154.0.34-4_amd64.deb"

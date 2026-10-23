@@ -21,9 +21,10 @@
  */
 typedef struct {
   GtkWidget *window;
+  GtkWidget *view;       /* the ::context-menu x, y are in this widget */
   GtkWidget *popover;    /* rebuilt for every ::context-menu */
   ChromiumSession *session;
-  int answered;          /* the id answered by the current menu, 0 = none */
+  gboolean pending;      /* the helper holds an unanswered menu request */
 } Menus;
 
 static Menus menus;
@@ -31,10 +32,10 @@ static Menus menus;
 static void
 answer (int id)
 {
-  if (menus.answered)
+  if (menus.pending)
     {
       chromium_session_context_menu_select (menus.session, id);
-      menus.answered = 0;
+      menus.pending = FALSE;
     }
 }
 
@@ -50,10 +51,10 @@ on_popover_closed (GtkPopover *popover, gpointer data)
 {
   /* Closed by clicking away: the request still needs its answer, and "nothing"
    * is what dismiss is for. */
-  if (menus.answered)
+  if (menus.pending)
     {
       chromium_session_context_menu_dismiss (menus.session);
-      menus.answered = 0;
+      menus.pending = FALSE;
     }
 }
 
@@ -86,7 +87,7 @@ session_context_menu (ChromiumSession *session, int x, int y, GList *items,
   GdkRectangle rect;
   GList *l;
 
-  if (!menus.window)
+  if (!menus.window || !menus.view)
     return FALSE;   /* no UI to draw with: let the session answer */
 
   /* Rebuild from scratch each time: the GList belongs to the session for the
@@ -120,7 +121,11 @@ session_context_menu (ChromiumSession *session, int x, int y, GList *items,
 
   menus.popover = gtk_popover_new ();
   gtk_popover_set_child (GTK_POPOVER (menus.popover), list);
-  gtk_widget_set_parent (menus.popover, GTK_WIDGET (menus.window));
+  /* The parent is the view, not the window: gtk_popover_set_pointing_to()
+   * reads its rectangle in the parent's own coordinates, and x, y come from
+   * the page. Parented to the window here, every menu would land one hint
+   * label too high. */
+  gtk_widget_set_parent (menus.popover, menus.view);
   g_signal_connect (menus.popover, "closed", G_CALLBACK (on_popover_closed),
                     NULL);
 
@@ -134,7 +139,7 @@ session_context_menu (ChromiumSession *session, int x, int y, GList *items,
 
   /* Returning TRUE is the contract: from here the helper holds one open menu
    * request, and the popover's closed handler owes it select or dismiss. */
-  menus.answered = -1;
+  menus.pending = TRUE;
   gtk_popover_popup (GTK_POPOVER (menus.popover));
   return TRUE;
 }
@@ -167,6 +172,7 @@ static void
 on_window_destroy (GtkWindow *window, gpointer data)
 {
   menus.window = NULL;
+  menus.view = NULL;
   menus.popover = NULL;
 }
 
@@ -193,6 +199,7 @@ on_activate (GtkApplication *app, gpointer data)
   gtk_widget_set_vexpand (GTK_WIDGET (view), TRUE);
   gtk_box_append (GTK_BOX (root), GTK_WIDGET (view));
   gtk_window_set_child (GTK_WINDOW (menus.window), root);
+  menus.view = GTK_WIDGET (view);
 
   menus.session = chromium_session_new (NULL);
   chromium_session_set_view (menus.session, view);
@@ -218,6 +225,10 @@ on_activate (GtkApplication *app, gpointer data)
       g_clear_error (&error);
     }
 
+  /* Two references, two jobs: the window drops its copy when the window goes,
+   * and this file's global keeps its own so a handler always answers against
+   * a live session. examples/minimal.c has no global and hands its only
+   * reference to the window instead. */
   g_object_set_data_full (G_OBJECT (menus.window), "session",
                           g_object_ref (menus.session), g_object_unref);
 }

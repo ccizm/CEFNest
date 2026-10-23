@@ -33,6 +33,21 @@ case "${CEF_ARCH:-$(uname -m)}" in
 esac
 
 PINNED='154.0.34+g14c5a08+chromium-154.0.8037.98'
+
+# What the pinned build's archive has to hash to, per architecture. The .sha256
+# the build service publishes is served from the same host over the same channel
+# as the archive, so it can only ever say "these bytes are what that host is
+# serving today" — a replaced archive and its own digest still agree. Pinning
+# the digest here adds the second question: is it the build this repository
+# approved. The two values were taken from the build service on 2026-10-23 and
+# are checked against the pinned version only; that also means the first
+# collection trusted the same channel (trust-on-first-use), which is the residue
+# this cannot reach.
+case "$ARCH" in
+  linux64)    PINNED_SHA256='e87e2c76304372dd28b899ceb6efa4b353f52700594ddc358a8237ec07ec6492' ;;
+  linuxarm64) PINNED_SHA256='4598b350e5a43519dbb9f1c732e8b184333572da53244ff55cc063003c34c5e4' ;;
+esac
+
 REQUEST="${CEF_VERSION:-$PINNED}"
 if [ "$REQUEST" = 'latest' ] || [ "$REQUEST" = 'stable' ]; then
   CHANNEL="${CEF_CHANNEL:-stable}"
@@ -102,7 +117,10 @@ echo "fetch: $URL"
 curl -fL --retry 3 -o "$DEST/cef.tar.bz2" "$URL"
 
 # The archive has to be the bytes the build service published. A missing
-# digest is a failure, not a reason to skip the check.
+# digest is a failure, not a reason to skip the check. This one answers
+# "did the transfer survive intact"; it cannot answer "is this the build we
+# approved", because the digest comes off the same host over the same channel.
+# The pinned digest below does.
 echo "fetch: $URL.sha256"
 curl -fL --retry 3 -o "$DEST/cef.tar.bz2.sha256" "$URL.sha256"
 # The published file starts with a blank line; take the first full digest.
@@ -117,6 +135,21 @@ if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
   exit 1
 fi
 rm -f "$DEST/cef.tar.bz2.sha256"
+
+if [ "$VERSION" = "$PINNED" ] && [ "$actual" != "$PINNED_SHA256" ]; then
+  echo "fetch: the archive does not hash to the digest pinned for $PINNED" >&2
+  echo "  pinned: $PINNED_SHA256" >&2
+  echo "  actual: $actual" >&2
+  echo "  the build service is serving bytes this repository did not approve, and" >&2
+  echo "  unpacking them is exactly what the pin is here to stop. Bump the digest" >&2
+  echo "  only after establishing why it moved." >&2
+  rm -f "$DEST/cef.tar.bz2"
+  exit 1
+fi
+if [ "$VERSION" != "$PINNED" ]; then
+  echo "fetch: note: $VERSION is not the pinned build, so the in-repo digest did"
+  echo "  not apply — only the build service's own .sha256 was checked."
+fi
 
 rm -rf "$DEST/dist"
 tar -xjf "$DEST/cef.tar.bz2" -C "$DEST"

@@ -34,19 +34,15 @@ this list; this is the full record.
   outside that guarantee: a drag **started** in an independent window. The
   out-of-bounds handover creates its `GdkDrag` on the demo's main toplevel
   (`docs/features/drag-loop.md` §6), so such a drag leaves from the wrong surface.
-- **A tab-mode browser cannot be closed, and the request is dropped in
-  silence.** `chromium_session_close_browser()` on a windowed browser runs the
-  whole measured sequence (`browser N closing` → `browser N closed` →
-  `browser 1 selected`); on a tab the helper detaches the view and calls
-  `CloseBrowser`, and nothing comes back — no `OnBeforeClose`, so no
-  `::browser-closed` either. An id that does not exist answers
-  `status: no-such-browser`, which is how a host tells "already gone" from
-  "silently refused" (docs/code-review-2026-10-22.md M22; the three-way probe is in
-  `docs/features/multi-browser.md` §1 and `docs/guides/minimal-host.md` §5). The same asymmetry
-  shows up one signal earlier: `::popup-requested` carries only the URL, so a
-  host cannot see whether the page asked for a background tab or a foreground
-  window — that lives on the socket event's `disposition`, which the signal
-  does not forward.
+- **`::popup-requested` carries only the URL.** Whether the page asked for a
+  background tab or a foreground window lives on the socket event's
+  `disposition`, which the signal does not forward, so a host cannot honour it.
+  Closing either kind works: `chromium_session_close_browser()` runs
+  `browser N closing` → `browser N closed` → `browser 1 selected` for a tab as
+  well as for a windowed browser — the tab half used to be a silent no-op
+  (`docs/code-review-2026-10-22.md` M22) until the delegate's second view
+  reference was dropped; `test/multi-browser-gate.sh` asserts `demo: browser 2
+  closed`, and `docs/guides/minimal-host.md` §5 keeps the three-way probe.
 - **H.264/MP4 is absent from this CEF distribution.** Real YouTube reports
   `videoReady=4` but `canPlayType('video/mp4; codecs="avc1.42E01E"')` is empty;
   VP9 WebM answers `probably`, and YouTube still plays through VP9. MP4/H.264-only
@@ -112,10 +108,14 @@ this list; this is the full record.
 - **The renderer is sandboxed; the helper itself is not, and cannot be.** The
   browser process holds the Wayland connection, the GPU buffers and the control
   socket, so it stays unsandboxed by design — the trust boundary is the page
-  code in the renderer, not `cefnest-helper`. On a host with neither
-  unprivileged user namespaces nor a setuid `chrome-sandbox` the helper dies at
-  startup instead of quietly running unsandboxed; `CHROMIUM_HELPER_NO_SANDBOX=1`
-  is the way to say it on purpose (`docs/internals/sandbox-policy.md`).
+  code in the renderer, not `cefnest-helper`. That sandbox needs working
+  unprivileged user namespaces: on a host that restricts them (Ubuntu 24.04
+  enables `apparmor_restrict_unprivileged_userns` by default) the helper dies at
+  startup with `No usable sandbox!` instead of quietly running unsandboxed. The
+  packages install `chrome-sandbox` as plain 0755 and ship no setuid step and no
+  AppArmor profile, so the two ways out are a per-application profile for
+  `cefnest-helper` or `CHROMIUM_HELPER_NO_SANDBOX=1` — saying it on purpose
+  (`docs/internals/sandbox-policy.md` §6).
 - **Native Wayland only, by design.** Under an X11 session GDK cannot give the
   widget a Wayland surface to hand to clients, so the component will not work
   there.

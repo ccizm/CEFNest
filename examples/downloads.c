@@ -97,10 +97,19 @@ download_path (const char *suggested)
         return g_steal_pointer (&full);
     }
 
-  return g_build_filename (downloads.dir,
-                           g_strdup_printf ("%s-%" G_GINT64_FORMAT, name,
-                                            g_get_real_time ()),
-                           NULL);
+  /* 999 collisions is not a case that happens, but the name it falls back to
+   * still has to keep the extension the loop above keeps — and the formatted
+   * string needs an owner: handing g_strdup_printf() straight to
+   * g_build_filename() leaked one string per call. */
+  {
+    g_autofree char *stamp =
+      (dot && dot > name)
+        ? g_strdup_printf ("%.*s-%" G_GINT64_FORMAT "%s",
+                           (int) (dot - name), name, g_get_real_time (), dot)
+        : g_strdup_printf ("%s-%" G_GINT64_FORMAT, name, g_get_real_time ());
+
+    return g_build_filename (downloads.dir, stamp, NULL);
+  }
 }
 
 static void
@@ -282,6 +291,10 @@ on_activate (GtkApplication *app, gpointer data)
       g_clear_error (&error);
     }
 
+  /* Two references, two jobs: the window drops its copy when the window goes,
+   * and this file's global keeps its own so a handler always answers against
+   * a live session. examples/minimal.c has no global and hands its only
+   * reference to the window instead. */
   g_object_set_data_full (G_OBJECT (downloads.window), "session",
                           g_object_ref (downloads.session), g_object_unref);
 }

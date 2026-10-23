@@ -156,7 +156,7 @@ static gboolean
 tick_probe (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
 {
   static int ticks = 0;
-  GList *stack;
+  GList *stack, *primary;
 
   ticks++;
   if (g_getenv ("CEFNEST_DEBUG") && ticks % 120 == 0)
@@ -165,13 +165,15 @@ tick_probe (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
         ? nested_compositor_get_paint_stack_for (wins.compositor,
                                                  wins.tab_surface)
         : NULL;
+      /* Both getters hand back a list with one reference per entry, so the
+       * primary stack needs the same free as stack_for() — reading its length
+       * inline leaked the whole stack every 120 ticks. */
+      primary = wins.compositor
+        ? nested_compositor_get_paint_stack (wins.compositor)
+        : NULL;
       g_printerr ("win: tick %d — stack_for(tab)=%u stack(primary)=%u "
                   "view %dx%d mapped=%d parent=%p in-window=%d\n",
-                  ticks, g_list_length (stack),
-                  wins.compositor
-                    ? g_list_length (nested_compositor_get_paint_stack (
-                        wins.compositor))
-                    : 0u,
+                  ticks, g_list_length (stack), g_list_length (primary),
                   gtk_widget_get_width (GTK_WIDGET (wins.view)),
                   gtk_widget_get_height (GTK_WIDGET (wins.view)),
                   gtk_widget_get_mapped (GTK_WIDGET (wins.view)),
@@ -180,6 +182,7 @@ tick_probe (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
                     gtk_window_get_child (GTK_WINDOW (wins.window)) ==
                       gtk_widget_get_parent (GTK_WIDGET (wins.view)));
       g_list_free_full (stack, g_object_unref);
+      g_list_free_full (primary, g_object_unref);
     }
   gtk_widget_queue_draw (widget);
   return G_SOURCE_CONTINUE;
@@ -554,6 +557,10 @@ on_activate (GtkApplication *app, gpointer data)
       g_timeout_add_seconds (9, forced_redraw, NULL);
     }
 
+  /* Two references, two jobs: the window drops its copy when the window goes,
+   * and this file's global keeps its own so a handler always answers against
+   * a live session. examples/minimal.c has no global and hands its only
+   * reference to the window instead. */
   g_object_set_data_full (G_OBJECT (wins.window), "session",
                           g_object_ref (wins.session), g_object_unref);
 }

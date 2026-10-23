@@ -64,6 +64,10 @@ compositor 通告的 globals 及版本见 `src/nested-internal.h`：`wl_composit
 
 `wayland-scanner` 必须在 `PATH` 上（协议代码在构建期生成——仓库不提交生成产物）。
 
+渲染一页还需要 Chromium 沙箱所需的东西：可用的非特权用户命名空间。开发机上有
+（`unprivileged_userns_clone=1`，没有 AppArmor 限制）；禁掉它的宿主是装包侧的问题，
+写在下面**安装**一节和 `docs/internals/sandbox-policy.md` §6。
+
 ## 构建
 
 分两个阶段，第一阶段可选。
@@ -120,6 +124,16 @@ CNB 的发版流水线还会把安装树打成 `libcefnest0`、`libcefnest-dev`�
 helper，`libcefnest-dev` 与 `cefnest-demo` 精确依赖对应版本的库。四个包共用一个
 版本号——CEF stable `X.Y.Z` 加修订号（`154.0.34-4`）——同一次构建一起发布，
 升级时整体联动。流水线只在版本 tag 上构建，详见 `docs/testing/cnb-ci.md`。
+
+`cefnest-helper` 默认**开着**沙箱启动 Chromium，而它把 `chrome-sandbox` 原样装成 0755
+——没有 setuid 位，也不带 AppArmor profile。宿主有可用的非特权用户命名空间时，事情到
+此为止：没有安装步骤，不需要 root。宿主禁掉它时（Ubuntu 24.04 默认打开
+`apparmor_restrict_unprivileged_userns`；这个开关 23.10 就有）装好的 helper 会停在
+`No usable sandbox!`，把这句话打到 stderr，绝不静默降回无沙箱。两条出路：给
+`cefnest-helper` 单独加一条允许 userns 的 AppArmor profile，或在宿主环境里设
+`CHROMIUM_HELPER_NO_SANDBOX=1`。Chromium 自己那句提示里的 `chmod 4755 chrome-sandbox`
+不是本项目发行或实测过的路。写清楚的是 `docs/internals/sandbox-policy.md` §6；
+`scripts/ci-smoke-packages.sh` 每次发版断言那个 0755，并把装好的 helper 真起一次。
 
 ## 运行
 
@@ -237,7 +251,7 @@ session 代为处理的问题，各有自己的回复形状，也各有不回答
 - 拖出与拖入都已端到端可用，手工验证。
 - 一个 seat、一个指针、没有触摸。
 - 独立宿主窗口可以拿到输入，门禁已验证——但在其中发起的拖动会从错误的 surface 出发。
-- 标签模式的浏览器无法关闭，请求被静默丢弃。
+- `::popup-requested` 只带 URL，宿主分不出页面要的是后台标签还是前台窗口。
 - 此 CEF 发行包不含 H.264/MP4；VP9 可播放。
 - 没有双指缩放，没有 tablet 输入。
 - 失败的导航会报告两次，`::load-end` 仍会触发。
@@ -248,6 +262,8 @@ session 代为处理的问题，各有自己的回复形状，也各有不回答
 - 权限只能授予或拒绝，不能收窄——且一个未回答的权限请求还会连累页面的下一次请求。
 - 页面的声音完全绕过 widget；`set_muted` 是唯一的开关。
 - renderer 受沙箱保护；helper 本身不受沙箱保护，也不可能受保护。
+- 禁掉非特权用户命名空间的宿主上，装好的 helper 拒绝启动，直到你给它一条 AppArmor
+  profile 或设 `CHROMIUM_HELPER_NO_SANDBOX=1`。
 - 仅支持原生 Wayland，这是设计决定。
 - API 不稳定。
 

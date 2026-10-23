@@ -134,8 +134,9 @@ demo: loaded https://example.com/ (HTTP 200)
 读转录的人一眼能看到这次跑的是哪一种。
 
 上面这种是数量上限那一类（`ENOSPC`）。AppArmor 那一类限制报什么 errno、是不是停在同一句
-`No usable sandbox!` 上，没试过——那句 FATAL 里专门提到了 Ubuntu 23.10+，看语气是同一条出口，
-但这一条留给需要它的人去量。没去动宿主自己的 sysctl。
+`No usable sandbox!` 上，没试过——那句 FATAL 里专门提到了 Ubuntu 23.10+（那个版本引入了这个
+sysctl，但**默认是 0**；默认开到 1 的是 Ubuntu 24.04），看语气是同一条出口，但这一条留给
+需要它的人去量。没去动宿主自己的 sysctl。
 
 ## 5. 沙箱不改变任何数字
 
@@ -158,13 +159,32 @@ demo: loaded https://example.com/ (HTTP 200)
 
 ## 6. 部署上要记住的事
 
-* **不需要 setuid 安装步骤。** 目标宿主只要有非特权用户命名空间，什么都不用装。
-* 宿主禁了 userns（Ubuntu 23.10+ 的 AppArmor 限制是最常见的一种）时，那句 FATAL 链接的两篇
-  Chromium 文档各自指一条路，加上它自己给的兜底，一共三条可选：
-  给这个应用单独加 AppArmor profile（推荐，粒度是一个应用）；把 `chrome-sandbox` 装成
-  `chmod 4755`（要 root，是老路，而且给了整机一个 setuid 靶子）；或
-  `CHROMIUM_HELPER_NO_SANDBOX=1`（明确放弃沙箱，页面代码从此以宿主用户身份跑）。
-  **不要**为了这个组件去关整机的 `apparmor_restrict_unprivileged_userns`。
+* **不需要 setuid 安装步骤。** 目标宿主只要有非特权用户命名空间，什么都不用装。deb 和 rpm
+  都把 `chrome-sandbox` 原样装成 0755（`helper/` 里 CEF 分发就是 0755，打包不动它），装包
+  不产生任何提权面；`scripts/ci-smoke-packages.sh` 每次发版把这个权限位当判据断言一次，
+  免得哪天"顺手修权限"把它改成 setuid。
+* 宿主禁了 userns 时，helper 会在启动那一步响亮地死掉（第 4 节量到的 `No usable sandbox!`），
+  **不会**退回无沙箱运行。这一类限制现在最常见的来源是 Ubuntu 24.04：
+  `apparmor_restrict_unprivileged_userns` 在 23.10 就有，但默认开着的是 24.04。两条被认可的出路：
+  1. **给这个应用单独加 AppArmor profile**（推荐，粒度是一个应用，页面代码继续在沙箱里）。
+     Ubuntu 给 Google Chrome 用的就是这一形；把 helper 的**安装路径**填进去：
+     ```
+     abi <abi/4.0>,
+     include <tunables/global>
+
+     profile cefnest-helper /usr/libexec/cefnest/x86_64/cefnest-helper flags=(unconfined) {
+       userns,
+       include if exists <local/cefnest-helper>
+     }
+     ```
+     存成 `/etc/apparmor.d/cefnest-helper`，`sudo apparmor_parser -r` 或 `sudo systemctl reload apparmor`。
+     这一形是按 Ubuntu 发行说明写的，**本仓库没在开了限制的 Ubuntu 上量过**（本机 Debian 13
+     根本没有这个 sysctl，第 2 节）；装的是 rpm 的话路径在 `/usr/libexec/cefnest/x86_64/` 同一处。
+  2. **`CHROMIUM_HELPER_NO_SANDBOX=1`**：明确放弃沙箱，页面代码从此以宿主用户身份跑，横幅里留痕。
+* 那句 FATAL 自己还给第三条路——把 `chrome-sandbox` 装成 `chmod 4755`（老的 SUID sandbox）。
+  **本项目不走这条，也不建议**：它要 root 改一个 CEF 分发里的文件、给整机立一个 setuid 靶子，
+  而第 9 节记着这条在这棵树上根本没量过——"命名空间不可用时它确实能顶上"只是 Chromium 文档的说法。
+* **不要**为了这个组件去关整机的 `apparmor_restrict_unprivileged_userns`。
 * 沙箱保护的是页面代码所在的 renderer，**不是** helper 整体。浏览器进程永远不沙箱，
   因为它握着 Wayland 连接和控制通道；把"helper 进程"当成一个可信边界是错的，
   正确的边界是"renderer 里的东西都不可信"。

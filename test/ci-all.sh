@@ -78,6 +78,7 @@ ALL_RUNS=(
   "menu|./test/menu-gate.sh|780"
   "primary|./test/primary-gate.sh|240"
   "multi|./test/multi-browser-gate.sh|240"
+  "signal|./test/helper-signal-gate.sh|240"
   "soak|./test/sandbox-soak.sh|600"
 )
 # Real sites are external and change under us, so they are opt-in. The batch

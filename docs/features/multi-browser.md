@@ -9,13 +9,19 @@
 - `new-browser` 的 `mode: "tab"` 把一个 `CefBrowserView` 加到共享 `CefWindow`，只有激活的
   view 可见；`mode: "window"` 创建独立 `CefWindow`；
 - `select-browser` 切换激活 view、`g_browser`/`g_window` 和焦点；
-- `close-browser` 先 `RemoveChildView` 再 `CloseBrowser`，避免 CEF 把整个 tab 窗口一起
-  销毁；关掉最后一个 browser 才结束 helper。**2026-10-22 实测只对 windowed 成立**：
-  同一个 helper，`close-browser 99` 回 `no-such-browser`（命令确实分发到了），
-  `close-browser 2` 对一个 tab **什么都不会发生**（无 `OnBeforeClose`、无
-  `browser-closed`），`close-browser 3` 对独立窗口则走完 `browser 3 closing` →
-  `browser 3 closed` → `browser 1 selected`。见 `docs/code-review-2026-10-22.md` M22 与
-  `docs/guides/minimal-host.md` §5。
+- `close-browser` 先把 slot 里那份 `CefBrowserView` 引用丢掉（`RemoveChildView` +
+  置空），再 `CloseBrowser`：窗口和 slot 都不是 view 的共有时，Alloy 才把这次关掉读成
+  "关 browser" 而不是"关窗口"，`OnBeforeClose` 才会跑。关掉最后一个 browser 才结束 helper。
+  **2026-10-22 曾实测只对 windowed 成立**：`close-browser 99` 回 `no-such-browser`
+  （命令确实分发到了），`close-browser 2` 对一个 tab **什么都不会发生**（无
+  `OnBeforeClose`、无 `browser-closed`），`close-browser 3` 对独立窗口则走完
+  `browser 3 closing` → `browser 3 closed` → `browser 1 selected`。原因是 tab 窗口的
+  `CefWindowDelegate` 自己留着第二份 view 引用（`helper/src/main.cpp`
+  `HelperWindowDelegate::OnWindowCreated`），第一个 tab 因此永远关不掉——后面的 tab
+  的 view 只被窗口和 slot 持有，反而正常。两处引用都清掉之后 tab 与 windowed 都走完整
+  生命周期，`test/multi-browser-gate.sh` 断言的就是 `demo: browser 2 closed`；
+  信号处理那一半的记录在 `docs/features/session-lifecycle.md` §7。见
+  `docs/code-review-2026-10-22.md` M22 与 `docs/guides/minimal-host.md` §5。
 - demo 有标签条（`+` 新标签、`▣` 新窗口）；标签按钮调用 session API；
 - 所有页面事件带当前激活 browser 的 `browser` id；新增 `browser-created` /
   `browser-selected` / `browser-closed`；

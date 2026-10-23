@@ -67,7 +67,11 @@ PKG_DEB="$ROOT/pkg-deb"
 PKG_RPM="$ROOT/pkg-rpm"
 RPMBUILD="$ROOT/rpmbuild"
 
-for tool in meson ninja dpkg-deb; do
+# rpmbuild is asked for here, not at the RPM heading: this script configures and
+# installs two full trees and copies a gigabyte and a half of CEF runtime
+# before it gets there, and finding the tool missing after all of that throws
+# the whole run away.
+for tool in meson ninja dpkg-deb rpmbuild; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "build-packages: $tool not found" >&2
     exit 1
@@ -166,6 +170,27 @@ deb_control() {
   _dc_summary=$5
   _dc_detail=$6
   _dc_recommends=${7:-}
+
+  # DEP-5 machine-readable copyright, in all four packages: a .deb without it
+  # says nothing about what it carries, and the helper carries someone else's
+  # code, which is exactly the case that needs saying.
+  #
+  # It goes in the data tree, not in DEBIAN/. A binary package's DEBIAN/
+  # members are dpkg's own control files; dpkg never installs a copyright from
+  # there, so lintian still reports E: no-copyright-file. Policy §12.5 puts the
+  # file at /usr/share/doc/<package>/copyright, which is where every installed
+  # package on this host keeps it.
+  mkdir -p "$_dc_dir/usr/share/doc/$_dc_package"
+  {
+    printf 'Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\n'
+    printf 'Upstream-Name: cefnest\n'
+    printf 'Upstream-Contact: siem <yan@zhiming.xyz>\n'
+    printf 'Source: https://cnb.cool/yanzhiming/CEFNest\n'
+    printf '\nFiles: *\nCopyright: 2026 Siem\nLicense: LGPL-2.1\n'
+    sed 's/^/ /' "$ROOT/LICENSE"
+  } > "$_dc_dir/usr/share/doc/$_dc_package/copyright"
+
+  # Measured after the copyright exists, so Installed-Size counts it.
   _dc_size=$(du -sk "$_dc_dir/usr" | cut -f1)
 
   {
@@ -209,12 +234,43 @@ deb_control "$DEB_DEMO_DIR" cefnest-demo utils \
 helper is installed." \
   ""
 
+# CEF's own license text travels with the package that carries CEF's binaries,
+# and is recorded in the same copyright file. meson installs the runtime only,
+# so this file comes straight out of the distribution fetch-cef.sh unpacked.
+CEF_LICENSE="$ROOT/third_party/cef/dist/LICENSE.txt"
+[ -f "$CEF_LICENSE" ] || {
+  echo "build-packages: no $CEF_LICENSE to record in cefnest-helper" >&2
+  echo "  (run ./scripts/fetch-cef.sh before packaging)" >&2
+  exit 1
+}
+mkdir -p "$DEB_HELPER_DIR/usr/share/doc/cefnest-helper"
+cp -p "$CEF_LICENSE" "$DEB_HELPER_DIR/usr/share/doc/cefnest-helper/LICENSE.cef.txt"
+
 deb_control "$DEB_HELPER_DIR" cefnest-helper misc "$HELPER_DEPS" \
   "CEF runtime and cefnest-helper" \
   "The cefnest-helper executable and the CEF $CEF_VERSION runtime it loads
 from its own directory. Built for Chromium $CHROMIUM_VERSION; about 1.5 GB
-installed." \
+installed.
+Renderer sandboxing is ON by default, and chrome-sandbox is installed 0755:
+this package installs no setuid root helper. Chromium's sandbox needs
+unprivileged user namespaces, so on a host that restricts them — Ubuntu 24.04
+and later, where apparmor_restrict_unprivileged_userns defaults to 1 — the
+helper stops at start with 'No usable sandbox!' rather than falling back.
+Either give cefnest-helper its own AppArmor profile, or set
+CHROMIUM_HELPER_NO_SANDBOX=1 to say plainly that this deployment runs page
+code unsandboxed. docs/internals/sandbox-policy.md §6 in the source tree is
+the measurement behind that choice." \
   ""
+
+{
+  printf '\nFiles: usr/libexec/cefnest/*\n'
+  printf 'Copyright: 2008-2020 Marshall A. Greenblatt; portions 2006-2009 Google Inc.\n'
+  printf 'License: BSD-3-clause\n'
+  sed 's/^/ /' "$CEF_LICENSE"
+  printf '\nFiles: usr/share/doc/cefnest-helper/LICENSE.cef.txt\n'
+  printf 'Copyright: 2008-2020 Marshall A. Greenblatt; portions 2006-2009 Google Inc.\n'
+  printf 'License: BSD-3-clause\n'
+} >> "$DEB_HELPER_DIR/usr/share/doc/cefnest-helper/copyright"
 
 DEB_LIB="libcefnest0_${VERSION}-${RELEASE}_${DEB_ARCH}.deb"
 DEB_DEV="libcefnest-dev_${VERSION}-${RELEASE}_${DEB_ARCH}.deb"
@@ -229,11 +285,6 @@ dpkg-deb --build -Zxz -z1 --root-owner-group "$DEB_HELPER_DIR" "$DIST/$DEB_HELPE
 # ---------------------------------------------------------------------------
 # RPM
 # ---------------------------------------------------------------------------
-
-command -v rpmbuild >/dev/null 2>&1 || {
-  echo "build-packages: rpmbuild not found; install the rpm package" >&2
-  exit 1
-}
 
 echo "== rpm: configure and install"
 meson setup "$BUILD_RPM" \
@@ -252,6 +303,11 @@ DESTDIR="$PKG_RPM" ninja -C "$BUILD_RPM" install
 rm -rf "$PKG_RPM/usr/libexec/cefnest/$HELPER_ARCH"
 cp -al "$PKG_DEB/usr/libexec/cefnest/$HELPER_ARCH" \
        "$PKG_RPM/usr/libexec/cefnest/"
+
+# Same license text the deb carries. rpmbuild fails the build if a file in the
+# tree is not named in a %files section, so the entry below is the check.
+mkdir -p "$PKG_RPM/usr/share/doc/cefnest-helper"
+cp -p "$CEF_LICENSE" "$PKG_RPM/usr/share/doc/cefnest-helper/LICENSE.cef.txt"
 
 cat > "$RPMBUILD/SPECS/cefnest.spec" <<EOF
 Name: cefnest
@@ -300,11 +356,19 @@ a host application against CEFNest.
 
 %package helper
 Summary: CEF runtime and cefnest-helper
+License: LGPL-2.1-only and BSD-3-Clause
 Requires: glibc >= 2.39
 
 %description helper
 The cefnest-helper executable and the CEF $CEF_VERSION runtime it loads from
 its own directory. Built for Chromium $CHROMIUM_VERSION; about 1.5 GB installed.
+
+Renderer sandboxing is ON by default and chrome-sandbox is installed 0755: this
+package installs no setuid root helper. Chromium's sandbox needs unprivileged
+user namespaces, so on a host that restricts them the helper stops at start with
+'No usable sandbox!' rather than falling back. Either give cefnest-helper its own
+AppArmor profile, or set CHROMIUM_HELPER_NO_SANDBOX=1 to say plainly that this
+deployment runs page code unsandboxed.
 
 %package demo
 Summary: CEFNest demo and headless test client
@@ -337,6 +401,7 @@ cp -al %{_cefnest_pkgroot}/usr %{buildroot}/
 
 %files helper
 /usr/libexec/cefnest/$HELPER_ARCH
+/usr/share/doc/cefnest-helper/LICENSE.cef.txt
 
 %files demo
 /usr/bin/cefnest-demo
@@ -374,9 +439,22 @@ tar -czf "$DIST/$TARBALL" -C "$DIST" \
   "$DEB_LIB" "$DEB_DEV" "$DEB_DEMO" \
   "$RPM_LIB" "$RPM_DEV" "$RPM_DEMO"
 
+# One more file belongs in this manifest but was not made here: the release
+# pipeline's build tarball. CEFNEST_EXTRA_ARTIFACTS names it relative to the
+# repo root and it moves into dist/, because a checksum file described as
+# covering "every artifact" that misses one of the uploaded names is worse than
+# no checksum file at all — and a missing name here fails the stage loudly.
+for extra in ${CEFNEST_EXTRA_ARTIFACTS:-}; do
+  [ -f "$extra" ] || {
+    echo "build-packages: CEFNEST_EXTRA_ARTIFACTS says $extra, which is not there" >&2
+    exit 1
+  }
+  mv "$extra" "$DIST/"
+done
+
 (
   cd "$DIST"
-  sha256sum ./*.deb ./*.rpm "./$TARBALL" > SHA256SUMS
+  sha256sum ./*.deb ./*.rpm ./*.tar.gz > SHA256SUMS
 )
 
 echo "== packages in $DIST"

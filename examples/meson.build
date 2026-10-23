@@ -35,7 +35,8 @@ foreach file : examples_files
     'cefnest-' + name,
     file,
     include_directories: src_inc,
-    dependencies: [libcefnest_dep],
+    # browser.c turns a Blink zoom level into a percentage with pow().
+    dependencies: [libcefnest_dep, m_dep],
     install: false,
   )
 endforeach

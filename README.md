@@ -67,6 +67,11 @@ Measured on the development machine (Debian 13, `linux 6.12`):
 `wayland-scanner` must be on `PATH` (it generates the protocol code at build
 time — nothing is checked in).
 
+Running a page needs what Chromium's sandbox needs: working unprivileged user
+namespaces. The development machine has them (`unprivileged_userns_clone=1`, no
+AppArmor restriction); a host that restricts them is a packaged-helper problem
+and is written up under **Install** and in `docs/internals/sandbox-policy.md` §6.
+
 ## Build
 
 Two stages, and the first is optional.
@@ -131,6 +136,20 @@ exact library version. All four share one version — CEF stable `X.Y.Z` plus a
 revision (`154.0.34-4`) — and are built and released together, so an upgrade
 moves all of them at once. The pipeline builds on version tags only; see
 `docs/testing/cnb-ci.md`.
+
+`cefnest-helper` starts Chromium with the sandbox **on** and installs
+`chrome-sandbox` as plain 0755 — no setuid bit, no AppArmor profile shipped with
+it. On a host with working unprivileged user namespaces that is the whole story:
+no install step, no root. On a host that restricts them (Ubuntu 24.04 enables
+`apparmor_restrict_unprivileged_userns` by default; the knob exists from 23.10)
+the packaged helper stops with `No usable sandbox!` and says so on stderr; it
+never silently drops the sandbox.
+The two ways out are a per-application AppArmor profile allowing userns for
+`cefnest-helper`, or `CHROMIUM_HELPER_NO_SANDBOX=1` in the host's environment.
+The `chmod 4755 chrome-sandbox` route Chromium's own message mentions is not
+what this project ships or has measured. `docs/internals/sandbox-policy.md` §6
+is the write-up; `scripts/ci-smoke-packages.sh` asserts the 0755 mode and starts
+the installed helper on every release.
 
 ## Run
 
@@ -261,7 +280,8 @@ One line each; the full record, with every measurement behind it, is
 - One seat, one pointer, no touch.
 - Independent host windows get the input, and a gate says so — but a drag
   started in one leaves from the wrong surface.
-- A tab-mode browser cannot be closed, and the request is dropped in silence.
+- `::popup-requested` carries only the URL, so a host cannot tell a background
+  tab from a foreground window.
 - H.264/MP4 is absent from this CEF distribution; VP9 plays.
 - No pinch zoom and no tablet input.
 - A failed navigation reports twice, and `::load-end` still fires.
@@ -274,6 +294,9 @@ One line each; the full record, with every measurement behind it, is
   costs the page its next question too.
 - The page's sound bypasses the widget entirely; `set_muted` is the only switch.
 - The renderer is sandboxed; the helper itself is not, and cannot be.
+- On a host that restricts unprivileged user namespaces, the packaged helper
+  refuses to start until it gets an AppArmor profile or
+  `CHROMIUM_HELPER_NO_SANDBOX=1`.
 - Native Wayland only, by design.
 - The API is not stable.
 

@@ -22,7 +22,7 @@
 
 | 文档 | 关于 |
 | --- | --- |
-| `docs/guides/minimal-host.md` | 三个对象的宿主、必需的顺序、导航/JS/下载/菜单/主选区/无障碍该加哪个 API/信号的对照表，以及 §5：中等示例、它的脚本化运行测到了什么、关不掉的那个标签 |
+| `docs/guides/minimal-host.md` | 三个对象的宿主、必需的顺序、导航/JS/下载/菜单/主选区/无障碍该加哪个 API/信号的对照表，以及 §5：中等示例、它的脚本化运行测到了什么、那个曾经关不掉的标签是怎么修好的 |
 | `docs/guides/control-channel.md` | socket 上的每条命令与事件、失败的加载和死掉的 renderer 长什么样、被决定不做的命令 |
 | `docs/guides/packaging.md` | 什么装到哪、session 找 helper 的五步规则、为什么 `get_option('libexecdir')` 必须先拼进 prefix 再编进去、两个方向故意相反的回退 |
 
@@ -46,7 +46,7 @@
 
 | 文档 | 关于 |
 | --- | --- |
-| `docs/features/session-lifecycle.md` | 与 helper 一起启动、停止和死亡 |
+| `docs/features/session-lifecycle.md` | 与 helper 一起启动、停止和死亡，含 helper 收 SIGTERM/SIGHUP/SIGINT 的那一条（handler 只能装在 `CefInitialize()` 之后）与它的 12 条断言门禁 |
 | `docs/features/multi-browser.md` | 单 helper 的 browser 注册表、标签条、独立宿主窗口、协议 id、按窗口的输入交还规则及其门禁，以及剩下的弹窗警告 |
 | `docs/features/clipboard-bridge.md` | `wl_data_device` ↔ `GdkClipboard` 双向 |
 | `docs/features/drag-loop.md` | 页面内拖拽的编排、"wl_data_device.enter 到得了页面"的实测证明、目的地真正接受什么、为什么 fd 中继不是同页 payload 的载体、跨越窗口边缘的拖拽怎么从页面的 source 上读出来交给宿主（图片字节落成以文件列表提供的临时文件）、反方向的同一跨越怎么让 compositor 当 source——包括"页面在被 enter 的一刻就读宿主 drag"那条测量，所以只有 `finish` 能定判定 |

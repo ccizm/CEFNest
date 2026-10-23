@@ -51,6 +51,20 @@ g_object_set_data_full (G_OBJECT (window), "session", session, g_object_unref);
 关窗时调用 `chromium_session_stop()`；session 的 `dispose` 会收掉 helper 和 socket。示例用
 一个 `close-request` 处理器做这件事。
 
+**引用的归属只有那一条规则：谁在窗口之外还要摸这个 session，谁就自己拿一份引用。**
+上面这段（也就是 `examples/minimal.c`）里没有文件级全局，处理器是
+`g_signal_connect_swapped (window, "close-request", …, session)` 直接带着对象走的，
+所以创建时那一份引用整个交给窗口，窗口销毁时 session 一起死——`examples/useragent.c`
+同理，它甚至**希望** session 随窗口死：换 UA 是 `stop()` 之后在 `::closed` 里 `start()`，
+留一个已经 finalize 的发射者比留一个悬空的全局好读。
+
+`examples/browser.c` 那一档（tabs、windows、downloads、menus、permissions、errors、
+observe、script、host）把 session 记在文件级全局里，几十个处理器都从全局读它，所以
+`set_data_full` 前多一次 `g_object_ref`：窗口那份随窗口销毁，全局这份保证哪怕
+`::closed` 在窗口之后才到，处理器面对的也是一个活对象，而不是别人的内存。复制示例时
+这一处不要照着另一处改——少了 ref 是悬空指针，多了 ref 只是一次不回收的引用，
+demo 进程退出时一起还回去。
+
 ## 4. 接下来接什么
 
 最小宿主只连接了页面和生命周期。库其余公开面按需要加：
@@ -67,7 +81,7 @@ g_object_set_data_full (G_OBJECT (window), "session", session, g_object_unref);
 | 查找 | `chromium_session_find()` / `chromium_session_stop_finding()`；答案在 `::find-result` |
 | 静音 | `chromium_session_set_muted()` / `chromium_session_get_muted()` |
 | 缩放 | `chromium_session_zoom()`（`in`/`out`/`reset`）/ `chromium_session_get_zoom_level()`；落地走 `::zoom-changed` |
-| 多浏览器 | `chromium_session_new_browser()` / `chromium_session_select_browser()` / `chromium_session_close_browser()`；`::browser-created` / `::browser-selected` / `::browser-closed`（tab 关不掉，见 §5） |
+| 多浏览器 | `chromium_session_new_browser()` / `chromium_session_select_browser()` / `chromium_session_close_browser()`；`::browser-created` / `::browser-selected` / `::browser-closed`（tab 与独立窗口都走完整关闭，见 §5） |
 | 弹窗 | `::popup-requested`（只有 url） |
 | 主选区 | 页面选中文字 → `::primary-selection`（session 自动写 Gtk primary） |
 | 读屏器 | 自动监听 `org.a11y.Status.ScreenReaderEnabled`；也可显式 `chromium_session_set_accessibility()` |
@@ -140,9 +154,9 @@ host: script 1 = "DND-PAGE"
 注意头两行的**顺序**：第一次 `::browser-selected` 抢在 `::browser-created` 前面到了，
 所以"哪个标签是活的"必须记下来、等按钮出现时再补，不能只在信号里刷一次样式。
 
-### 关不掉标签（实测到的缺口，不是示例的写法问题）
+### 标签曾经关不掉（已修，测量记录留着）
 
-同一个 helper、同一个 id 换三种问法：
+同一个 helper、同一个 id 换三种问法，2026-10-22 那趟量到的是：
 
 - `close-browser 99` → `session: helper status: no-such-browser`：命令确实分发到了；
 - `close-browser 2`（tab）→ 之后什么都没有。没有 `helper: browser 2 closing`，
@@ -150,9 +164,16 @@ host: script 1 = "DND-PAGE"
 - `close-browser 3`（windowed）→ `helper: browser 3 closing`、`browser 3 closed`、
   `browser 1 selected`。
 
-也就是说 `close_browser()` 只对独立窗口有效，标签是静默空操作，宿主这侧无从补救
+也就是说那时 `close_browser()` 只对独立窗口有效，标签是静默空操作，宿主这侧无从补救
 （`::browser-closed` 收不到，就不能拆自己的 tab）。记在 `docs/code-review-2026-10-22.md`
-的 M22。示例里标签上的 ✕ 和 `close` 动词都保留，注释写明它今天关不掉什么。
+的 M22。
+
+今天三档都走完整生命周期：挡住 `OnBeforeClose` 的是 tab 窗口的 `CefWindowDelegate`
+自己多持的那一份 view 引用（第二份所有让它把这次关掉读成"关窗口"），`main.cpp` 在
+`OnWindowCreated` 末尾把它置空、`close-browser` 路径再清掉 slot 里那一份；
+`test/multi-browser-gate.sh` 断言 `demo: browser 2 closed`。原因与两处修复的细节在
+`docs/features/multi-browser.md` §1 和 `docs/features/session-lifecycle.md` §7。
+示例里标签上的 ✕ 和 `close` 动词就是照这个写的。
 
 ### 窗口先走，session 后走
 
