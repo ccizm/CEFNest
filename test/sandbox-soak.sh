@@ -8,8 +8,7 @@
 # asserted is the tree and not the pixels: it keeps its size, nothing becomes a
 # zombie, the killed renderers come back, the page keeps answering through both
 # kills, no crash handler is ever attached to a child of ours, and nothing is left
-# running once the demo has gone. docs/internals/sandbox-policy.md §7 and §8 are the numbers
-# this gate keeps from going stale.
+# running once the demo has gone.
 #
 # It opens a real window for about a minute, so it is a documented manual gate —
 # the same convention as test/find-gate.sh and test/dnd-gate.sh. Nothing here
@@ -133,8 +132,8 @@ if [ "$(awk '{s+=$5} END{print s+0}' "$WORK/samples.txt")" = 0 ]; then
   ok "soak: zero zombie children across the whole run"
 else bad "soak: $(awk '{s+=$5} END{print s}' "$WORK/samples.txt") zombie sample(s) — a reaped child leaked"; fi
 if [ "$(awk '{s+=$8} END{print s+0}' "$WORK/samples.txt")" = 0 ]; then
-  ok "soak: no child ever carried --crashpad-handler-pid (docs/internals/sandbox-policy.md §8)"
-else bad "soak: a crash handler is attached now — §8 measured none, so its verdict needs re-running"; fi
+  ok "soak: no child ever carried --crashpad-handler-pid"
+else bad "soak: a crash handler is attached now — none was measured before, so its verdict needs re-running"; fi
 
 # 3. The tree has the shape the walk assumes: a renderer's parent is not the
 #    browser process, it is the zygote.
@@ -160,8 +159,7 @@ fi
 
 # 5. fd count did not run away, measured across the settled window — a sample
 #    taken before the tree is whole counts fewer descriptors than it leaks. RSS is
-#    printed, not pinned: it is a sawtooth and machine-dependent
-#    (docs/internals/sandbox-policy.md §7 has the measured curve).
+#    printed, not pinned: it is a sawtooth and machine-dependent.
 base_fd=$(awk '$1 >= 16 && !seen { print $6; seen = 1 }' "$WORK/samples.txt")
 last_fd=$(awk 'END{print $6}' "$WORK/samples.txt")
 peak_fd=$(awk '$1 >= 16 && $6 > m { m = $6 } END { print m+0 }' "$WORK/samples.txt")

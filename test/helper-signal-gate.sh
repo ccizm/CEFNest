@@ -42,10 +42,9 @@
 #
 #   ./test/ci-session.sh ./test/helper-signal-gate.sh
 #
-# docs/internals/sandbox-policy.md §9 records why standalone mode cannot be used
-# for this: under `gnome-shell --headless` its CefInitialize never returns
-# (measured on both the current and the previous binary), so the helper has to
-# come up the way a real host brings it up.
+# Standalone mode cannot be used for this: under `gnome-shell --headless` its
+# CefInitialize never returns (measured on both the current and the previous
+# binary), so the helper has to come up the way a real host brings it up.
 
 set -u -o pipefail
 

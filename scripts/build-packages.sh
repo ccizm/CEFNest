@@ -247,8 +247,7 @@ and later, where apparmor_restrict_unprivileged_userns defaults to 1 — the
 helper stops at start with 'No usable sandbox!' rather than falling back.
 Either give cefnest-helper its own AppArmor profile, or set
 CHROMIUM_HELPER_NO_SANDBOX=1 to say plainly that this deployment runs page
-code unsandboxed. docs/internals/sandbox-policy.md §6 in the source tree is
-the measurement behind that choice.
+code unsandboxed.
 
 The demo and shm-client are development/test tools and are not part of this
 package; they travel in cefnest-build.tar.gz." \

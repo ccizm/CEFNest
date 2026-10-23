@@ -74,7 +74,7 @@ for path in sorted(glob.glob(os.path.join(root, 'src', '*.c'))):
         # indexes the table by opcode and does not care how the source spelled
         # the hole, so `.destroy = NULL` aborts exactly like a missing entry.
         # Counting either spelling as coverage made this audit pass a tree that
-        # had deliberately emptied a slot — see docs/internals/empty-request-slot.md.
+        # had deliberately emptied a slot.
         provided = set(re.findall(r'\.(\w+)\s*=\s*(?!NULL\b|0\b)\S', body))
         positional = re.findall(r'^\s*(?!/\*|\.|NULL\b|0\b)(\w+),', body, re.M)
         rows.append((path, iface, var, provided, positional))

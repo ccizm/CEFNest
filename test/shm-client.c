@@ -5,21 +5,21 @@
  * With --popup it also opens a menu and a submenu over itself, so placement,
  * hit-testing and dismissal can be checked against the rules it chose. With
  * --dnd-requests it sends the three wl_data_device_manager version 3 requests
- * that abort a compositor whose implementation slots are empty — see
- * docs/internals/empty-request-slot.md. With --drag-out it starts a drag from the left
- * button press and offers the mime list a real page's text drag was measured
- * with, so the handover of a drag that leaves the window has a source to read
- * without a browser. With --drag-in it is the other half: the destination of a
- * drag the host carries in, which accepts a type, reads the payload twice the
- * way a page was measured to, and exits non-zero if the bytes are not the ones
- * it was handed. With --second-window it maps a second toplevel and drops the
- * test pattern in both: whichever window the seat has the keyboard in paints
- * red, the other green, so the routing of an input between two surfaces of one
- * client is readable off the frames the compositor imported. With
- * --wrong-object it names, from connections of its own, a
- * zwp_primary_selection_source_v1 and a wl_surface where the protocol wants a
- * wl_data_source, and fails the run if the compositor takes either: an object
- * id is a struct the compositor will go on reading through the wrong fields.
+ * that abort a compositor whose implementation slots are empty. With --drag-out
+ * it starts a drag from the left button press and offers the mime list a real
+ * page's text drag was measured with, so the handover of a drag that leaves the
+ * window has a source to read without a browser. With --drag-in it is the
+ * other half: the destination of a drag the host carries in, which accepts a
+ * type, reads the payload twice the way a page was measured to, and exits
+ * non-zero if the bytes are not the ones it was handed. With --second-window
+ * it maps a second toplevel and drops the test pattern in both: whichever
+ * window the seat has the keyboard in paints red, the other green, so the
+ * routing of an input between two surfaces of one client is readable off the
+ * frames the compositor imported. With --wrong-object it names, from
+ * connections of its own, a zwp_primary_selection_source_v1 and a wl_surface
+ * where the protocol wants a wl_data_source, and fails the run if the
+ * compositor takes either: an object id is a struct the compositor will go on
+ * reading through the wrong fields.
  * With --shm-release it writes the one request of wl_shm that no wrapper will
  * send on this host — opcode 1, destroy under the 1.22 headers, release under
  * the 1.23 ones — and fails the run unless the compositor goes on drawing the

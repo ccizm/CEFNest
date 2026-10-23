@@ -5,7 +5,7 @@
 # It runs every gate test/ci-session.sh can host, one after another, and prints a
 # verdict table. Nothing here opens a window on the desktop of whoever is sitting
 # at this machine, so the run can be left going: that is what makes it a release
-# gate rather than the manual gates docs/testing/overview.md documents one by one.
+# gate rather than the manual gates that have to be run one by one.
 #
 #   ./test/ci-all.sh                 # everything: measured 370 s on this laptop
 #   ./test/ci-all.sh find menu       # only the named ones
@@ -20,7 +20,7 @@
 # there failed" is not a gate.
 #
 # `skip` is counted and shown because a green line must never hide one: a gate
-# skips exactly what this display cannot prove (docs/testing/headless-ci.md §5). A gate
+# skips exactly what this display cannot prove. A gate
 # that could not run AT ALL — no ImageMagick, no browser build — exits 77 and gets
 # its own SKIP verdict instead of a PASS: the one thing worse than a hidden skip is
 # a verdict of "passed" from a run that made no assertion, because an exit code is
@@ -175,7 +175,7 @@ fi
 
 echo
 echo "(* = passed with skipped checks: those are the ones a display without an"
-echo "    output device cannot answer, docs/testing/headless-ci.md §5)"
+echo "    output device cannot answer)"
 [ $gate_skips = 0 ] || echo "SKIP  = the gate ran no assertion here at all; the reason is in its transcript above"
 if [ $fails = 0 ] && [ $gate_skips = 0 ]; then printf 'ci all: every run passed\n'
 elif [ $fails = 0 ]; then printf 'ci all: every run that ran passed, %d skipped it\n' "$gate_skips"

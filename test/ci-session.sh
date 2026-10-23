@@ -191,7 +191,7 @@ else
   # child's TLS holds a different one. Nothing was smashed; glibc's message just
   # cannot tell the two apart. The helper exits such a child with _exit() now, so
   # a line here means either that fix came back or something really did overwrite
-  # a frame — both are worth stopping for (docs/internals/stack-canary-after-fork.md).
+  # a frame — both are worth stopping for.
   aborts=$(grep -c 'stack smashing' "$RUN/demo.out" "$RUN/demo.log" |
              awk -F: '{s+=$2} END{print s+0}')
   if [ "$aborts" = 0 ]; then ok "no subprocess aborted during the run"
@@ -243,7 +243,7 @@ stop_compositor
 if [ -z "$GS" ]; then
   # pgrep -g "" finds nothing, so the line below would have reported a clean
   # teardown for a session this script never had a handle on. An unrunnable check
-  # is a failure, not an ok: see docs/internals/empty-request-slot.md.
+  # is a failure, not an ok.
   bad "no process group id — the teardown could not be checked"
 else
   left=$(pgrep -g "$GS" 2>/dev/null | wc -l)

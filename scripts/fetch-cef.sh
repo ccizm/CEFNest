@@ -13,7 +13,7 @@
 #
 # Bumping the build changes what Wayland protocols Chromium asks for, so a new
 # CEF milestone still means re-running the whole gate (meson test + audit + the
-# session scripts) and re-measuring docs/internals/protocol-ceilings.md.
+# session scripts) and re-measuring the protocol ceilings.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

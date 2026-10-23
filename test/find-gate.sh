@@ -20,8 +20,7 @@
 #
 # The real runs deliberately do not pin which match the first step lands on: seen
 # once (1 run in 3), the first step after a new search reported ordinal 3 rather
-# than 1, and docs/features/find-path.md keeps that as a measured hazard instead of a
-# number to assert.
+# than 1, and that stays a measured hazard instead of a number to assert.
 
 set -u -o pipefail
 

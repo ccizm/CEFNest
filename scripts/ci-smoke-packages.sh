@@ -22,8 +22,7 @@
 # host: the helper is started the way a user would start it and the transcript
 # is graded — a sandbox FATAL here is a real regression, and the two documented
 # ways out (a per-application AppArmor profile, or CHROMIUM_HELPER_NO_SANDBOX=1)
-# are reported side by side. docs/internals/sandbox-policy.md §4 is the
-# measurement this shape comes from.
+# are reported side by side.
 #
 # Run after scripts/ci-build.sh, in the same workspace, as root:
 #
@@ -157,7 +156,7 @@ case "$DEV_LIST" in
 esac
 
 # chrome-sandbox is deliberately 0755: this project ships no setuid helper and
-# no AppArmor profile it has not measured (docs/internals/sandbox-policy.md §6).
+# no AppArmor profile it has not measured.
 # The mode is asserted so a future packaging change cannot quietly turn it into
 # a privilege-escalation surface nobody reviewed.
 SBX_MODE=$(printf '%s\n' "$MAIN_LIST" |
@@ -226,8 +225,8 @@ if ls "$DIST"/*.rpm >/dev/null 2>&1; then
     # comes from rpmbuild's own soname discovery — which %global
     # __os_install_post %{nil} does *not* cover (that macro stops the brp
     # post-processing, not find-requires). Nobody in this repo has an rpm host
-    # to have measured it on, so the line below is the measurement, and
-    # docs/testing/cnb-ci.md is meant to be updated from what a real run prints.
+    # to have measured it on, so the line below is the measurement. Update it
+    # from what a real run prints.
     note "cefnest rpm --requires: $(rpm -qp --requires "$MAIN_RPM" 2>/dev/null |
       tr '\n' ' ')"
   fi
@@ -244,8 +243,8 @@ if [ "$AS_ROOT" = 1 ]; then
   # `dpkg: error processing package … (--configure)` chain, and python3.12, the
   # GTK -dev chain and cefnest-dev itself unconfigured behind it — none of which
   # names our Depends. Configured on its own beforehand, tzdata is out of the way
-  # and a failure here is about our packages again. docs/testing/cnb-ci.md §1 is
-  # the mechanism (a postinst renaming over a bind-mounted /etc/localtime).
+  # and a failure here is about our packages again. The mechanism is a postinst
+  # renaming over a bind-mounted /etc/localtime.
   export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC
   apt-get update -qq
   ./scripts/ci-prepare-tzdata.sh
@@ -388,8 +387,7 @@ PROBE
 
   echo "== smoke: the packaged sandbox default"
   # Started the way a user starts it, with no display: whatever it says, it says
-  # before it needs one. "No usable sandbox!" is the failure this looks for —
-  # docs/internals/sandbox-policy.md §4 measured that exact transcript.
+  # before it needs one. "No usable sandbox!" is the failure this looks for.
   UNSHARE=unknown
   if unshare -Urm true >/dev/null 2>&1; then
     UNSHARE=yes

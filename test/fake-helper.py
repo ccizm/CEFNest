@@ -36,7 +36,7 @@ to come from; a rejected or never-answered download leaves no file at all.
 Find is answered against one fixed sentence — "cefnest fake helper page" — so a
 gate can assert exact counts without a browser: "find e" is six matches, "find
 PAGE" is one with match_case off and zero with it on, "find zzz" is zero. The
-reply shape is the one measured against real Chromium in docs/features/find-path.md: every
+reply shape is the one measured against real Chromium: every
 request takes a fresh identifier, a request that finds something answers with one
 or more counting updates and then the same numbers marked final, a request that
 finds nothing answers once, and a brand-new search reports ordinal 0 until the
@@ -44,8 +44,8 @@ host steps to a match. find-stop sends nothing back.
 
 A URL containing "menu" sends a context-menu event, which is how the host's menu
 layer is driven without a browser. menu=<name> picks the model — "link", "edit",
-"selection" and "empty" are the ones docs/features/context-menu.md measured against real
-Chromium, "mixed" is invented to carry a check, a radio, a submenu and two labels
+"selection" and "empty" are the ones measured against real Chromium, "mixed" is
+invented to carry a check, a radio, a submenu and two labels
 that GTK has to escape — and x= / y= place it. menu=auto also closes the request
 itself about half a second later, which is the shape of CEF dismissing a menu the
 host never answered. The real helper's two answers (context-menu-select and
@@ -57,16 +57,15 @@ silent, exactly as there.
 
 A URL containing "permission" asks for one permission, which is how the host's
 prompt layer is driven without a browser. perm=<name> picks which ask, out of the
-set docs/features/permission-prompt.md measured — audio, video, both, geolocation,
+set that was measured — audio, video, both, geolocation,
 notifications, clipboard, midi, storage, network, empty — and origin= names the
 requesting origin. The two queues behave the way the real browser's do: a media
 ask the host has not answered holds the queue, and an ask made behind it arrives
 as its own request only once the slot is free again, while a prompt the host has
 not answered is dismissed as "ignore" the moment the next prompt shows up. That is
 where the replay stops: measured, a prompt the host sits on also makes the ask
-made immediately after it vanish without ever reaching the helper
-(docs/features/permission-prompt.md §3), and a host cannot answer that differently, so it
-is not simulated here.
+made immediately after it vanish without ever reaching the helper, and a host
+cannot answer that differently, so it is not simulated here.
 auto=1 closes the request itself about half a second later, which is the shape of
 Chromium taking a prompt back. The one answer the real helper takes
 (permission-respond, with accept, deny or dismiss) has no reply of its own, so
@@ -213,7 +212,7 @@ find_state = {"identifier": 0, "matches": [], "ordinal": 0}
 
 
 def fake_find(pattern, match_case, forward, step):
-    # The shape is the one measured against real Chromium (docs/features/find-path.md):
+    # The shape is the one measured against real Chromium:
     # every request — a new search and a step alike — gets a fresh identifier, a
     # request that finds something answers with at least one counting update and
     # then the same numbers marked final, a request that finds nothing answers
@@ -262,7 +261,7 @@ def fake_find(pattern, match_case, forward, step):
     update(True)
 
 
-# The models docs/features/context-menu.md measured out of a real CEF 154, spelled the way
+# The models below were measured out of a real CEF 154, spelled the way
 # they arrive on the channel: a separator carries no label and is always enabled,
 # and the labels keep the "(&B)" mnemonic spelling CEF uses.
 def menu_item(item_id, label, enabled=True, type="command", checked=False):
@@ -332,7 +331,7 @@ def log(text):
     print("fake: " + text, file=sys.stderr, flush=True)
 
 
-# The asks docs/features/permission-prompt.md measured out of a real CEF 154, spelled the
+# The asks below were measured out of a real CEF 154, spelled the
 # way they arrive on the channel: the two queues carry the two CEF callbacks, a
 # media ask names capture bits and a prompt ask names permission types with their
 # raw bit values.

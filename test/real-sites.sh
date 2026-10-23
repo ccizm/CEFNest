@@ -87,7 +87,7 @@ while IFS=$'\t' read -r name url wait_ms; do
     [ -n "$site_note" ] && note="${note:+$note; }$site_note"
   fi
   # Reported, not asserted: the gate that fails on this line is `ci-session`'s
-  # proof. What the line means is docs/internals/stack-canary-after-fork.md.
+  # proof; test/ci-session.sh describes what the line means.
   aborts=$(grep -ac 'stack smashing' "$OUT/$name.out" 2>/dev/null || true)
   [ "${aborts:-0}" -gt 0 ] 2>/dev/null && note="${note:+$note; }stack-canary abort lines=$aborts"
   if [ $bad = 1 ]; then

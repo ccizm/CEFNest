@@ -50,7 +50,7 @@ uint64_t           chromium_session_get_frame_count (ChromiumSession *self);
  * CloseBrowser, so neither the window nor the slot is a co-owner when the close
  * runs — Alloy reads that as "close the browser" and OnBeforeClose fires, which
  * is what makes ::browser-closed land for the first tab too
- * (docs/features/multi-browser.md, measured by test/multi-browser-gate.sh).
+ * (measured by test/multi-browser-gate.sh).
  * An unknown @id answers status: no-such-browser, which is how a host can tell
  * "already gone" from "nothing was asked". */
 void               chromium_session_new_browser   (ChromiumSession *self,
@@ -124,7 +124,7 @@ void               chromium_session_run_javascript_expression (ChromiumSession *
  * reported and left alone (docs/control-channel.md). */
 
 /* The page's sound leaves the helper through its own audio process and lands on
- * the host's speakers (docs/features/audio-path.md), so this is the only switch the
+ * the host's speakers, so this is the only switch the
  * embedding app has. chromium_session_get_muted () reports what the helper read
  * back: it changes a round trip after the call, and moves ::changed with it.
  * A new helper always starts unmuted. */
@@ -178,7 +178,7 @@ void               chromium_session_resume_download (ChromiumSession *self,
  * next / previous match of this same search"), because the helper keeps no find
  * state and a step cannot be about a search the host has forgotten. The answer
  * is not this call but the signal: ::find-result (identifier, count,
- * active_ordinal, final). Measured against real Chromium (docs/features/find-path.md):
+ * active_ordinal, final). Measured against real Chromium:
  * every request takes a fresh identifier, so it groups the replies to one
  * request rather than counting searches; a request that finds matches answers
  * twice, a counting update and then the same numbers with @final TRUE; a request
@@ -239,8 +239,8 @@ void               chromium_session_context_menu_dismiss (ChromiumSession *self)
 /* Permission requests. A page's ask for a microphone, a location or the clipboard
  * is a question CEF lets only the host answer, and leaving it unanswered costs
  * more than silence: the page's promise stays pending, and a second media ask
- * never arrives until the first is answered (docs/features/permission-prompt.md has the
- * measurements).
+ * never arrives until the first is answered. See docs/control-channel.md for the
+ * interaction shape.
  *
  * ::permission-request (id, kind, origin, permissions) arrives first. @kind is
  * "media" for a getUserMedia ask and "prompt" for one of Chromium's permission

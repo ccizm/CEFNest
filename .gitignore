@@ -1,5 +1,5 @@
 # Any build directory, by whatever suffix this tree names it: builddir itself, a
-# second one used as a staging install (docs/guides/packaging.md), or a builddir2 left
+# second one used as a staging install, or a builddir2 left
 # next to it. A 1.5 GB installed CEF runtime is not what git wants to be asked
 # about, and `builddir-*/` alone missed every name without the dash.
 builddir*/
