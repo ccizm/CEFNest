@@ -479,17 +479,25 @@ CNB runner 上验证。
 - `scripts/fetch-cef.sh`：stub CDN 变异红（不解包）。
 - P1 的版本串：两次 `meson setup` 对比 `build.ninja`（`154.0.34` vs `0.0.1`）。
 - P3-1 的换算：三个 dpr 值，人工测量。
-- 本轮改动随 `c7004f5` 发布；发版还差推 tag（见下节）。
+- 本轮改动已合入并推送为 `c7004f5`；发版另起修订号，`v154.0.34-5` 指向 `1dd1244`，见下节。
 
 ## 发版：`154.0.34-4` → `154.0.34-5`
 
 远端已有的 `v154.0.34-4` 指向 `1e70f54`（本轮之前），重推同名 tag 不会重跑流水线，
 所以这一轮的产物要发就得升修订号。一起动的 13 个位置见 docs/testing/cnb-ci.md §5：
 `.cnb.yml` 里 3 个 `CEFNEST_PACKAGE_RELEASE`、1 个 `CEFNEST_EXPECTED_TAG`、9 个静态
-附件名，外加 `README*` 与 `scripts/check-release-tag.sh` 的默认值。升完后
+附件名，外加 `README*` 的示例版本串和 `scripts/check-release-tag.sh` 用法注释里那一
+行（脚本自己的 `RELEASE` 默认值仍是 `1`，不受修订号影响）。升完后
 `check-release-tag.sh` 绿、附件名改回 `-4` 红，说明这 13 个位置真被一道检查钉住了。
 
 `scripts/ci-build.sh` 里生成 `RELEASE-NOTES.md` 的两段清单（中/英）重写成这一版的
 实际内容：信号处理、两道新检查、诚实的构建树说明、沙箱运行前提、许可元数据、
 CEF 摘要钉值、示例修正与 `chromium-session.h` 订正。上一版清单还停留在 `-4` 的
-叙述，与本轮产物无关。
+叙述，与本轮产物无关。渲染时查出的 `$ORIGIN` 掉字见上节；同一步还发现 CEF 许可随包
+的文件名是 `LICENSE.cef.txt`，说明里原本写成 `LICENSE.txt`，一并改掉。
+
+打 tag 前再跑一遍 `CEFNEST_PACKAGE_RELEASE=5 ./scripts/check-release-tag.sh`：这回不
+带 `CEFNEST_EXPECTED_TAG`，脚本自己从 HEAD 读 tag，输出“tag on HEAD is
+v154.0.34-5”并绿——这正是 runner 上 checkout tag 之后走的那条路径。`v154.0.34-5`
+已推到远端、指向 `1dd1244`，流水线由这次推送触发；本机没有 CNB 的 CLI，跑出来的
+结果只能在网页上看，这里不替它下结论。
