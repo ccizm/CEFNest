@@ -225,14 +225,6 @@ seed/watch variables, `CHROMIUM_A11Y`); see `src/main.c`.
 - `docs/control-channel.md` — the NDJSON protocol between session and helper
   (commands, events, the four interaction shapes). Only needed for custom
   helpers or direct channel work.
-- `docs/view-source-window.zh-CN.md` — the design proposal for the component's
-  own View Source window (Chinese): root cause, helper source streaming, the
-  GtkSourceView window, edge cases, tests and release surface. Read it before
-  implementing.
-- `docs/performance-pending-decisions.md` — the performance items still open
-  after the 2026-10 P0/P1 batches: dmabuf release timing (correctness),
-  occluded windows, the vetoed injection-script changes, and the demoted shm
-  fallback path. Read this before picking performance work back up.
 - `site/` — the project page (Vite + Vue + Bootstrap); `npm run dev` and
   `npm run build` inside it.
 

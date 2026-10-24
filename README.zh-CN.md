@@ -215,12 +215,6 @@ demo 还会读取一些额外的开关（`CEFNEST_DOWNLOAD_*`、`CEFNEST_PERMISS
 
 - `docs/control-channel.zh-CN.md` —— session 与 helper 之间的 NDJSON 协议
   （命令、事件、四种交互形态）。只有自行编写 helper 或直接驱动通道时才需要。
-- `docs/view-source-window.zh-CN.md` —— “查看网页源代码”子窗口的完整设计提案：
-  根因、helper 取源与分块协议、session 的 GtkSourceView 窗口、边界情况、
-  测试与发布面。实现前先读它。
-- `docs/performance-pending-decisions.md` —— 2026-10 的 P0/P1 两批性能工作
-  收官后仍待决策的事项：dmabuf release 时机（正确性）、遮挡窗口、实测否决
-  的注入脚本改动、降级后的 shm 回退路径。重启性能工作前先读它。
 - `site/` —— 项目主页（Vite + Vue + Bootstrap）；在目录里运行 `npm run dev`
   或 `npm run build`。
 
