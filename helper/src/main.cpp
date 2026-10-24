@@ -1418,19 +1418,35 @@ void EmitJsResult(const CefString& payload) {
 
   CefRefPtr<CefValue> value =
       result->HasKey("value") ? result->GetValue("value") : nullptr;
-  if (value && CefWriteJSON(value, JSON_WRITER_DEFAULT).ToString().size() >
-                  kMaxResultBytes) {
+  std::string value_json;
+  if (value)
+    value_json = CefWriteJSON(value, JSON_WRITER_DEFAULT).ToString();
+  if (value_json.size() > kMaxResultBytes) {
     event->SetString("message", "result exceeded 64 KiB and was dropped");
     event->SetBool("truncated", true);
     value = nullptr;
+    value_json.clear();
   }
 
-  if (value)
-    event->SetValue("value", value);
-  else
-    event->SetNull("value");
+  if (!g_control)
+    return;
 
-  Emit(event);
+  /* The value is serialized once and the text that measured the ceiling is
+   * the text that goes on the wire: the envelope is rendered without it and
+   * the fragment spliced in before the closing brace — the same place the
+   * dictionary writer puts a member set last, so the bytes match what
+   * Emit(event-with-value) produced. A dropped value leaves "value":null in
+   * the envelope and nothing to splice. */
+  if (!value)
+    event->SetNull("value");
+  CefRefPtr<CefValue> envelope = CefValue::Create();
+  envelope->SetDictionary(event);
+  std::string line = CefWriteJSON(envelope, JSON_WRITER_DEFAULT).ToString();
+  if (value) {
+    line.insert(line.size() - 1, ",\"value\":" + value_json);
+  }
+  line.push_back('\n');
+  g_control->Send(line);
 }
 
 void HandleCommand(const std::string& line) {
