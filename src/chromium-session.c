@@ -982,11 +982,12 @@ send_json (ChromiumSession *self, JsonNode *root)
 {
   g_autoptr (JsonGenerator) generator = NULL;
   g_autofree char *json = NULL;
-  g_autofree char *line = NULL;
   GError *error = NULL;
+  gsize json_len = 0;
   size_t done = 0;
   size_t total;
   gssize written;
+  int seg;
 
   if (!self->output)
     {
@@ -997,39 +998,47 @@ send_json (ChromiumSession *self, JsonNode *root)
   generator = json_generator_new ();
   json_generator_set_root (generator, root);
 
-  /* NDJSON: the helper's reader only dispatches on a newline. */
-  json = json_generator_to_data (generator, NULL);
-  line = g_strconcat (json, "\n", NULL);
+  /* NDJSON: the helper's reader only dispatches on a newline. The newline goes
+   * out as its own one-byte segment below — g_strconcat copying the whole line
+   * and strlen rescanning it existed only to append that byte. */
+  json = json_generator_to_data (generator, &json_len);
 
-  /* One call is not one line. A stream is allowed to take part of a write, and
-   * the remainder of a half-written command would be read as the beginning of
-   * the next one — the framing does not come back on its own, so everything
-   * that is left goes round again until the line is out. */
-  total = strlen (line);
-  while (done < total)
+  /* Two segments: the body, then the newline. One call is not one line. A
+   * stream is allowed to take part of a write, and the remainder of a
+   * half-written command would be read as the beginning of the next one — the
+   * framing does not come back on its own, so everything that is left goes
+   * round again until the segment is out. */
+  for (seg = 0; seg < 2; seg++)
     {
-      written = g_output_stream_write (self->output, line + done, total - done,
-                                       NULL, &error);
-      if (written < 0)
+      const char *data = seg == 0 ? json : "\n";
+
+      total = seg == 0 ? json_len : 1;
+      done = 0;
+      while (done < total)
         {
-          g_warning ("session: control write failed: %s", error->message);
-          g_clear_error (&error);
-          /* Half a line is on the wire. The peer can no longer tell where the
-           * next command starts, so this channel is done: drop it and report
-           * the helper gone, exactly as a read-side framing failure does. */
-          drop_connection (self);
-          mark_closed (self, "control write failed");
-          return;
+          written = g_output_stream_write (self->output, data + done,
+                                           total - done, NULL, &error);
+          if (written < 0)
+            {
+              g_warning ("session: control write failed: %s", error->message);
+              g_clear_error (&error);
+              /* Half a line is on the wire. The peer can no longer tell where the
+               * next command starts, so this channel is done: drop it and report
+               * the helper gone, exactly as a read-side framing failure does. */
+              drop_connection (self);
+              mark_closed (self, "control write failed");
+              return;
+            }
+          if (written == 0)
+            {
+              g_warning ("session: control write stopped after %zu of %zu bytes",
+                         done, total);
+              drop_connection (self);
+              mark_closed (self, "control write stalled");
+              return;
+            }
+          done += (size_t) written;
         }
-      if (written == 0)
-        {
-          g_warning ("session: control write stopped after %zu of %zu bytes",
-                     done, total);
-          drop_connection (self);
-          mark_closed (self, "control write stalled");
-          return;
-        }
-      done += (size_t) written;
     }
 
   if (!g_output_stream_flush (self->output, NULL, &error))
