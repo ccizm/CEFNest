@@ -2598,7 +2598,6 @@ int main(int argc, char** argv) {
   } else {
     cache_dir = CacheDirectory("cefnest-helper-hosted-" +
                                SocketCacheSuffix(socket_path));
-    PruneStaleCacheDirs(cache_dir);
   }
   fprintf(stderr, "helper: cache=%s\n", cache_dir.c_str());
 
@@ -2649,6 +2648,16 @@ int main(int argc, char** argv) {
   // is simply gone by the time there is a message loop to leave.
   signals.Start();
 
+  // The stale-cache sweep is unbounded filesystem work over ~/.cache (entries
+  // to stat, whole trees to remove), so it runs on its own thread: the reader
+  // is already answering the host, and CefInitialize and the message loop must
+  // not queue behind a scan of whatever else lives in the cache directory. It
+  // touches nothing but the filesystem, and every exit path below joins it —
+  // a thread outliving main() would race the C runtime's teardown.
+  std::thread prune;
+  if (!socket_path.empty())
+    prune = std::thread([keep = cache_dir] { PruneStaleCacheDirs(keep); });
+
   // Hosted: no initial navigation. The empty document a browser starts with is
   // not a history entry of its own — the host's first load replaces it, which is
   // why the first page reports can_go_back false — but a URL passed here *does*
@@ -2663,6 +2672,8 @@ int main(int argc, char** argv) {
     signals.Stop();
     control.Shutdown();
     CefShutdown();
+    if (prune.joinable())
+      prune.join();
     return 1;
   }
   g_select_slot = first_slot;
@@ -2672,6 +2683,8 @@ int main(int argc, char** argv) {
   control.Shutdown();
   g_control = nullptr;
   CefShutdown();
+  if (prune.joinable())
+    prune.join();
   fprintf(stderr, "helper: exited\n");
   return 0;
 }
