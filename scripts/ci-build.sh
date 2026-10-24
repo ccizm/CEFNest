@@ -61,7 +61,11 @@ rm -rf builddir
 # the helper path is compiled into the demo from the prefix, and the package
 # installs it at /usr/libexec/cefnest/<arch>/. With the default /usr/local the
 # demo would look under /usr/local and not find the helper it was shipped beside.
-meson setup builddir -Dprefix=/usr -Dcefnest-version="$PACKAGE_VERSION"
+# --buildtype=release: without it this tree inherits meson's debugoptimized
+# (-O2 -g, assertions on), and everything shipped in cefnest-build.tar.gz —
+# and every gate CI runs — would be measured on a non-release configuration
+# while build-packages.sh configures its own tree as plain release.
+meson setup builddir --buildtype=release -Dprefix=/usr -Dcefnest-version="$PACKAGE_VERSION"
 ninja -C builddir
 
 # Keep src/, examples/ and test/ as directories. The demo looks for its library
