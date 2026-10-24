@@ -120,6 +120,9 @@ struct _ChromiumSession {
   gulong a11y_handler;
   gboolean a11y_enabled;
   gboolean a11y_forced;
+  /* A g_dbus_proxy_new_for_bus() is in flight; cleared when its callback runs
+   * or when dispose() gives up on it. */
+  gboolean a11y_proxy_pending;
 
   /* The context menu the helper last asked about: pending until the host answers
    * it, and the two widgets that draw it while this side is the one that does. */
@@ -193,32 +196,60 @@ session_a11y_changed (GDBusProxy *proxy, GVariant *changed,
   session_read_a11y (data);
 }
 
+static void
+chromium_session_a11y_proxy_ready (GObject *source, GAsyncResult *result,
+                                   gpointer data)
+{
+  ChromiumSession *self = data;
+  g_autoptr (GDBusProxy) proxy = NULL;
+  g_autoptr (GError) error = NULL;
+
+  proxy = g_dbus_proxy_new_for_bus_finish (result, &error);
+  if (!self->a11y_proxy_pending)
+    {
+      /* dispose() gave up on this proxy while the call was in flight. */
+      g_object_unref (self);
+      return;
+    }
+  self->a11y_proxy_pending = FALSE;
+
+  if (!proxy)
+    g_debug ("session: no org.a11y.Status: %s",
+             error ? error->message : "unknown");
+  else if (!self->a11y_proxy)
+    {
+      self->a11y_proxy = g_steal_pointer (&proxy);
+      self->a11y_handler =
+        g_signal_connect (self->a11y_proxy, "g-properties-changed",
+                          G_CALLBACK (session_a11y_changed), self);
+    }
+
+  session_read_a11y (self);
+  /* Held from the g_dbus_proxy_new_for_bus() call: the session outlives
+   * dispose() only until this callback has run. */
+  g_object_unref (self);
+}
+
 /* No GTK/GIO dependency is added to the helper: the host watches the session
  * bus property and flips CefBrowserHost::SetAccessibilityState through the
  * existing channel. */
 static void
 chromium_session_watch_a11y (ChromiumSession *self)
 {
-  GError *error = NULL;
-
-  if (self->a11y_forced || self->a11y_proxy)
+  if (self->a11y_forced || self->a11y_proxy || self->a11y_proxy_pending)
     return;
 
-  self->a11y_proxy = g_dbus_proxy_new_for_bus_sync (
-    G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
-    "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Status", NULL, &error);
-  if (!self->a11y_proxy)
-    {
-      g_debug ("session: no org.a11y.Status: %s",
-               error ? error->message : "unknown");
-      g_clear_error (&error);
-      return;
-    }
-
-  self->a11y_handler =
-    g_signal_connect (self->a11y_proxy, "g-properties-changed",
-                      G_CALLBACK (session_a11y_changed), self);
-  session_read_a11y (self);
+  self->a11y_proxy_pending = TRUE;
+  /* Async on purpose: a sync proxy creation blocks this thread on a round trip
+   * to the session bus, and building a session to ask it what its helper path
+   * is — which is what the demo does before deciding whether a browser is even
+   * available — must not pay for that. The answer lands on the main loop, by
+   * which time the helper is usually connected and the state session_read_a11y
+   * works out rides along with ::ready's own a11y command or follows it. */
+  g_dbus_proxy_new_for_bus (G_BUS_TYPE_SESSION, G_DBUS_PROXY_FLAGS_NONE, NULL,
+                            "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Status",
+                            NULL, chromium_session_a11y_proxy_ready,
+                            g_object_ref (self));
 }
 
 static void
@@ -2081,11 +2112,9 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
       return FALSE;
     }
 
-  /* Armed here, not in init: g_dbus_proxy_new_for_bus_sync() blocks this thread
-   * on a round trip to the session bus, and building a session to ask it what its
-   * helper path is — which is what the demo does before deciding whether a
-   * browser is even available — must not pay for that. It is idempotent, so a
-   * stop and a second start keep the one proxy. */
+  /* Armed here, not in init, so a process that never starts a session never
+   * touches the session bus. The proxy arrives asynchronously and is idempotent,
+   * so a stop and a second start keep the one proxy. */
   chromium_session_watch_a11y (self);
 
   socket_name = chromium_view_get_socket_name (self->view);
@@ -2798,6 +2827,9 @@ chromium_session_dispose (GObject *object)
       self->a11y_handler = 0;
       g_clear_object (&self->a11y_proxy);
     }
+  /* The in-flight proxy call still holds a ref and will run its callback; the
+   * pending flag is what tells it the session is on its way out. */
+  self->a11y_proxy_pending = FALSE;
 
   g_clear_object (&self->cancellable);
   g_clear_object (&self->view);
