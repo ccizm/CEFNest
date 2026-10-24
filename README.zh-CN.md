@@ -185,6 +185,7 @@ demo 还会读取一些额外的开关（`CEFNEST_DOWNLOAD_*`、`CEFNEST_PERMISS
 | 设置了 `G_MESSAGES_DEBUG` 却没有任何日志 | 域列表必须用**空格**分隔；用逗号分隔的列表匹配不到任何域 |
 | 关闭最后一个标签页，页面就没了 | 一个 session 对应一个 helper；先新建一个 browser，或正确处理 `::closed` |
 | 在 `::helper-exited` 之前先看到 `Lost connection to Wayland compositor` | 这是正常的销毁顺序——等收到 `::helper-exited` 之后再销毁自己的 display |
+| helper 在 stderr 上几乎不出声 | 刻意为之：Chromium 日志级别为 WARNING，逐事件的 INFO 输出已去掉；警告与错误仍会打印 |
 
 ## 已知限制
 

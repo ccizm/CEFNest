@@ -2612,7 +2612,10 @@ int main(int argc, char** argv) {
   settings.windowless_rendering_enabled = false;
   settings.multi_threaded_message_loop = false;
   settings.external_message_pump = false;
-  settings.log_severity = LOGSEVERITY_INFO;
+  // INFO on stderr (and debug.log) is per-event noise a running session emits
+  // continuously; warnings and errors are the ones that mean something. Keep
+  // the setting greppable: this is the only place it is chosen.
+  settings.log_severity = LOGSEVERITY_WARNING;
   settings.persist_session_cookies = false;
   // A host-wide default User-Agent. CEF bakes CefSettings.user_agent in at
   // CefInitialize — the one chance to set it — so the host opts in by putting

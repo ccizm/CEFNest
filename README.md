@@ -190,6 +190,7 @@ seed/watch variables, `CHROMIUM_A11Y`); see `src/main.c`.
 | `G_MESSAGES_DEBUG` prints nothing | the domain list is **space**-separated; a comma list matches nothing |
 | Closing the last tab closes the page | one session is one helper; open a new browser first, or handle `::closed` |
 | `Lost connection to Wayland compositor` before `::helper-exited` | normal teardown order — destroy your display only after `::helper-exited` |
+| The helper is quiet on stderr | deliberate: Chromium's log severity is WARNING, so per-event INFO chatter is gone; warnings and errors still print |
 
 ## Known limitations
 
