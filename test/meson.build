@@ -48,6 +48,16 @@ uinput_inject = executable(
   install: false,
 )
 
+# A fullscreen opaque window for N seconds: what occlusion-gate.sh covers the
+# demo's window with, since mutter only stops a covered window's frame
+# callbacks when the cover is complete.
+cover_window = executable(
+  'cover-window',
+  [ 'cover-window.c' ],
+  dependencies: [ gtk_dep ],
+  install: false,
+)
+
 python = find_program('python3', 'python', required: false)
 
 if python.found()

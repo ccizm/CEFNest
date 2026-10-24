@@ -234,8 +234,13 @@ struct _NestedCompositor {
   guint frame_timer_id;
   GdkFrameClock *frame_clock;   /* the embedding widget's, may be NULL */
   gulong frame_clock_handler;
+  guint occlusion_heartbeat_id; /* pacing while the window looks covered */
   guint frame_watchdog_id;      /* armed while a waiting client has no answer */
   gboolean clock_alive;         /* FALSE once the widget's clock missed a cycle */
+  gboolean clock_ever_alive;    /* the occlusion latch: no heartbeat before a
+                                   clock has answered even once, so headless
+                                   runs (a clock that never paints) keep the
+                                   plain fallback timer */
   char *socket_name;
 
   struct wl_global *global_compositor;

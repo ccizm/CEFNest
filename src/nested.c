@@ -2025,6 +2025,17 @@ fire_pending_frame_callbacks (NestedCompositor *self)
  * interval of it is all a display without vsync costs the page. */
 #define FRAME_CLOCK_WAIT_MS 100
 
+/* The rate at which a window that looks occluded still gets frames. Mutter
+ * sends a fully covered window no frame callbacks, so its widget's clock goes
+ * quiet — the watchdog above reports that — and pacing the page at heartbeat
+ * instead of by timer keeps the desktop's saving (a covered page measured 56
+ * commits/s on the plain timer). Each beat answers one frame's worth of
+ * requests: the page commits, the view queues a draw, and the after-paint
+ * ask is the wakeup a revealed window answers. A misread occlusion costs a
+ * visible page this idle rate until its clock answers — self-healing, never
+ * a freeze. */
+#define OCCLUSION_HEARTBEAT_MS 500
+
 /* Fallback pacing for a clock that cannot be waited for: either no widget clock
  * is attached at all (tests, headless runs), or the attached one has stopped
  * running cycles. A compositor with no output device sends GDK no frame events,
@@ -2068,6 +2079,15 @@ frame_clock_after_paint (GdkFrameClock *clock, gpointer data)
   NestedCompositor *self = data;
 
   self->clock_alive = TRUE;
+  self->clock_ever_alive = TRUE;
+
+  /* The window is being painted, so whatever quiet was read as occlusion is
+   * over: pacing goes straight back to the clock. */
+  if (self->occlusion_heartbeat_id)
+    {
+      g_source_remove (self->occlusion_heartbeat_id);
+      self->occlusion_heartbeat_id = 0;
+    }
 
   if (self->frame_watchdog_id)
     {
@@ -2098,10 +2118,48 @@ frame_clock_watchdog (gpointer data)
 
   self->frame_watchdog_id = 0;
   self->clock_alive = FALSE;
+  g_debug ("nested: clock watchdog fired");
 
   nested_start_frame_clock (self);
 
   return G_SOURCE_REMOVE;
+}
+
+/* A compositor with exactly one mapped toplevel can read its widget's clock
+ * as "is the window on screen". With more than one the inference breaks —
+ * one window covered says nothing about the next — so those sessions stay on
+ * the timer. */
+static gboolean
+clock_describes_one_window (NestedCompositor *self)
+{
+  int windows = 0;
+  NestedSurface *surface;
+
+  wl_list_for_each (surface, &self->surfaces, nested_link)
+    if (surface->is_toplevel && surface->mapped && surface->texture &&
+        ++windows > 1)
+      return FALSE;
+
+  return windows == 1;
+}
+
+/* One frame's worth of answers per beat while the window looks covered. The
+ * page commits, the view queues a draw, and the after-paint ask is what a
+ * window that has been revealed answers — which cancels this in
+ * frame_clock_after_paint() and hands pacing back to the clock. A window
+ * still covered stays at this idle rate, which is the whole saving. */
+static gboolean
+occlusion_heartbeat (gpointer data)
+{
+  NestedCompositor *self = data;
+
+  fire_pending_frame_callbacks (self);
+
+  if (self->frame_clock)
+    gdk_frame_clock_request_phase (self->frame_clock,
+                                   GDK_FRAME_CLOCK_PHASE_AFTER_PAINT);
+
+  return G_SOURCE_CONTINUE;
 }
 
 static void
@@ -2130,8 +2188,22 @@ nested_start_frame_clock (NestedCompositor *self)
         self->frame_watchdog_id = g_timeout_add (FRAME_CLOCK_WAIT_MS,
                                                  frame_clock_watchdog, self);
     }
-  else if (!self->frame_timer_id)
-    self->frame_timer_id = g_timeout_add (16, frame_clock_tick, self);
+  else if (!self->frame_timer_id && !self->occlusion_heartbeat_id)
+    {
+      /* The clock answered once and has now gone quiet — a watchdog only ever
+       * fires that way, which is the latch that keeps headless runs (a clock
+       * that never answered) off this path. For a single-window session the
+       * quiet is the desktop not painting a covered window: heartbeat pacing
+       * keeps that saving and stays wakeable. Sessions with more than one
+       * window keep the plain timer, whose full-rate answers a visible
+       * window elsewhere still needs. */
+      if (self->frame_clock && self->clock_ever_alive &&
+          clock_describes_one_window (self))
+        self->occlusion_heartbeat_id =
+          g_timeout_add (OCCLUSION_HEARTBEAT_MS, occlusion_heartbeat, self);
+      else
+        self->frame_timer_id = g_timeout_add (16, frame_clock_tick, self);
+    }
 }
 
 /* ------------------------------------------------------------------ *
@@ -2394,6 +2466,17 @@ nested_update_primary (NestedCompositor *self)
         }
     }
 
+  /* A session that grew or lost windows can no longer be paced by the
+   * occlusion heartbeat on the old reading: with more than one window the
+   * clock says nothing about the others, and with none there is nobody to
+   * pace. Start-frame re-decides with the current set. */
+  if (self->occlusion_heartbeat_id && !clock_describes_one_window (self))
+    {
+      g_source_remove (self->occlusion_heartbeat_id);
+      self->occlusion_heartbeat_id = 0;
+      nested_start_frame_clock (self);
+    }
+
   self->toplevels_fingerprint = fingerprint;
   if (!self->disposing)
     g_signal_emit (self, signals[SIGNAL_TOPLEVELS_CHANGED], 0);
@@ -2462,6 +2545,12 @@ nested_compositor_dispose (GObject *object)
     {
       g_source_remove (self->frame_watchdog_id);
       self->frame_watchdog_id = 0;
+    }
+
+  if (self->occlusion_heartbeat_id)
+    {
+      g_source_remove (self->occlusion_heartbeat_id);
+      self->occlusion_heartbeat_id = 0;
     }
 
   /* Both replay idles run against the surface and device lists of this object,
@@ -3048,6 +3137,13 @@ nested_compositor_set_frame_clock (NestedCompositor *self, GdkFrameClock *clock)
     {
       g_source_remove (self->frame_watchdog_id);
       self->frame_watchdog_id = 0;
+    }
+
+  /* A heartbeat reading the old clock's quiet is as stale as the clock. */
+  if (self->occlusion_heartbeat_id)
+    {
+      g_source_remove (self->occlusion_heartbeat_id);
+      self->occlusion_heartbeat_id = 0;
     }
 
   /* A clock that has only just been attached has not missed anything yet. */
