@@ -148,6 +148,33 @@ CefRefPtr<CefWindow> g_tab_window;
 int CreateNewBrowser(const std::string& url, bool windowed);
 void SelectBrowserById(int id);
 
+/* One synthetic Tab (or Shift+Tab) into the page, which is the only way to
+ * move the page's own focus traversal from outside the renderer: the step
+ * lands on the first (backwards: last) focusable element when nothing in the
+ * page is focused yet, and on the edge it becomes a take-focus event back to
+ * the host. Sent as a task because the control channel hands commands over
+ * on this thread already; the delay-free posting only keeps the send off the
+ * JSON parse path. */
+class FocusAdvanceTask : public CefTask {
+ public:
+  FocusAdvanceTask(CefRefPtr<CefBrowser> browser, bool forward)
+      : browser_(browser), forward_(forward) {}
+  void Execute() override {
+    CefKeyEvent ev = {};
+    ev.windows_key_code = 0x09; /* VK_TAB */
+    ev.modifiers = forward_ ? 0 : EVENTFLAG_SHIFT_DOWN;
+    ev.type = KEYEVENT_RAWKEYDOWN;
+    browser_->GetHost()->SendKeyEvent(ev);
+    ev.type = KEYEVENT_KEYUP;
+    browser_->GetHost()->SendKeyEvent(ev);
+  }
+
+ private:
+  CefRefPtr<CefBrowser> browser_;
+  bool forward_;
+  IMPLEMENT_REFCOUNTING(FocusAdvanceTask);
+};
+
 // Close every browser the helper holds. OnBeforeClose only ends the message
 // loop once the slot map is empty, so a close aimed at one browser leaves the
 // rest running over a channel nobody is answering.
@@ -1532,6 +1559,20 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
+  if (name == "focus-advance") {
+    /* One step of the page's own traversal. The host asks for this when the
+     * focus chain enters the view — so the first (backwards: last) focusable
+     * element takes focus — and hosts may ask directly through the view. */
+    if (!g_browser) {
+      EmitStatus("no-browser");
+      return;
+    }
+    const bool forward =
+        !command->HasKey("forward") || command->GetBool("forward");
+    CefPostTask(TID_UI, new FocusAdvanceTask(g_browser, forward));
+    return;
+  }
+
   if (name == "back") {
     g_browser->GoBack();
     return;
@@ -2027,6 +2068,18 @@ class HelperClient : public CefClient,
      * that the same click goes on to request. Idempotent by the guard in
      * SelectBrowserById. */
     SelectBrowserById(browser->GetIdentifier());
+  }
+
+  void OnTakeFocus(CefRefPtr<CefBrowser> browser, bool next) override {
+    /* Blink's sequential traversal ran off the edge of the document: the
+     * walk belongs to the host now, and |next| says which way it was going.
+     * The host answers by moving focus to the widget after (backwards:
+     * before) the view; CEF restarts the page's traversal when the focus
+     * comes back. */
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("take-focus");
+    dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetBool("next", next);
+    Emit(dict);
   }
 
   bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,

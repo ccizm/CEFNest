@@ -27,6 +27,7 @@ examples_files = [
   'errors.c',      # load-error / renderer-exited / closed banners
   'observe.c',     # frame counter and the accessibility switch
   'useragent.c',   # switch the User-Agent by restarting the helper
+  'focus-chain.c', # gtk widgets and page elements in one tab order
 ]
 
 foreach file : examples_files

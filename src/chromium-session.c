@@ -479,6 +479,18 @@ handle_event (ChromiumSession *self, const char *line)
       return;
     }
 
+  if (!strcmp (event, "take-focus"))
+    {
+      /* The page's traversal ran off the edge of the document: the walk goes
+       * back to GTK, from the view's own place in the chain. The browser the
+       * event carries is informational — only the page that holds the
+       * keyboard can ever get here, and that is the page the view shows. */
+      if (self->view)
+        chromium_view_release_chain_focus (self->view,
+                                           event_flag (object, "next"));
+      return;
+    }
+
   if (!strcmp (event, "load-end"))
     {
       g_signal_emit (self, signals[SIG_LOAD_END], 0,
@@ -1104,6 +1116,28 @@ send_command (ChromiumSession *self, const char *cmd)
 
   json_builder_begin_object (builder);
   command_add_string (builder, "cmd", cmd);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+/* The view entered the focus chain (or a host stepped the page): one Tab's
+ * worth of the page's own traversal, synthesized on the Chromium side where
+ * the page's idea of "next focusable" lives. */
+static void
+session_on_view_focus_advance (ChromiumView *view, gboolean forward,
+                               ChromiumSession *self)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  if (!self->output)
+    return;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "focus-advance");
+  command_add_boolean (builder, "forward", forward);
   json_builder_end_object (builder);
 
   root = json_builder_get_root (builder);
@@ -2259,6 +2293,15 @@ chromium_session_set_view (ChromiumSession *self, ChromiumView *view)
   if (self->view)
     g_object_unref (self->view);
   self->view = view;
+
+  /* The chain entering the view is a page-focus advance: the helper owns
+   * the page's idea of "next focusable", so the request travels the control
+   * channel. connect_object, so a session that outlives its view loses the
+   * handler with the view. */
+  if (view)
+    g_signal_connect_object (view, "focus-advance",
+                             G_CALLBACK (session_on_view_focus_advance),
+                             self, 0);
 }
 
 void

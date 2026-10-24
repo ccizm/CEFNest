@@ -42,6 +42,7 @@ whoever spawns the helper.
 | `download-pause` / `download-resume` | `id` | only for a download that already has its item callback |
 | `find` | `pattern`, `forward`, `match_case`, `next` | no ack; answers arrive as `find-result` |
 | `find-stop` | `clear` (default true) | ends the search and drops the highlight |
+| `focus-advance` | `forward` (default true) | one Tab (Shift+Tab) of the page's own traversal on the active browser; sent by the view when the focus chain enters it, and the answer off the edge comes back as `take-focus` |
 | `context-menu-select` | `id`, `flags` (optional) | answers `context-menu`; the helper holds one request at a time |
 | `context-menu-dismiss` | — | close the menu, select nothing |
 | `permission-respond` | `id`, `result` (`accept`/`deny`/`dismiss`) | answers `permission-request`; a media `accept` must grant the whole mask |
@@ -54,6 +55,7 @@ whoever spawns the helper.
 | `browser-created` | `browser`, `url`, `windowed` |
 | `browser-selected` | `browser`, `windowed` |
 | `browser-closed` | `browser` |
+| `take-focus` | `browser`, `next` (the page's Tab traversal ran off the edge of the document; the host answers by handing the focus chain to the widget after — `next` false: before — the view) |
 | `address` / `title` | `url` / `title` (`address` only for committed navigations) |
 | `loading` | `loading`, `can_go_back`, `can_go_forward` |
 | `load-end` | `url`, `http_code` (**fires on failure too, with code 0**) |

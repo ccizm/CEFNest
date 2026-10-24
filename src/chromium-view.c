@@ -39,6 +39,9 @@ struct _ChromiumView {
   GdkSurface *scale_surface;
   int pushed_width;
   int pushed_height;
+  /* Declines the one focus-chain entry that the view itself caused by
+   * releasing the page's focus: see chromium_view_release_chain_focus(). */
+  gboolean focus_guard;
 
   GtkIMContext *im_context;
   GArray *im_keys;        /* evdev codes the input method claimed on press */
@@ -55,6 +58,13 @@ struct _ChromiumView {
 };
 
 G_DEFINE_TYPE (ChromiumView, chromium_view, GTK_TYPE_WIDGET)
+
+enum {
+  SIG_FOCUS_ADVANCE,
+  N_VIEW_SIGNALS
+};
+
+static guint view_signals[N_VIEW_SIGNALS];
 
 static void
 chromium_view_measure (GtkWidget *widget,
@@ -847,6 +857,96 @@ chromium_view_on_has_focus_notify (GObject *object, GParamSpec *pspec, gpointer 
   nested_compositor_set_keyboard_active (self->compositor, focused);
 }
 
+/* ------------------------------------------------------------------ *
+ * The focus chain                                                    *
+ *                                                                    *
+ * GTK walks its own chain of widgets and Chromium walks the page's   *
+ * elements; the two meet in this widget. Entering from the chain     *
+ * grabs the widget focus and then asks for one synthetic Tab, so     *
+ * the page's first element takes focus right away (the last, coming  *
+ * in with Shift+Tab) instead of the first press doing nothing.       *
+ * Leaving is driven from the far side: when the page's traversal     *
+ * runs off the edge of the document the session calls                *
+ * chromium_view_release_chain_focus() and the walk goes back to GTK. *
+ * ------------------------------------------------------------------ */
+
+/* Whether the view has something to type into: a client surface on screen.
+ * The focus chain walks past the view until this holds. */
+static gboolean
+chromium_view_has_page (ChromiumView *self)
+{
+  GList *stack;
+  gboolean painted;
+
+  if (!self->compositor)
+    return FALSE;
+
+  stack = nested_compositor_get_paint_stack_for (self->compositor, self->target);
+  painted = stack != NULL;
+  g_list_free_full (stack, g_object_unref);
+  return painted;
+}
+
+static gboolean
+chromium_view_focus (GtkWidget *widget, GtkDirectionType direction)
+{
+  ChromiumView *self = CHROMIUM_VIEW (widget);
+
+  /* The release we just caused can come straight back to us when nothing
+   * else in the window wants the focus. Declining this one walk is what
+   * keeps a page with nothing focusable from pulling the chain back in,
+   * advancing again and looping forever — an empty page is simply skipped,
+   * the way GTK skips a container with no focusable child. */
+  if (self->focus_guard)
+    {
+      self->focus_guard = FALSE;
+      return FALSE;
+    }
+
+  /* Nothing on screen to type into yet — no client, no pixels. The chain
+   * walks past a view like that, the way it walks past a container whose
+   * insides hold nothing focusable; a direct grab_focus() still works, so a
+   * host that grabs on startup (the demo does) keeps its early focus. */
+  if (!chromium_view_has_page (self))
+    return FALSE;
+
+  if (!GTK_WIDGET_CLASS (chromium_view_parent_class)->focus (widget, direction))
+    return FALSE;
+
+  if (direction == GTK_DIR_TAB_FORWARD || direction == GTK_DIR_TAB_BACKWARD)
+    g_signal_emit (self, view_signals[SIG_FOCUS_ADVANCE], 0,
+                   direction == GTK_DIR_TAB_FORWARD);
+
+  return TRUE;
+}
+
+void
+chromium_view_advance_page_focus (ChromiumView *self, gboolean forward)
+{
+  g_return_if_fail (CHROMIUM_IS_VIEW (self));
+
+  g_signal_emit (self, view_signals[SIG_FOCUS_ADVANCE], 0, forward);
+}
+
+void
+chromium_view_release_chain_focus (ChromiumView *self, gboolean forward)
+{
+  g_return_if_fail (CHROMIUM_IS_VIEW (self));
+
+  /* The walk only continues from here if this view really holds it. A
+   * take-focus that arrives after GTK already moved on is stale. */
+  if (!gtk_widget_has_focus (GTK_WIDGET (self)))
+    return;
+
+  self->focus_guard = TRUE;
+  g_signal_emit_by_name (self, "move-focus",
+                         forward ? GTK_DIR_TAB_FORWARD : GTK_DIR_TAB_BACKWARD);
+  /* Every way the walk can end — another widget takes the focus, focus is
+   * cleared, or the guard above declines a return to us — has already run
+   * inside that emission; this only sweeps a guard that somehow survived. */
+  self->focus_guard = FALSE;
+}
+
 static void
 chromium_view_dispose (GObject *object)
 {
@@ -1053,6 +1153,24 @@ chromium_view_class_init (ChromiumViewClass *klass)
   widget_class->measure = chromium_view_measure;
   widget_class->snapshot = chromium_view_snapshot;
   widget_class->size_allocate = chromium_view_size_allocate;
+  widget_class->focus = chromium_view_focus;
+
+  /**
+   * ChromiumView::focus-advance:
+   * @self: the view
+   * @forward: %TRUE to advance like Tab, %FALSE like Shift+Tab
+   *
+   * The view entered the focus chain, or a host asked for a step: the
+   * page's own traversal should move by one, which lands on its first
+   * (backwards: last) focusable element when nothing in it is focused
+   * yet. The session forwards this to the helper as a focus-advance
+   * command; a step past the edge of the page comes back the other way
+   * as a take-focus event.
+   */
+  view_signals[SIG_FOCUS_ADVANCE] =
+    g_signal_new ("focus-advance", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+                  G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
 
   gtk_widget_class_set_css_name (widget_class, "chromiumview");
 }
