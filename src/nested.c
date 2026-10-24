@@ -631,7 +631,6 @@ copy_pool_rect (Buffer *buffer, NestedSurface *self, GdkRectangle rect)
   int y = MAX (rect.y, 0);
   int width = MIN (rect.width, buffer->width - x);
   int height = MIN (rect.height, buffer->height - y);
-  uint32_t *shadow_word;
   int row;
 
   if (width <= 0 || height <= 0)
@@ -663,13 +662,6 @@ copy_pool_rect (Buffer *buffer, NestedSurface *self, GdkRectangle rect)
                           self->shm_shadow + dst))
             return;
         }
-
-      if (buffer->format == WL_SHM_FORMAT_XRGB8888)
-        {
-          shadow_word = (uint32_t *) (self->shm_shadow + dst);
-          for (int i = 0; i < width; i++)
-            shadow_word[i] |= 0xff000000u;
-        }
     }
 }
 
@@ -685,7 +677,15 @@ buffer_create_shm_texture (Buffer *buffer, NestedSurface *self)
       buffer->format != WL_SHM_FORMAT_XRGB8888)
     return NULL;
 
-  format = GDK_MEMORY_B8G8R8A8_PREMULTIPLIED;
+  /* wl_shm XRGB8888 leaves the high byte undefined; GDK_MEMORY_B8G8R8X8 is the
+   * format that ignores it outright (both the GL upload, which has no alpha
+   * channel to sample, and the CPU converters, which hardcode opacity), so the
+   * per-pixel |= 0xff000000 pass the ARGB path still needs is simply not
+   * required here. Requires gtk4 >= 4.14 (meson.build guarantees it). */
+  if (buffer->format == WL_SHM_FORMAT_ARGB8888)
+    format = GDK_MEMORY_B8G8R8A8_PREMULTIPLIED;
+  else
+    format = GDK_MEMORY_B8G8R8X8;
 
   if (!self->shm_shadow ||
       self->shm_shadow_len != length ||
@@ -711,16 +711,6 @@ buffer_create_shm_texture (Buffer *buffer, NestedSurface *self)
 
       if (self->nested)
         self->nested->shm_bytes_copied += length;
-
-      if (buffer->format == WL_SHM_FORMAT_XRGB8888)
-        {
-          uint32_t *word = (uint32_t *) self->shm_shadow;
-          size_t count = length / sizeof (uint32_t);
-          size_t i;
-
-          for (i = 0; i < count; i++)
-            word[i] |= 0xff000000u;
-        }
     }
   else if (self->shm_damage_valid)
     copy_pool_rect (buffer, self, self->shm_damage);
