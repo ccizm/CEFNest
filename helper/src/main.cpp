@@ -557,16 +557,26 @@ class Control {
     for (;;) {
       const ssize_t n = ::read(fd, chunk, sizeof(chunk));
       if (n > 0) {
-        buffer.append(chunk, static_cast<size_t>(n));
+        // Leftover bytes hold no newline — every complete line was taken before
+        // the last read — so only what this chunk added needs scanning, and the
+        // consumed lines are cut out by index with the tail moved once per
+        // chunk. erase() per line memmoves everything after it at every
+        // line-sized step of a long command.
+        std::string::size_type scan = buffer.size();
+        std::string::size_type head = 0;
         std::string::size_type newline;
-        while ((newline = buffer.find('\n')) != std::string::npos) {
-          std::string line = buffer.substr(0, newline);
-          buffer.erase(0, newline + 1);
+        buffer.append(chunk, static_cast<size_t>(n));
+        while ((newline = buffer.find('\n', scan)) != std::string::npos) {
+          std::string line = buffer.substr(head, newline - head);
+          head = newline + 1;
+          scan = head;
           if (!line.empty() && line.back() == '\r')
             line.pop_back();
           if (!line.empty())
             CefPostTask(TID_UI, new CommandTask(std::move(line)));
         }
+        if (head > 0)
+          buffer.erase(0, head);
         if (buffer.size() > (1U << 20)) {
           fprintf(stderr, "helper: command line exceeded 1 MiB, discarding\n");
           buffer.clear();

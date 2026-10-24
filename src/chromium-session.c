@@ -721,34 +721,50 @@ line_arrived (ChromiumSession *self, const char *line, gsize length)
 static gboolean
 feed_control_bytes (ChromiumSession *self, const guint8 *data, gsize length)
 {
-  g_string_append_len (self->line_pending, (const char *) data, length);
+  GString *pending = self->line_pending;
+  /* Leftover bytes hold no newline — every complete line was taken before the
+   * last return — so only what this chunk added needs scanning, and the
+   * consumed lines are cut out by index with the tail moved once per chunk.
+   * Erasing per line made a long js-result arriving in 4 KiB reads pay a full
+   * memmove of everything after it at every line-sized step. */
+  gsize scan = pending->len;
+  gsize head = 0;
+
+  g_string_append_len (pending, (const char *) data, length);
 
   for (;;)
     {
-      const char *nl = memchr (self->line_pending->str, '\n', self->line_pending->len);
+      const char *nl = memchr (pending->str + scan, '\n', pending->len - scan);
       g_autofree char *line = NULL;
-      gsize consumed;
+      gsize end;
 
       if (!nl)
         break;
 
-      consumed = (gsize) (nl - self->line_pending->str);
-      line = g_strndup (self->line_pending->str, consumed);
-      g_string_erase (self->line_pending, 0, consumed + 1);
-      line_arrived (self, line, consumed);
+      end = (gsize) (nl - pending->str);
+      line = g_strndup (pending->str + head, end - head);
+      line_arrived (self, line, end - head);
 
       /* handle_event() can close the channel from under this — a "shutdown"
        * event, or anything it sends that fails — so the buffer it owns cannot be
-       * touched again without asking whether it is still there. */
+       * touched again without asking whether it is still there. It cannot be
+       * *replaced* here: attach_connection() runs only from the accept callback,
+       * which refuses a second connection while this one is being read. */
       if (!self->line_pending)
         return TRUE;
+
+      head = end + 1;
+      scan = head;
     }
 
-  if (self->line_pending->len > CONTROL_LINE_MAX)
+  if (head > 0)
+    g_string_erase (pending, 0, head);
+
+  if (pending->len > CONTROL_LINE_MAX)
     {
       g_warning ("session: %zu bytes with no newline, over the %u byte ceiling: "
                  "the helper is not framing control events",
-                 self->line_pending->len, CONTROL_LINE_MAX);
+                 pending->len, CONTROL_LINE_MAX);
       return FALSE;
     }
 
