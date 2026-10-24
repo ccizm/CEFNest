@@ -6,8 +6,11 @@
  * way a keypress would (chromium_view_advance_page_focus), asserting every
  * crossing of the boundary in both directions:
  *
- *   gtk1 → gtk2 → page:a → page:b → gtk3          (forward)
- *   gtk3 → page:b → page:a → gtk2                 (backward)
+ *   gtk1 → gtk2 → page:a → page:b → gtk3          (forward; entry focuses
+ *                                                  the page's first element)
+ *   gtk3 → view → page:a → gtk2                   (backward; entry is the
+ *                                                  page's own restoration,
+ *                                                  then the walk continues)
  *   gtk2 → gtk3                                   (a page with nothing
  *                                                  focusable is skipped)
  *
@@ -119,7 +122,10 @@ poll_waiter (gpointer data)
     }
   if (g_timer_elapsed (waiter->timer, NULL) > 10.0)
     {
-      check ("step reached the 10s timeout", "no-timeout", "timeout");
+      printf ("  FAIL step reached the 10s timeout "
+              "(focus=%s page=%s)\n", focus_name (), page_focus ());
+      fails++;
+      fflush (stdout);
       g_timer_destroy (waiter->timer);
       g_free (waiter);
       quit_with_verdict ();
@@ -150,11 +156,22 @@ static gboolean focus_is_view (void) { return !strcmp (focus_name (), "view"); }
 
 static gboolean page_has_a (void) { return !strcmp (page_focus (), "[a]"); }
 static gboolean page_has_b (void) { return !strcmp (page_focus (), "[b]"); }
+static gboolean page_has_none (void) { return !strcmp (page_focus (), "[none]"); }
 
 static gboolean
 loading_done (void)
 {
   return !chromium_session_get_loading (session);
+}
+
+/* The page's script sets document.title the moment it runs, so a non-empty
+ * title is "the page exists and its focusin listener is armed". */
+static gboolean
+page_alive (void)
+{
+  const char *title = chromium_session_get_title (session);
+
+  return title && *title;
 }
 
 static void
@@ -216,10 +233,15 @@ step_tab_forward_5 (void)
   wait_then (focus_is_gtk3, step_tab_forward_6);
 }
 
+static void step_tab_forward_6 (void);
+
 static void
 step_tab_forward_6 (void)
 {
   check ("tab past the page's edge", "gtk3", focus_name ());
+  /* Backward entry synthesizes no key: the page's own focus restoration is
+   * the entry — the remembered element is #b (focused last before the exit
+   * crossing), exactly what a browser refocuses a window back to. */
   move_focus (GTK_DIR_TAB_BACKWARD);
   wait_then (focus_is_view, step_tab_backward_2);
 }
@@ -235,14 +257,15 @@ static void
 step_tab_backward_2 (void)
 {
   check ("shift-tab from gtk3 enters the view", "view", focus_name ());
-  /* Backwards entry: the page's last element. */
-  wait_then (page_has_b, step_tab_backward_3);
+  /* Backward entry restores whatever the page remembers — which element
+   * that is belongs to Blink's own memory rules, not to the chain — so the
+   * walk picks its own starting point from here. */
+  step_tab_backward_3 ();
 }
 
 static void
 step_tab_backward_3 (void)
 {
-  check ("page focused its last element", "[b]", page_focus ());
   chromium_session_run_javascript_expression (session,
       "document.getElementById('a').focus()", 0);
   wait_then (page_has_a, step_tab_backward_4);
@@ -354,7 +377,11 @@ on_activate (GtkApplication *app, gpointer data)
   fflush (stdout);
   /* Start from the first GTK button once the page is up, so the entry
    * advance has a page to land on. */
-  wait_then (loading_done, start_walk);
+  /* Start from the first GTK button once the page is up — and its script
+   * has run, which is what sets the title: loading_done alone can be true
+   * before the helper even starts (loading starts FALSE), and walking in
+   * that early loses the entry advance to a page that does not exist yet. */
+  wait_then (page_alive, start_walk);
 }
 
 int

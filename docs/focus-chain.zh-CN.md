@@ -160,7 +160,21 @@ Phase 0–2 已全部落地并验证：
 - **端到端验证**：`examples/focus-chain.c`（gtk 按钮×3 + 页面按钮×2，
   自驱动自断言，含空页面防回环场景）11 项断言全绿：
   `gtk1→gtk2→页a→页b→gtk3` 正向全通、反向全通、空页面被焦点链跳过。
-- 控制通道协议文档（`docs/control-channel*.md`）已补两个消息。
+- 控制通道协议文档（`docs/control-channel*.md`）已补 `take-focus` 事件与
+  `view-source-*`/`view-source`（后者见独立的源码窗口方案）。
+- **修订（2026-10-25 深夜，两次）**：
+  1. 入向推进从「helper 侧 `CefBrowserHost::SendKeyEvent` + `focus-advance`
+     命令」改为 **compositor 键盘路径**（新 API
+     `nested_compositor_advance_focus_key()`，view 直接调用）：合成键与入链
+     时的 `wl_keyboard.enter` 必须同 socket 保序，控制通道版本会与 enter
+     在 Chromium 内部乱序。`focus-advance` 命令与 `::focus-advance` 信号
+     已随之移除。
+  2. **反向进入不再合成键**——实测 Blink 的"从 body 反向遍历"是直接退出
+     （Chrome 对空白页按 Shift+Tab 即跳地址栏），合成 Shift+Tab 必然弹出。
+     反向进入交给页面自身的**焦点恢复**（Chromium 重聚焦时恢复上次聚焦
+     元素，恰是浏览器语义"回到上次的位置"）；无记忆的页面则文档聚焦、
+     下一次 Shift+Tab 经 take-focus 交还 GTK。正向进入仍合成 Tab
+     （body 正向 = 首元素，确定性成立）。示例的反向断言即按恢复语义写。
 
 尚未做（原 Phase 3）：方向键 keynav 的 UP/LEFT≈backward、DOWN/RIGHT≈forward
 映射（当前方向键进入只抓焦点不推进）；单 focusable 退化场景的"页内回绕"

@@ -212,6 +212,12 @@ void              nested_compositor_notify_pointer_axis   (NestedCompositor *sel
 void              nested_compositor_notify_keyboard_key   (NestedCompositor *self,
                                                            uint32_t evdev_code,
                                                            gboolean pressed);
+/* One Tab (Shift+Tab) into the client that holds the keyboard: the focus
+ * chain's entry step, ordered after the wl_keyboard.enter of the same entry
+ * by travelling the same socket. Nothing is sent when no client holds the
+ * keyboard. */
+void              nested_compositor_advance_focus_key    (NestedCompositor *self,
+                                                          gboolean forward);
 
 /* Cursor identity. A client names the pointer it wants: wp_cursor_shape_manager
  * carries the CSS shapes a web page asks for, wl_pointer.set_cursor the image

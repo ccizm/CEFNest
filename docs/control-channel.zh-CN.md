@@ -40,7 +40,6 @@
 | `download-pause` / `download-resume` | `id` | 只对已经拿到 item 回调的下载有效 |
 | `find` | `pattern`、`forward`、`match_case`、`next` | 不返回 ack，结果以 `find-result` 事件送达 |
 | `find-stop` | `clear`（默认为 true） | 结束查找并清除高亮 |
-| `focus-advance` | `forward`（默认 true） | 对激活的浏览器做一步页面自身的 Tab（Shift+Tab）遍历；焦点链进入 view 时由 view 发起，走出页面边缘的应答以 `take-focus` 事件返回 |
 | `context-menu-select` | `id`、`flags`（可选） | 应答 `context-menu`；helper 一次只保留一个请求 |
 | `context-menu-dismiss` | — | 关闭菜单，不选择任何项 |
 | `permission-respond` | `id`、`result`（`accept`/`deny`/`dismiss`） | 应答 `permission-request`；media 的 `accept` 必须授予整个权限掩码 |

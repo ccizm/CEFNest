@@ -985,3 +985,42 @@ nested_compositor_notify_keyboard_key (NestedCompositor *self, uint32_t evdev_co
 
   nested_flush (self);
 }
+
+/* One Tab (Shift+Tab) synthesized into the page that holds the keyboard —
+ * the focus chain's entry step. Going through the compositor's own keyboard
+ * path rather than a CefBrowserHost::SendKeyEvent from the helper is what
+ * orders the key after the wl_keyboard.enter of the same entry: both travel
+ * the one Wayland socket, so Chromium can never apply the traversal key to
+ * a document it has not focused yet. Measured on the control-channel route:
+ * the Shift+Tab raced the enter, lost, and hit the edge of what the renderer
+ * still considered an unfocused document — handing the walk straight back to
+ * GTK the moment it came in. */
+void
+nested_compositor_advance_focus_key (NestedCompositor *self, gboolean forward)
+{
+  gsize i;
+  gboolean shift_was_down = FALSE;
+
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  if (!self->keyboard_focus || !self->keyboard_wanted)
+    return;
+
+  for (i = 0; i < self->pressed_keys->len; i++)
+    if (g_array_index (self->pressed_keys, uint32_t, i) == 42 /* KEY_LEFTSHIFT */)
+      {
+        shift_was_down = TRUE;
+        break;
+      }
+
+  /* A shift the user is really holding must not be released by the
+   * synthesized step; the xkb state already carries it. */
+  if (!forward && !shift_was_down)
+    nested_compositor_notify_keyboard_key (self, 42, TRUE);
+
+  nested_compositor_notify_keyboard_key (self, 15 /* KEY_TAB */, TRUE);
+  nested_compositor_notify_keyboard_key (self, 15, FALSE);
+
+  if (!forward && !shift_was_down)
+    nested_compositor_notify_keyboard_key (self, 42, FALSE);
+}

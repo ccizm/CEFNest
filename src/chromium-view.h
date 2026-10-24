@@ -21,11 +21,14 @@ ChromiumView     *chromium_view_new_shared       (NestedCompositor *compositor,
                                                   NestedSurface *target);
 void              chromium_view_set_target_surface (ChromiumView *self,
                                                     NestedSurface *target);
-/* One step of the page's own focus traversal — entering the view from the
- * focus chain does this once so the page's first (backwards: last) focusable
- * element takes focus immediately. A step that runs past the edge of the
- * document is reported by the page and comes back to the host as
- * chromium_view_release_chain_focus() instead. */
+/* One step of the page's own focus traversal, delivered through the
+ * compositor's keyboard path. Entering the view forward from the focus
+ * chain does this once so the page's first focusable element takes focus
+ * immediately; backward entry synthesizes nothing and lets the page's own
+ * focus restoration be the entry (a real Shift+Tab from an unfocused
+ * document hands the walk back out — the browser behaviour). A step that
+ * runs past the edge of the document is reported by the page and comes
+ * back to the host as chromium_view_release_chain_focus() instead. */
 void              chromium_view_advance_page_focus (ChromiumView *self,
                                                     gboolean forward);
 /* Hands the keyboard focus back to the GTK chain, to the widget after

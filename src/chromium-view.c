@@ -59,13 +59,6 @@ struct _ChromiumView {
 
 G_DEFINE_TYPE (ChromiumView, chromium_view, GTK_TYPE_WIDGET)
 
-enum {
-  SIG_FOCUS_ADVANCE,
-  N_VIEW_SIGNALS
-};
-
-static guint view_signals[N_VIEW_SIGNALS];
-
 static void
 chromium_view_measure (GtkWidget *widget,
                        GtkOrientation orientation,
@@ -913,9 +906,19 @@ chromium_view_focus (GtkWidget *widget, GtkDirectionType direction)
   if (!GTK_WIDGET_CLASS (chromium_view_parent_class)->focus (widget, direction))
     return FALSE;
 
-  if (direction == GTK_DIR_TAB_FORWARD || direction == GTK_DIR_TAB_BACKWARD)
-    g_signal_emit (self, view_signals[SIG_FOCUS_ADVANCE], 0,
-                   direction == GTK_DIR_TAB_FORWARD);
+  /* Entering by the chain is one Tab's worth of the page's own traversal,
+   * through the compositor's keyboard path so it lands after the
+   * wl_keyboard.enter of this very entry: forward entry focuses the page's
+   * first element instead of the first press doing nothing. Backward entry
+   * synthesizes nothing — a real Shift+Tab from an unfocused document hands
+   * the walk straight back out, which is what a browser does too, so the
+   * page's own focus restoration (the remembered element, what a browser
+   * refocuses a window back to) is the backward entry, and a page that
+   * remembers nothing simply takes the next press back to GTK. Clicking
+   * enters differently, via grab_focus, not here, and focuses what was
+   * clicked. */
+  if (direction == GTK_DIR_TAB_FORWARD)
+    chromium_view_advance_page_focus (self, TRUE);
 
   return TRUE;
 }
@@ -925,7 +928,8 @@ chromium_view_advance_page_focus (ChromiumView *self, gboolean forward)
 {
   g_return_if_fail (CHROMIUM_IS_VIEW (self));
 
-  g_signal_emit (self, view_signals[SIG_FOCUS_ADVANCE], 0, forward);
+  if (self->compositor)
+    nested_compositor_advance_focus_key (self->compositor, forward);
 }
 
 void
@@ -1154,23 +1158,6 @@ chromium_view_class_init (ChromiumViewClass *klass)
   widget_class->snapshot = chromium_view_snapshot;
   widget_class->size_allocate = chromium_view_size_allocate;
   widget_class->focus = chromium_view_focus;
-
-  /**
-   * ChromiumView::focus-advance:
-   * @self: the view
-   * @forward: %TRUE to advance like Tab, %FALSE like Shift+Tab
-   *
-   * The view entered the focus chain, or a host asked for a step: the
-   * page's own traversal should move by one, which lands on its first
-   * (backwards: last) focusable element when nothing in it is focused
-   * yet. The session forwards this to the helper as a focus-advance
-   * command; a step past the edge of the page comes back the other way
-   * as a take-focus event.
-   */
-  view_signals[SIG_FOCUS_ADVANCE] =
-    g_signal_new ("focus-advance", G_TYPE_FROM_CLASS (klass),
-                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
-                  G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
 
   gtk_widget_class_set_css_name (widget_class, "chromiumview");
 }
