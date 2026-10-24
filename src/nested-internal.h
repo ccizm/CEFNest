@@ -320,6 +320,18 @@ struct _NestedCompositor {
   GArray *pressed_keys;      /* uint32_t evdev codes */
   NestedSurface *pointer_focus;
   NestedSurface *keyboard_focus;
+  /* seat_retarget fast-path bookkeeping (nested-seat.c): what the last full
+   * retarget saw. tree_generation moves on every surface-tree change, popup
+   * grab change and popup reposition, so equality with
+   * retarget_tree_generation plus unchanged inputs and a pointer still inside
+   * the focused surface proves a full recomputation would return exactly the
+   * focuses already in place. */
+  guint tree_generation;
+  guint retarget_tree_generation;
+  NestedSurface *retarget_input_surface;
+  unsigned int retarget_pointer_wanted : 1;
+  unsigned int retarget_keyboard_wanted : 1;
+  unsigned int retarget_drag_active : 1;
   /* The window the widget draws its pointer in: whatever a client asks the
    * cursor to be, it is set on this GdkSurface. NULL until the view maps. */
   GdkSurface *cursor_target;

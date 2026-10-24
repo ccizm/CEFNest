@@ -2249,6 +2249,10 @@ nested_surfaces_changed (NestedCompositor *self)
   if (self->disposing)
     return;
 
+  /* Bump before the retarget: the seat's fast path reads the generation to
+   * prove its cached focuses still match the tree, so the change has to be
+   * visible to the full walk this triggers. */
+  self->tree_generation++;
   seat_retarget (self);
   g_signal_emit (self, signals[SIGNAL_FRAME], 0);
 }
@@ -2457,6 +2461,7 @@ nested_compositor_dispose (GObject *object)
   g_clear_object (&self->input_surface);
   g_clear_object (&self->pointer_focus);
   g_clear_object (&self->keyboard_focus);
+  g_clear_object (&self->retarget_input_surface);
   g_clear_object (&self->cursor_pending);
   g_clear_object (&self->cursor_target);
   g_clear_pointer (&self->socket_name, g_free);

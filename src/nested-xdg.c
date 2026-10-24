@@ -324,10 +324,23 @@ xdg_popup_replace (NestedSurface *self)
   /* The popup's own window geometry is what sits at that point, so the surface
    * itself starts a geometry offset earlier. The difference is formed in
    * gint64 and clamped where it becomes the int the paint path reads. */
-  self->popup_x = (int) CLAMP (x - self->geom_x,
-                               (gint64) G_MININT, (gint64) G_MAXINT);
-  self->popup_y = (int) CLAMP (y - self->geom_y,
-                               (gint64) G_MININT, (gint64) G_MAXINT);
+  {
+    int placed_x = (int) CLAMP (x - self->geom_x,
+                                (gint64) G_MININT, (gint64) G_MAXINT);
+    int placed_y = (int) CLAMP (y - self->geom_y,
+                                (gint64) G_MININT, (gint64) G_MAXINT);
+
+    if (self->popup_x != placed_x || self->popup_y != placed_y)
+      {
+        self->popup_x = placed_x;
+        self->popup_y = placed_y;
+
+        /* The seat's hit test reads this position live; a popup that moved
+         * under a stationary pointer is news the fast path must not hide. */
+        if (self->nested)
+          self->nested->tree_generation++;
+      }
+  }
 
   g_debug ("nested: popup %dx%d placed at %d,%d over %dx%d of its parent",
            width, height, self->popup_x, self->popup_y, box_width, box_height);
@@ -377,6 +390,7 @@ void
 xdg_popups_dismiss (NestedCompositor *self, NestedSurface *keep)
 {
   NestedSurface *surface;
+  gboolean dismissed = FALSE;
 
   wl_list_for_each (surface, &self->surfaces, nested_link)
     {
@@ -396,8 +410,15 @@ xdg_popups_dismiss (NestedCompositor *self, NestedSurface *keep)
         continue;
 
       surface->popup_grabbed = FALSE;
+      dismissed = TRUE;
       xdg_popup_send_popup_done (surface->popup);
     }
+
+  /* The grab is seat state the tree generation cannot see: clear it on a
+   * surface that stays mapped and the retarget fast path would keep the keys
+   * on the popup the client just dismissed. */
+  if (dismissed)
+    self->tree_generation++;
 
   nested_flush (self);
 }

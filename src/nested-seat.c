@@ -364,6 +364,34 @@ keyboard_send_leave (NestedCompositor *self, struct wl_resource *keyboard,
 void
 seat_retarget (NestedCompositor *self)
 {
+  /* Fast path: motion runs this per event, and the full walk below builds two
+   * paint stacks and flushes. Every surface-tree change, popup grab change and
+   * popup reposition moves tree_generation, and the other inputs are compared
+   * directly, so if all of them match the last full retarget, the pointer is
+   * still inside the focused surface, and the focuses are still usable, the
+   * recomputation would return exactly what is already in place. */
+  if (self->retarget_tree_generation == self->tree_generation &&
+      self->retarget_pointer_wanted == self->pointer_wanted &&
+      self->retarget_keyboard_wanted == self->keyboard_wanted &&
+      self->retarget_drag_active ==
+      (nested_compositor_drag_active (self) ? 1u : 0u) &&
+      (!self->input_surface ||
+       (self->input_surface->mapped && self->input_surface->wl_surface)) &&
+      self->pointer_focus && self->pointer_focus->mapped &&
+      self->pointer_focus->wl_surface)
+    {
+      int left, above;
+
+      nested_surface_get_position (self->pointer_focus, &left, &above);
+      if (self->pointer_x >= left && self->pointer_y >= above &&
+          self->pointer_x < left + self->pointer_focus->width &&
+          self->pointer_y < above + self->pointer_focus->height &&
+          (!self->keyboard_wanted ||
+           (self->keyboard_focus && self->keyboard_focus->mapped &&
+            self->keyboard_focus->wl_surface)))
+        return;
+    }
+
   /* The pointer belongs to whichever painted surface is under it: a menu drawn
    * over the page takes it, and the page gets it back the moment the pointer
    * steps off the menu. A drag is the exception: while it holds the pointer the
@@ -460,6 +488,15 @@ seat_retarget (NestedCompositor *self)
   /* Text input follows the keyboard: the client that owns the focused surface
    * is the one whose caret the widget composes into. */
   text_input_retarget (self, self->keyboard_focus);
+
+  /* Record what this full walk saw, so the fast path can prove later calls
+   * redundant until the tree or the inputs move again. */
+  self->retarget_tree_generation = self->tree_generation;
+  g_set_object (&self->retarget_input_surface, self->input_surface);
+  self->retarget_pointer_wanted = self->pointer_wanted;
+  self->retarget_keyboard_wanted = self->keyboard_wanted;
+  self->retarget_drag_active =
+    nested_compositor_drag_active (self) ? 1u : 0u;
 
   nested_flush (self);
 }
