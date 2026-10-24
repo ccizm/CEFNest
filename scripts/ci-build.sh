@@ -129,7 +129,7 @@ CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION)
 | 文件 | 说明 |
 | --- | --- |
 | cefnest-build.tar.gz | 构建树：\`src/\`（\`libcefnest.so\`、\`.so.0\`、\`.so.$PACKAGE_VERSION\`、\`cefnest-demo\`）、\`examples/\`（$EXAMPLE_COUNT 个示例）、\`test/\`（\`shm-client\`、\`seat-selftest\`）。解包后保持这三层目录，二进制会用自身的 \`\$ORIGIN\` rpath 找到同批的库。**不含 helper、不含 CEF 运行时**：装 \`cefnest\` 后，\`src/cefnest-demo\` 会直接找到安装位置里的 helper |
-| cefnest_${V}_amd64.deb | GTK 4 组件库：\`libcefnest.so.0\` + \`cefnest-helper\` + 完整 CEF 运行时（安装后约 1.5 GB） |
+| cefnest_${V}_amd64.deb | GTK 4 组件库：\`libcefnest.so.0\` + \`cefnest-helper\` + 完整 CEF 运行时，运行时已 strip（安装后约 350 MB） |
 | cefnest-dev_${V}_amd64.deb | 开发文件：三个头文件、链接用 \`.so\`、\`cefnest.pc\` |
 | cefnest-$V.x86_64.rpm | GTK 4 组件库（rpm） |
 | cefnest-devel-$V.x86_64.rpm | 开发文件（rpm） |
@@ -166,7 +166,7 @@ from 154.0.34-6.
 | File | Description |
 | --- | --- |
 | cefnest-build.tar.gz | Build tree: \`src/\` (\`libcefnest.so\`, \`.so.0\`, \`.so.$PACKAGE_VERSION\`, \`cefnest-demo\`), \`examples/\` ($EXAMPLE_COUNT examples), \`test/\` (\`shm-client\`, \`seat-selftest\`). Keep the three directories when unpacking — the binaries find this same library through their own \`\$ORIGIN\` rpath. **No helper, no CEF runtime**: after installing \`cefnest\`, \`src/cefnest-demo\` finds the installed helper directly |
-| cefnest_${V}_amd64.deb | GTK 4 component library: \`libcefnest.so.0\` + \`cefnest-helper\` + complete CEF runtime (~1.5 GB installed) |
+| cefnest_${V}_amd64.deb | GTK 4 component library: \`libcefnest.so.0\` + \`cefnest-helper\` + complete CEF runtime, stripped of debug sections (~350 MB installed) |
 | cefnest-dev_${V}_amd64.deb | Development files: headers, link \`.so\`, \`cefnest.pc\` |
 | cefnest-$V.x86_64.rpm | GTK 4 component library (rpm) |
 | cefnest-devel-$V.x86_64.rpm | Development files (rpm) |

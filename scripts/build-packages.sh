@@ -78,12 +78,48 @@ DEB_DEV_DIR="$ROOT/deb-cefnest-dev"
 # installs two full trees and copies a gigabyte and a half of CEF runtime
 # before it gets there, and finding the tool missing after all of that throws
 # the whole run away.
-for tool in meson ninja dpkg-deb rpmbuild; do
+for tool in meson ninja dpkg-deb rpmbuild strip readelf nm; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "build-packages: $tool not found" >&2
     exit 1
   }
 done
+
+# Trim the CEF runtime's debug sections before anything installs from the
+# source tree: the official minimal distribution ships unstripped (DWARF is
+# embedded in the .so by official builds), which is 1.1 GB of disk nobody at
+# runtime ever maps. Every meson tree below installs this directory through
+# install_subdir at install time, so one strip here covers the deb, the rpm
+# and any local packaging run. It has to happen before the cp -al
+# hard-linking below: from that point the package trees share inodes with
+# this directory, and stripping "one side" later would rewrite both packages.
+# An unstripped copy always comes back with scripts/fetch-cef.sh (SHA-pinned)
+# when a crash needs symbols.
+REL="$ROOT/helper/build/Release"
+if [ -d "$REL" ]; then
+  for f in libcef.so libvk_swiftshader.so libvulkan.so.1 cefnest-helper; do
+    if [ -f "$REL/$f" ]; then
+      strip --strip-unneeded "$REL/$f"
+      # A broken strip (wrong-arch binutils, truncated file) would otherwise
+      # ship a library that dlopens into nothing. Dynamic symbols must
+      # survive: cef_* is what the helper links against.
+      n=$(readelf -S "$REL/$f" | grep -c '\.debug_' || true)
+      [ "$n" -eq 0 ] || {
+        echo "build-packages: $REL/$f still has $n debug section(s) after strip" >&2
+        exit 1
+      }
+      case "$f" in
+        libcef.so)
+          n=$(nm -D --defined-only "$REL/$f" | grep -c ' cef_' || true)
+          [ "$n" -gt 200 ] || {
+            echo "build-packages: $REL/$f kept only $n cef_* exports after strip" >&2
+            exit 1
+          }
+          ;;
+      esac
+    fi
+  done
+fi
 
 rm -rf "$DIST" "$BUILD_DEB" "$BUILD_RPM" "$PKG_DEB" "$PKG_RPM" "$RPMBUILD" \
        "$DEB_MAIN_DIR" "$DEB_DEV_DIR"
@@ -115,7 +151,7 @@ cp -a "$PKG_DEB/usr/lib/$MULTIARCH"/libcefnest.so.* \
 printf 'libcefnest 0 cefnest (>= %s-%s)\n' "$VERSION" "$RELEASE" \
   > "$DEB_MAIN_DIR/DEBIAN/shlibs"
 
-# The helper tree is 1.5 GB. Hard-link it into the package directory instead of
+# The helper tree is the bulk of the package. Hard-link it into the package directory instead of
 # copying it: dpkg-deb only reads these files, and the RPM tree below gets the
 # same treatment.
 cp -al "$PKG_DEB/usr/libexec/cefnest/$HELPER_ARCH" \
@@ -237,8 +273,8 @@ GTK application composite a page rendered by Chromium. The component installs
 system-wide as libcefnest.so.0, so a host links it like any other GTK 4
 library; cefnest-dev adds the headers and the pkg-config file. This package
 also carries cefnest-helper and the CEF $CEF_VERSION runtime the helper loads
-from its own directory. Built for Chromium $CHROMIUM_VERSION; about 1.5 GB
-installed.
+from its own directory. Built for Chromium $CHROMIUM_VERSION; about
+350 MB installed — the CEF runtime ships stripped of debug sections.
 
 Renderer sandboxing is ON by default, and chrome-sandbox is installed 0755:
 this package installs no setuid root helper. Chromium's sandbox needs
@@ -296,7 +332,7 @@ meson setup "$BUILD_RPM" \
 ninja -C "$BUILD_RPM"
 DESTDIR="$PKG_RPM" ninja -C "$BUILD_RPM" install
 
-# meson install copied the 1.5 GB helper twice. Replace the RPM copy with hard
+# meson install copied the whole helper tree twice. Replace the RPM copy with hard
 # links to the Debian tree; the files are identical and both trees live in the
 # same workspace.
 rm -rf "$PKG_RPM/usr/libexec/cefnest/$HELPER_ARCH"
@@ -350,7 +386,8 @@ GTK application composite a page rendered by Chromium. The component installs
 system-wide as libcefnest.so.0; the devel package adds the headers and the
 pkg-config file. This package also carries cefnest-helper and the CEF
 $CEF_VERSION runtime the helper loads from its own directory. Built for
-Chromium $CHROMIUM_VERSION; about 1.5 GB installed.
+Chromium $CHROMIUM_VERSION; about 350 MB installed — the CEF runtime
+ships stripped of debug sections.
 
 Renderer sandboxing is ON by default and chrome-sandbox is installed 0755:
 this package installs no setuid root helper. Chromium's sandbox needs
