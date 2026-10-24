@@ -1559,6 +1559,29 @@ menu_button_clicked (GtkButton *button, gpointer data)
   chromium_session_context_menu_select (self, command);
 }
 
+/* The popover mapped with a real size — the fact test/menu-gate.sh asserts.
+ * An idle scheduled from map: map comes before the popover's allocation
+ * (measured 0x0 at map), and the idle reads it once the popup has finished
+ * presenting. One log line, no timer left behind. */
+static void
+menu_report_mapped_size (gpointer data)
+{
+  GtkWidget *popover = data;
+
+  if (GTK_IS_WIDGET (popover))
+    g_debug ("session: context menu mapped=%d size=%dx%d",
+             gtk_widget_get_mapped (popover),
+             gtk_widget_get_width (popover), gtk_widget_get_height (popover));
+
+  g_object_unref (popover);
+}
+
+static void
+menu_popover_mapped (GtkWidget *popover, gpointer data)
+{
+  g_idle_add_once (menu_report_mapped_size, g_object_ref (popover));
+}
+
 static void
 session_menu_show (ChromiumSession *self, int x, int y, GList *items)
 {
@@ -1694,6 +1717,7 @@ session_menu_show (ChromiumSession *self, int x, int y, GList *items)
   gtk_popover_present (GTK_POPOVER (popover));
 
   g_signal_connect (popover, "closed", G_CALLBACK (menu_popover_closed), self);
+  g_signal_connect (popover, "map", G_CALLBACK (menu_popover_mapped), NULL);
 
   menu_install_guards (self);
   gtk_popover_popup (GTK_POPOVER (popover));
