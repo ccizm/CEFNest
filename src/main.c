@@ -3219,6 +3219,17 @@ static gboolean
 frame_metrics_tick (gpointer data)
 {
   g_printerr ("demo: frame-count %" G_GUINT64_FORMAT "\n", demo_frame_count ());
+  if (demo.session)
+    {
+      guint64 shm_commits, dmabuf_commits, copied, wrapped;
+
+      chromium_session_get_commit_stats (demo.session, &shm_commits,
+                                         &dmabuf_commits, &copied, &wrapped);
+      g_printerr ("demo: commits shm=%" G_GUINT64_FORMAT " dmabuf=%"
+                  G_GUINT64_FORMAT " copied=%" G_GUINT64_FORMAT
+                  " wrapped=%" G_GUINT64_FORMAT "\n",
+                  shm_commits, dmabuf_commits, copied, wrapped);
+    }
   return G_SOURCE_CONTINUE;
 }
 

@@ -61,6 +61,8 @@
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include <sys/time.h>
+
 #include "cursor-shape-client-protocol.h"
 #include "fractional-scale-client-protocol.h"
 #include "linux-dmabuf-client-protocol.h"
@@ -132,6 +134,12 @@ static struct wp_cursor_shape_device_v1 *cursor_shape_device;
 
 static struct gbm_device *gbm;
 static int use_dmabuf;
+/* --perf-frames=N: paint exactly N animated frames, then report one
+ * "client: perf ..." line and exit 0. The selftest's --perf step drives the
+ * compositor's commit counters through this and reads them back with
+ * nested_compositor_get_commit_stats(); N frames of the ordinary animation
+ * loop are the load, and the line is only the client-side timestamp bookend. */
+static unsigned int perf_frames_target;
 static int use_fullscreen, fs_enter_sent, fs_exit_sent;
 static int dmabuf_failed;
 
@@ -900,6 +908,20 @@ static void
 frame_done (void *data, struct wl_callback *callback, uint32_t time)
 {
   wl_callback_destroy (callback);
+
+  /* Out here at the top rather than inside draw(): this callback fires when
+   * the compositor presented the frame before the one this draw will send, so
+   * leaving on it means every counted commit was pulled and displayed — the
+   * exact number the selftest's --perf gate grades the counters against. */
+  if (perf_frames_target && frames >= perf_frames_target)
+    {
+      struct timeval tv;
+      gettimeofday (&tv, NULL);
+      fprintf (stderr, "client: perf %u frames %.3fs wall\n",
+               frames, tv.tv_sec + tv.tv_usec / 1e6);
+      fflush (stderr);
+      exit (0);
+    }
 
   if (resize_pending)
     {
@@ -4885,6 +4907,8 @@ main (int argc, char *argv[])
         use_drag_fake_serial = 1;
       else if (!strcmp (argv[i], "--second-window"))
         use_second_window = 1;
+      else if (!strncmp (argv[i], "--perf-frames=", 14))
+        perf_frames_target = (unsigned int) atoi (argv[i] + 14);
       else
         fprintf (stderr, "client: ignoring unknown argument '%s'\n", argv[i]);
     }

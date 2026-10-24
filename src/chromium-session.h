@@ -33,6 +33,13 @@ void               chromium_session_set_accessibility (ChromiumSession *self,
  * presented since the session started. It is a counter, not a rate; sample it
  * from a timer if a host wants a graph. */
 uint64_t           chromium_session_get_frame_count (ChromiumSession *self);
+/* The same counters nested_compositor_get_commit_stats() exposes, for hosts
+ * that only hold the session. Any out parameter may be NULL. */
+void               chromium_session_get_commit_stats (ChromiumSession *self,
+                                                      guint64 *shm_commits,
+                                                      guint64 *dmabuf_commits,
+                                                      guint64 *shm_bytes_copied,
+                                                      guint64 *shm_bytes_wrapped);
 
 /* One helper can host several browsers. The first one is started by
  * chromium_session_start(); these create further browsers in the same helper.

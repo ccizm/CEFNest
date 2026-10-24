@@ -121,6 +121,16 @@ void              nested_compositor_set_frame_clock (NestedCompositor *self,
                                                      GdkFrameClock *clock);
 NestedSurface    *nested_compositor_get_surface     (NestedCompositor *self);
 uint64_t          nested_compositor_get_frame_count (NestedCompositor *self);
+/* Cumulative commit accounting since the compositor was created. shm_commits
+ * and dmabuf_commits count the commits that displayed a buffer on each path;
+ * shm_bytes_copied is the pool -> shadow traffic (damage rectangles and full
+ * reads) and shm_bytes_wrapped the full-frame bytes each shm commit hands to
+ * gdk_memory_texture_new(). Any out parameter may be NULL. */
+void              nested_compositor_get_commit_stats (NestedCompositor *self,
+                                                      guint64 *shm_commits,
+                                                      guint64 *dmabuf_commits,
+                                                      guint64 *shm_bytes_copied,
+                                                      guint64 *shm_bytes_wrapped);
 /* Everything the widget has to draw, bottommost first: the primary toplevel
  * and the popups placed over it. Each entry is a reference the caller owns, so
  * release the list with g_list_free_full (list, g_object_unref). Surfaces that

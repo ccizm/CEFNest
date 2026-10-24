@@ -641,6 +641,9 @@ copy_pool_rect (Buffer *buffer, NestedSurface *self, GdkRectangle rect)
    * and every row below then takes the pread branch of its own accord. */
   pool_map_is_whole (buffer->pool);
 
+  if (self->nested)
+    self->nested->shm_bytes_copied += (uint64_t) width * height * 4;
+
   for (row = 0; row < height; row++)
     {
       size_t src = (size_t) buffer->offset +
@@ -706,6 +709,9 @@ buffer_create_shm_texture (Buffer *buffer, NestedSurface *self)
       if (!read_pool (buffer->pool, buffer->offset, length, self->shm_shadow))
         return NULL;
 
+      if (self->nested)
+        self->nested->shm_bytes_copied += length;
+
       if (buffer->format == WL_SHM_FORMAT_XRGB8888)
         {
           uint32_t *word = (uint32_t *) self->shm_shadow;
@@ -719,6 +725,11 @@ buffer_create_shm_texture (Buffer *buffer, NestedSurface *self)
   else if (self->shm_damage_valid)
     copy_pool_rect (buffer, self, self->shm_damage);
 
+  /* The wrap copies the whole shadow whatever the damage was: this is the
+   * per-commit full-frame memcpy the perf plan is here to measure. */
+  if (self->nested)
+    self->nested->shm_bytes_wrapped += length;
+
   bytes = g_bytes_new (self->shm_shadow, length);
   return gdk_memory_texture_new (buffer->width, buffer->height, format, bytes,
                                  buffer->stride);
@@ -729,8 +740,19 @@ buffer_create_shm_texture (Buffer *buffer, NestedSurface *self)
 static GdkTexture *
 buffer_get_texture (Buffer *buffer, NestedSurface *self)
 {
+  NestedCompositor *nested = self->nested;
+
   if (!buffer->is_dmabuf)
-    return buffer_create_shm_texture (buffer, self);
+    {
+      if (nested)
+        nested->shm_commits++;
+      return buffer_create_shm_texture (buffer, self);
+    }
+
+  /* The dmabuf import itself happened at create time; this counts the commits
+   * that actually display it, which is the number the perf plan needs. */
+  if (nested)
+    nested->dmabuf_commits++;
 
   if (!buffer->texture)
     buffer->texture = buffer_create_dmabuf_texture (buffer);
@@ -2839,6 +2861,25 @@ nested_compositor_get_frame_count (NestedCompositor *self)
 {
   g_return_val_if_fail (NESTED_IS_COMPOSITOR (self), 0);
   return self->frame_count;
+}
+
+void
+nested_compositor_get_commit_stats (NestedCompositor *self,
+                                    guint64 *shm_commits,
+                                    guint64 *dmabuf_commits,
+                                    guint64 *shm_bytes_copied,
+                                    guint64 *shm_bytes_wrapped)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+
+  if (shm_commits)
+    *shm_commits = self->shm_commits;
+  if (dmabuf_commits)
+    *dmabuf_commits = self->dmabuf_commits;
+  if (shm_bytes_copied)
+    *shm_bytes_copied = self->shm_bytes_copied;
+  if (shm_bytes_wrapped)
+    *shm_bytes_wrapped = self->shm_bytes_wrapped;
 }
 
 void

@@ -2261,6 +2261,24 @@ chromium_session_get_frame_count (ChromiumSession *self)
 }
 
 void
+chromium_session_get_commit_stats (ChromiumSession *self,
+                                   guint64 *shm_commits,
+                                   guint64 *dmabuf_commits,
+                                   guint64 *shm_bytes_copied,
+                                   guint64 *shm_bytes_wrapped)
+{
+  NestedCompositor *compositor;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  if (!self->view)
+    return;
+  compositor = chromium_view_get_compositor (self->view);
+  if (compositor)
+    nested_compositor_get_commit_stats (compositor, shm_commits, dmabuf_commits,
+                                        shm_bytes_copied, shm_bytes_wrapped);
+}
+
+void
 chromium_session_set_accessibility (ChromiumSession *self, gboolean enabled)
 {
   g_return_if_fail (CHROMIUM_IS_SESSION (self));

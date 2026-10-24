@@ -93,6 +93,7 @@ typedef enum {
   STEP_SECOND_EXPECT,
   STEP_DAMAGE_SCALE,
   STEP_DRAG_NO_SOURCE,
+  STEP_PERF_REPORT,
   N_STEP_KINDS
 } StepKind;
 
@@ -229,6 +230,17 @@ static const Step second_script[] = {
   { STEP_DUMP,            0,   0,   0 },
 };
 
+/* --perf has no input to send and no picture to judge: the client's own frame
+ * loop is the load, and the only question is what the compositor counted. The
+ * client grades its own run the moment it exits (client_exited), so this settle
+ * is nothing but the watchdog for a client that never finishes — a compositor
+ * that stopped answering frame callbacks would hold it under this line and be
+ * failed by the report below. */
+static const Step perf_script[] = {
+  { STEP_SETTLE,      0, 0, 30000 },
+  { STEP_PERF_REPORT, 0, 0,     0 },
+};
+
 static const char *step_names[N_STEP_KINDS] = {
   "settle", "pointer-enter", "pointer-motion", "keyboard-enter", "keyboard-leave",
   "button-press", "button-release", "axis", "axis-stop", "key-down", "key-up",
@@ -237,7 +249,7 @@ static const char *step_names[N_STEP_KINDS] = {
   "drag-out-back", "drag-out-leave", "drag-out-check", "drag-in",
   "drag-in-motion", "drag-in-second", "drag-in-drop", "drag-in-cancel",
   "drag-in-check", "second-count", "second-route", "second-expect",
-  "damage-scale", "drag-no-source",
+  "damage-scale", "drag-no-source", "perf-report",
 };
 
 #define PREEDIT_TEXT "nihao"
@@ -282,6 +294,13 @@ static gboolean damage_scale_failed;
  * that carried the drag's icon ever reaches the screen again. */
 static gboolean drag_no_source_mode;
 static gboolean drag_no_source_failed;
+/* --perf: the client paints a fixed number of animated frames and exits, and
+ * this process reports what the commit counters made of it. The verdict is
+ * arithmetic, not pixels: the client's --perf-frames line and the counters have
+ * to agree that every frame the client sent was displayed by one path. */
+static gboolean perf_mode;
+static gboolean perf_failed;
+static unsigned perf_frames_target = 120;
 /* Whether the compositor ever held a client frame to draw: a run that ends with
  * none has shown that nothing it was sent reached the screen, and that is not a
  * pass however tidily the client left. Three modes end their own connection on
@@ -299,6 +318,7 @@ static int  open_fds (void);
 static void check_drag_out (int expected);
 static void check_drag_in (int expected, int expected_taken);
 static gboolean host_drag_in (gboolean can_move);
+static void check_perf (void);
 
 /* The compositor runs in this process and reports its dmabuf doings through
  * g_log under the "nested" domain. Counting those lines turns a silent shm
@@ -408,6 +428,14 @@ client_exited (GObject *object, GAsyncResult *result, gpointer data)
   if (complained)
     {
       client_failed = TRUE;
+      g_main_loop_quit (loop);
+    }
+  else if (perf_mode)
+    {
+      /* The perf client leaves on its own once it has sent every frame, so this
+       * is the moment the counters are complete: grade here rather than on a
+       * settle that can only guess when the run is over. */
+      check_perf ();
       g_main_loop_quit (loop);
     }
 }
@@ -1145,6 +1173,8 @@ step_is_ours (StepKind kind)
       return damage_scale_mode;
     case STEP_DRAG_NO_SOURCE:
       return drag_no_source_mode;
+    case STEP_PERF_REPORT:
+      return perf_mode;
     default:
       return TRUE;
     }
@@ -1364,6 +1394,12 @@ run_step (gpointer data)
         break;
 
       check_drag_no_source ();
+      break;
+    case STEP_PERF_REPORT:
+      if (!perf_mode)
+        break;
+
+      check_perf ();
       break;
     default:
       break;
@@ -1633,6 +1669,47 @@ check_drag_in (int expected, int expected_taken)
              drag_in_seen);
 }
 
+/* ------------------------------------------------------------- --perf */
+
+/* The arithmetic verdict: the client sent perf_frames_target frames and the
+ * compositor's counters have to show each of them displayed, all on one path.
+ * copied vs wrapped answers the question the perf plan starts with — how much
+ * pool traffic the damage path really saves against a full read — and both
+ * numbers over a known frame count are the per-frame cost the plan's step 0
+ * asks for. */
+static void
+check_perf (void)
+{
+  guint64 shm_commits, dmabuf_commits, copied, wrapped;
+
+  nested_compositor_get_commit_stats (compositor, &shm_commits, &dmabuf_commits,
+                                      &copied, &wrapped);
+  g_print ("selftest: perf commits shm=%" G_GUINT64_FORMAT " dmabuf=%"
+           G_GUINT64_FORMAT " copied=%" G_GUINT64_FORMAT " wrapped=%"
+           G_GUINT64_FORMAT " frames=%u\n",
+           shm_commits, dmabuf_commits, copied, wrapped, perf_frames_target);
+
+  /* The client exits the moment its last wl_surface.commit is out, without
+   * waiting for the compositor to pull it — and the counters count frames
+   * pulled, i.e. displayed. That final commit can therefore lose the race with
+   * the exit and is the one frame of slack this gate allows; anything further
+   * behind means frames were dropped or a clock stopped answering. */
+  if (shm_commits + dmabuf_commits + 1 < perf_frames_target)
+    {
+      g_printerr ("selftest: perf gate FAILED: %"
+                  G_GUINT64_FORMAT " commit(s) for %u frame(s) asked\n",
+                  shm_commits + dmabuf_commits, perf_frames_target);
+      perf_failed = TRUE;
+    }
+  else
+    {
+      /* Counted commits are themselves the paint evidence in this mode: each
+       * one was a client frame the compositor imported and displayed. */
+      client_frame_seen = TRUE;
+      g_print ("selftest: perf gate ok, every frame asked was displayed\n");
+    }
+}
+
 static void
 fullscreen_request_seen (NestedCompositor *compositor, gboolean enter, gpointer data)
 {
@@ -1675,11 +1752,28 @@ main (int argc, char *argv[])
       second_mode = second_mode || !strcmp (argv[i], "--second-window");
       damage_scale_mode = damage_scale_mode || !strcmp (argv[i], "--damage-scale");
       drag_no_source_mode = drag_no_source_mode || !strcmp (argv[i], "--drag-no-source");
+      perf_mode = perf_mode || !strncmp (argv[i], "--perf-frames=", 14);
+      if (perf_mode && !strcmp (argv[i], "--perf-frames=0"))
+        perf_frames_target = 0;
     }
 
-  script = second_mode ? second_script : default_script;
+  script = second_mode ? second_script
+                       : (perf_mode ? perf_script : default_script);
   script_count = second_mode ? G_N_ELEMENTS (second_script)
-                             : G_N_ELEMENTS (default_script);
+                             : (perf_mode ? G_N_ELEMENTS (perf_script)
+                                          : G_N_ELEMENTS (default_script));
+
+  /* --perf-frames=N drives both sides: the client's own exit and the gate the
+   * compositor's counters are graded against. The default is 120, and the
+   * selftest's own flags are the ones with the equals sign. */
+  for (i = 3; i < argc; i++)
+    if (!strncmp (argv[i], "--perf-frames=", 14))
+      {
+        unsigned v = (unsigned) atoi (argv[i] + 14);
+
+        if (v)
+          perf_frames_target = v;
+      }
 
   dump_path = argc > 1 ? argv[1] : (char *) "/tmp/seat-selftest.png";
 
@@ -1865,6 +1959,7 @@ main (int argc, char *argv[])
 
   return (gtk_client_failed || client_failed || drag_out_failed || drag_in_failed ||
           second_failed || damage_scale_failed || drag_no_source_failed ||
+          perf_failed ||
           glib_criticals ||
           (!client_frame_seen && !paint_exempt) ||
           dmabuf_refusals ||

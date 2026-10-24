@@ -293,6 +293,16 @@ struct _NestedCompositor {
   uint32_t serial;
   uint64_t frame_count;
 
+  /* Commit accounting behind CHROMIUM_FRAME_METRICS and the selftest's --perf
+   * report: which path the clients actually take, and how many bytes each
+   * commit moves. shm_bytes_copied is pool -> shadow traffic (damage
+   * rectangles and full reads); shm_bytes_wrapped is the full-frame memcpy a
+   * fresh GBytes makes per commit before gdk_memory_texture_new() wraps it. */
+  uint64_t shm_commits;
+  uint64_t dmabuf_commits;
+  uint64_t shm_bytes_copied;
+  uint64_t shm_bytes_wrapped;
+
   NestedSurface *primary;
   /* What the page asked for vs what the host window actually is: the states
    * array advertises the latter only. */
