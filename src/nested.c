@@ -25,6 +25,27 @@
  * Types                                                              *
  * ------------------------------------------------------------------ */
 
+/* g_debug evaluates its arguments even when nothing is printed, and the commit
+ * path runs on every frame. Cache the domain check once instead of paying for
+ * it per commit. */
+static gboolean
+debug_enabled (void)
+{
+  static gboolean enabled;
+  static gsize once;
+
+  if (g_once_init_enter (&once))
+    {
+      const char *domains = g_getenv ("G_MESSAGES_DEBUG");
+
+      enabled = domains != NULL &&
+                (strcmp (domains, "all") == 0 ||
+                 strstr (domains, G_LOG_DOMAIN) != NULL);
+      g_once_init_leave (&once, 1);
+    }
+  return enabled;
+}
+
 typedef struct _FrameCallback FrameCallback;
 typedef struct _Viewport Viewport;
 typedef struct _FractionalScale FractionalScale;
@@ -1093,8 +1114,9 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
           g_object_unref (texture);
           self->natural_width = natural_width;
           self->natural_height = natural_height;
-          g_debug ("nested: surface %p commits %dx%d",
-                   (void *) self, natural_width, natural_height);
+          if (debug_enabled ())
+            g_debug ("nested: surface %p commits %dx%d",
+                     (void *) self, natural_width, natural_height);
 
           wl_buffer_send_release (buffer->resource);
           repaint = TRUE;

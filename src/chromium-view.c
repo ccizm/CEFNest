@@ -1,8 +1,30 @@
 #define G_LOG_DOMAIN "chromium-view"
 
 #include <math.h>
+#include <string.h>
 
 #include "chromium-view.h"
+
+/* g_debug evaluates its arguments even when nothing is printed, and the input
+ * handlers below run on every motion event and keystroke. Cache the domain
+ * check once instead of paying for it per event. */
+static gboolean
+debug_enabled (void)
+{
+  static gboolean enabled;
+  static gsize once;
+
+  if (g_once_init_enter (&once))
+    {
+      const char *domains = g_getenv ("G_MESSAGES_DEBUG");
+
+      enabled = domains != NULL &&
+                (strcmp (domains, "all") == 0 ||
+                 strstr (domains, G_LOG_DOMAIN) != NULL);
+      g_once_init_leave (&once, 1);
+    }
+  return enabled;
+}
 
 struct _ChromiumView {
   GtkWidget parent_instance;
@@ -479,7 +501,8 @@ chromium_view_on_motion (GtkEventControllerMotion *controller,
 
   /* GDK hands out widget-relative logical pixels, which is exactly the space a
    * client's surface lives in now that the scaling is its own business. */
-  g_debug ("input: motion logical=%.1f,%.1f", x, y);
+  if (debug_enabled ())
+    g_debug ("input: motion logical=%.1f,%.1f", x, y);
 
   nested_compositor_notify_pointer_motion (self->compositor, x, y);
 }
@@ -764,8 +787,9 @@ chromium_view_on_key_pressed (GtkEventControllerKey *controller, guint keyval,
   ChromiumView *self = data;
 
   /* GDK reports XKB key codes, which are the evdev codes Wayland wants plus 8. */
-  g_debug ("input: press keyval=%u (%s) xkb=%u evdev=%u",
-           keyval, gdk_keyval_name (keyval), keycode, keycode - 8);
+  if (debug_enabled ())
+    g_debug ("input: press keyval=%u (%s) xkb=%u evdev=%u",
+             keyval, gdk_keyval_name (keyval), keycode, keycode - 8);
 
   if (chromium_view_im_filter_key (self, controller, keycode, TRUE))
     return TRUE;
@@ -781,8 +805,9 @@ chromium_view_on_key_released (GtkEventControllerKey *controller, guint keyval,
 {
   ChromiumView *self = data;
 
-  g_debug ("input: release keyval=%u (%s) xkb=%u evdev=%u",
-           keyval, gdk_keyval_name (keyval), keycode, keycode - 8);
+  if (debug_enabled ())
+    g_debug ("input: release keyval=%u (%s) xkb=%u evdev=%u",
+             keyval, gdk_keyval_name (keyval), keycode, keycode - 8);
 
   if (chromium_view_im_filter_key (self, controller, keycode, FALSE))
     return TRUE;

@@ -1519,21 +1519,6 @@ menu_ensure_css (GtkWidget *view)
 }
 
 static void
-menu_report_size (gpointer data)
-{
-  GtkWidget *popover = data;
-
-  if (GTK_IS_WIDGET (popover))
-    {
-      g_debug ("session: context menu mapped=%d size=%dx%d",
-               gtk_widget_get_mapped (popover),
-               gtk_widget_get_width (popover), gtk_widget_get_height (popover));
-    }
-
-  g_object_unref (popover);
-}
-
-static void
 menu_button_clicked (GtkButton *button, gpointer data)
 {
   ChromiumSession *self = data;
@@ -1682,7 +1667,6 @@ session_menu_show (ChromiumSession *self, int x, int y, GList *items)
   menu_install_guards (self);
   gtk_popover_popup (GTK_POPOVER (popover));
   g_debug ("session: context menu with %u items drawn at %d,%d", index, x, y);
-  g_timeout_add_once (300, menu_report_size, g_object_ref (popover));
 }
 
 static void
