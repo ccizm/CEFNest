@@ -211,6 +211,12 @@ struct _NestedSurface {
    * keyboard over this surface for the whole window, and a press that lands
    * outside it is meant to dismiss the menu. */
   unsigned int popup_grabbed : 1;
+  /* Set on the toplevel a view is showing while its window is off the screen:
+   * frame callbacks queue but nothing answers them, so the page's rAF — and
+   * with it its whole render pipeline — stalls until the window is mapped
+   * again. Popups read it through their popup_parent chain, the way
+   * surface_is_painted() finds its root. */
+  unsigned int frames_suspended : 1;
 };
 
 struct _NestedCompositor {

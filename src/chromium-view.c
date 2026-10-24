@@ -374,6 +374,15 @@ chromium_view_on_map (GtkWidget *widget, gpointer data)
   ChromiumView *self = data;
   GdkSurface *surface;
 
+  /* The page animates again the moment its window is back: whatever frame
+   * request it made while hidden has been sitting unanswered and is folded
+   * into the display cycle now. Shared views resume their own page the same
+   * way — they stay out of the clock and clipboard business below, not out
+   * of their own. */
+  if (self->target)
+    nested_compositor_set_frames_suspended (self->compositor, self->target,
+                                            FALSE);
+
   /* A view sharing another view's compositor must not take the clipboard,
    * frame clock or cursor away from the first one. */
   if (self->shared)
@@ -420,6 +429,15 @@ chromium_view_on_unmap (GtkWidget *widget, gpointer data)
    * pointer and keyboard belong to a window that is gone. */
   if (self->target)
     nested_compositor_clear_input_surface (self->compositor, self->target);
+
+  /* A hidden window must not keep its page animating: nothing tells Chromium
+   * about window visibility, so the host stops answering the page's frame
+   * requests until this view is mapped again — the host side of the hidden-tab
+   * semantics Chromium applies by itself. Shared views suspend their own page
+   * the same way; only the clock and the clipboards stay with the owner. */
+  if (self->target)
+    nested_compositor_set_frames_suspended (self->compositor, self->target,
+                                            TRUE);
 
   if (self->shared)
     return;
@@ -1012,6 +1030,16 @@ chromium_view_set_target_surface (ChromiumView *self, NestedSurface *target)
 {
   g_return_if_fail (CHROMIUM_IS_VIEW (self));
   g_set_object (&self->target, target);
+
+  /* A target that arrives while the view is off the screen starts suspended —
+   * a standalone browser window can be hidden before its surface is assigned.
+   * The reverse matters too: a surface left suspended by a hidden view must
+   * not stay that way once a mapped view takes it over. */
+  if (target && self->compositor)
+    nested_compositor_set_frames_suspended (self->compositor, target,
+                                            !gtk_widget_get_mapped
+                                            (GTK_WIDGET (self)));
+
   gtk_widget_queue_draw (GTK_WIDGET (self));
 }
 

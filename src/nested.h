@@ -108,15 +108,28 @@ void              nested_compositor_drag_from_host_cancel (NestedCompositor *sel
  * gtk_widget_get_frame_clock() on map and NULL on unmap, like set_clipboard().
  * While attached, a client waiting for a frame is told to draw after a cycle
  * finishes painting, so it owns the idle gap before the next cycle and what it
- * commits is on screen one cycle later — and a hidden window pauses the
- * clients along with it. Without a clock (tests, headless runs) a plain 16 ms
- * timer keeps callbacks flowing instead. */
+ * commits is on screen one cycle later. Without a clock (tests, headless runs)
+ * a plain 16 ms timer keeps callbacks flowing for whoever is still waiting —
+ * a window that was hidden is not one of those: set_frames_suspended() took
+ * its frames away, and they come back when it is mapped again. */
 /* Reports the platform window's real fullscreen state back to the compositor,
  * so the states array a client sees in configure matches the window the page
  * is displayed in. The widget keeps this in sync from its root window's
  * notify::fullscreened; a host may drive it instead. */
 void              nested_compositor_set_window_fullscreen (NestedCompositor *self,
                                                            gboolean fullscreen);
+/* Stops a window's page from animating while the window is off the screen:
+ * frame callbacks on the toplevel and its popups queue but nothing answers
+ * them, so the client stalls exactly the way Chromium stalls a hidden tab —
+ * which it cannot do here by itself, since nothing tells it about window
+ * visibility. Pass the view's target toplevel on unmap and again with FALSE
+ * on map. Suspending one toplevel leaves the rest of the compositor pacing
+ * normally, so a standalone browser window that shares it keeps animating
+ * while the main window hides. */
+void              nested_compositor_set_frames_suspended
+                                                    (NestedCompositor *self,
+                                                     NestedSurface *toplevel,
+                                                     gboolean suspended);
 void              nested_compositor_set_frame_clock (NestedCompositor *self,
                                                      GdkFrameClock *clock);
 NestedSurface    *nested_compositor_get_surface     (NestedCompositor *self);

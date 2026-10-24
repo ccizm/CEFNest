@@ -2190,7 +2190,7 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "js-expr <expression>", "a11y-on", "a11y-off", "frames",
  * "new-tab <url>", "new-window <url>", "select-browser <id>",
- * "close-browser <id>", "wait <ms>",
+ * "close-browser <id>", "wait <ms>", "hide", "show",
  * "shot <path>", "dump <path>", "hover <x> <y>",
  * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
  * "drag-hold <x0> <y0> <x1> <y1> [button]", "release [button]", "surfaces",
@@ -2504,6 +2504,23 @@ script_run_next (void)
       else if (!strcmp (line, "a11y-off"))
         {
           chromium_session_set_accessibility (demo.session, FALSE);
+          continue;
+        }
+      else if (!strcmp (line, "hide"))
+        {
+          /* Take the window off the screen, the way a user hiding it would:
+           * test/frame-stop-gate.sh asserts what the page's rAF does about it. */
+          if (demo.window)
+            gtk_widget_set_visible (GTK_WIDGET (demo.window), FALSE);
+          continue;
+        }
+      else if (!strcmp (line, "show"))
+        {
+          if (demo.window)
+            {
+              gtk_widget_set_visible (GTK_WIDGET (demo.window), TRUE);
+              gtk_window_present (demo.window);
+            }
           continue;
         }
       else if (!strncmp (line, "new-tab ", 8) ||

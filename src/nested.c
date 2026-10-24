@@ -539,10 +539,25 @@ surface_fire_frame_callbacks (NestedSurface *self, uint32_t msec)
     }
 }
 
+/* Whether the window this surface belongs to has taken its frames away: the
+ * flag lives on the toplevel, and a popup reaches it the same way
+ * surface_is_painted() reaches its root. */
+static gboolean
+surface_frames_suspended (NestedSurface *self)
+{
+  NestedSurface *root = self;
+
+  while (root->popup_parent)
+    root = root->popup_parent;
+
+  return root->frames_suspended;
+}
+
 static gboolean
 surface_has_pending_frames (NestedSurface *self)
 {
-  return !wl_list_empty (&self->frame_callbacks);
+  return !wl_list_empty (&self->frame_callbacks) &&
+         !surface_frames_suspended (self);
 }
 
 /* A destroyed surface will never get the frame that fires these callbacks.
@@ -1947,7 +1962,8 @@ fire_pending_frame_callbacks (NestedCompositor *self)
   gboolean again = FALSE;
 
   wl_list_for_each (surface, &self->surfaces, nested_link)
-    surface_fire_frame_callbacks (surface, msec);
+    if (!surface_frames_suspended (surface))
+      surface_fire_frame_callbacks (surface, msec);
 
   nested_flush (self);
 
@@ -2996,7 +3012,11 @@ nested_compositor_set_frame_clock (NestedCompositor *self, GdkFrameClock *clock)
 
   if (!clock)
     {
-      /* Clients that are mid-animation keep going on the fallback timer. */
+      /* Whatever still waits on someone else's behalf — a standalone browser
+       * window sharing this compositor while its own view stays mapped —
+       * keeps going on the fallback timer. The window that just went away
+       * does not: its toplevel is suspended before this call, and a
+       * suspended toplevel's frame requests sit unanswered. */
       nested_start_frame_clock (self);
       return;
     }
@@ -3009,5 +3029,38 @@ nested_compositor_set_frame_clock (NestedCompositor *self, GdkFrameClock *clock)
   /* A client may already be waiting for a frame: fold it into the display
    * cycle instead of leaving it on the timer until the next request. */
   nested_start_frame_clock (self);
+}
+
+/* Take a window's frames away while it is off the screen, and give them back
+ * when it returns. Chromium stops a hidden tab by itself, but nothing tells
+ * it about a whole hidden window, so without this a page the user cannot see
+ * kept asking for — and getting — frames at full refresh rate for nothing.
+ * The widget suspends its toplevel from its unmap handler and resumes it on
+ * map; a view sharing the compositor only ever suspends its own page, so a
+ * standalone browser window keeps animating while the main one hides.
+ * Suspending is not the same as detaching the clock: the clock answers for
+ * the runs that never had one (tests, headless displays) and hands back to
+ * the display cycle when it can. */
+void
+nested_compositor_set_frames_suspended (NestedCompositor *self,
+                                        NestedSurface *toplevel,
+                                        gboolean suspended)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+  g_return_if_fail (NESTED_IS_SURFACE (toplevel));
+
+  suspended = suspended != FALSE;
+  if (toplevel->frames_suspended == suspended)
+    return;
+
+  toplevel->frames_suspended = suspended;
+
+  /* While suspended, requests queue up unanswered: surface_frame() and the
+   * commit path still call nested_start_frame_clock(), but a suspended
+   * surface never counts as pending there, so nothing is armed for it. Now
+   * that the window is back, fold whatever it asked for while it was away
+   * into the display cycle (or the fallback timer, when there is no cycle). */
+  if (!suspended)
+    nested_start_frame_clock (self);
 }
 
