@@ -79,7 +79,7 @@ focus was on the last HTML element and the user pressed the TAB key."*
 | --- | --- |
 | `helper/src/main.cpp` | `HelperClient` 实现 `OnTakeFocus(browser, next)`：`Emit` 新事件 `take-focus`（带 `browser` id 与 `next`）；`HandleCommand()` 新增 `focus-advance {"forward":bool}`：对当前 browser 的 host 调 `SendKeyEvent()`，构造 `CefKeyEvent{KEYEVENT_RAWKEYDOWN/KEYUP, windows_key_code=VK_TAB(9), modifiers=±EVENTFLAG_SHIFT_DOWN}`（`HandleCommand` 本已在 CEF UI 线程执行）。 |
 | `src/chromium-session.c` | `handle_event()` 处理 `take-focus`：与当前选中的 browser id 比对（session 已跟踪 `browser-selected`），不符则忽略，相符则调 `chromium_view_release_chain_focus()`；新增内部函数发送 `focus-advance` 命令，`set_view()` 时连接 view 的新信号。 |
-| `src/chromium-view.c/.h` | 覆写 `focus` vfunc（拒绝/抓取+入页推进/guard）；新增公开方法 `chromium_view_release_chain_focus(view, forward)`（设 guard、emit `move-focus`）；新增信号 `::focus-advance-requested(forward)` 供 session 转发为 `focus-advance` 命令。 |
+| `src/chromium-view.c/.h` | 覆写 `focus` vfunc（拒绝/抓取+入页推进/guard）；新增公开方法 `chromium_view_release_chain_focus(view, forward)`（设 guard、emit `move-focus`）；新增信号转发为 `focus-advance` 命令（落地信号名 `::focus-advance`，另把入页推进公开为 `chromium_view_advance_page_focus()`，见文末落地记录）。 |
 | `docs/control-channel.md`（及 zh-CN） | 补两个消息的协议说明。 |
 | `examples/` | 新增（或扩展 toolbar 示例）：`按钮 · view · 按钮` 布局 + `data:` 测试页（两个 html 按钮），作为验收用例。 |
 
