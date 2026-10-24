@@ -26,7 +26,8 @@ export const messages = {
       lead: '一个 GTK 4 控件：页面由真正的 Chromium 渲染，经同一进程内的 Wayland 合成器直接合成进控件。没有 XWayland，也没有离屏渲染。',
       start: '快速开始',
       source: '浏览源码',
-      points: ['真 Chromium', '原生 Wayland', '无离屏渲染', '一个 helper 多标签'],
+      points: ['真 Chromium', '原生 Wayland', '无离屏渲染', '一个 helper 多标签',
+               'Tab 焦点链与 GTK 打通', '右键即可查看源码'],
     },
     start: {
       title: '快速开始',
@@ -43,7 +44,7 @@ export const messages = {
       links: [
         { label: 'README', note: '构建、安装、API 与已知限制', href: `${repo}/-/blob/main/README.zh-CN.md` },
         { label: '控制通道', note: 'NDJSON 命令与事件', href: `${repo}/-/blob/main/docs/control-channel.zh-CN.md` },
-        { label: '示例', note: '十三个最小宿主', href: `${repo}/-/blob/main/examples/README.zh-CN.md` },
+        { label: '示例', note: '十四个最小宿主', href: `${repo}/-/blob/main/examples/README.zh-CN.md` },
         { label: 'API 头文件', note: '每个调用的完整契约', href: `${repo}/-/blob/main/src/chromium-session.h` },
       ],
     },
@@ -71,7 +72,8 @@ export const messages = {
       lead: 'A GTK 4 widget whose pages are rendered by real Chromium, composited straight into the widget by an in-process Wayland compositor. No XWayland, no offscreen rendering.',
       start: 'Quick start',
       source: 'Browse source',
-      points: ['Real Chromium', 'Native Wayland', 'No offscreen rendering', 'One helper, many tabs'],
+      points: ['Real Chromium', 'Native Wayland', 'No offscreen rendering', 'One helper, many tabs',
+               'Tab focus crosses GTK and the page', 'View Source built in'],
     },
     start: {
       title: 'Quick start',
@@ -88,7 +90,7 @@ export const messages = {
       links: [
         { label: 'README', note: 'Build, install, API and known limitations', href: `${repo}/-/blob/main/README.md` },
         { label: 'Control channel', note: 'NDJSON commands and events', href: `${repo}/-/blob/main/docs/control-channel.md` },
-        { label: 'Examples', note: 'Thirteen minimal hosts', href: `${repo}/-/blob/main/examples/README.md` },
+        { label: 'Examples', note: 'Fourteen minimal hosts', href: `${repo}/-/blob/main/examples/README.md` },
         { label: 'API headers', note: 'The full contract of every call', href: `${repo}/-/blob/main/src/chromium-session.h` },
       ],
     },
