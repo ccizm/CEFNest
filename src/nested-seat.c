@@ -369,12 +369,16 @@ seat_retarget (NestedCompositor *self)
    * popup reposition moves tree_generation, and the other inputs are compared
    * directly, so if all of them match the last full retarget, the pointer is
    * still inside the focused surface, and the focuses are still usable, the
-   * recomputation would return exactly what is already in place. */
+   * recomputation would return exactly what is already in place. The input
+   * surface is compared by pointer because rerouting it does not move the
+   * tree: a different surface there must reach the full walk even though
+   * every generation and wanted flag still matches. */
   if (self->retarget_tree_generation == self->tree_generation &&
       self->retarget_pointer_wanted == self->pointer_wanted &&
       self->retarget_keyboard_wanted == self->keyboard_wanted &&
       self->retarget_drag_active ==
       (nested_compositor_drag_active (self) ? 1u : 0u) &&
+      self->input_surface == self->retarget_input_surface &&
       (!self->input_surface ||
        (self->input_surface->mapped && self->input_surface->wl_surface)) &&
       self->pointer_focus && self->pointer_focus->mapped &&
