@@ -425,6 +425,82 @@ def tick_permissions():
         deliver_queued()
 
 
+# View Source, spelled the way the helper streams it: begin, chunk*, end — or
+# error. source=<mode> on the last loaded URL picks the shape, and the command
+# is echoed on stderr like the menu answers, because it has no reply of its own
+# a gate could read.
+last_url = ""
+next_source_id = 1
+
+
+def handle_view_source():
+    global next_source_id
+    mode = query("source", last_url, "small")
+    request_id = next_source_id
+    next_source_id += 1
+    log("view-source mode=%s" % mode)
+
+    def begin(url, title, size):
+        send({"event": "view-source-begin", "browser": 1, "id": request_id,
+              "url": url, "title": title, "bytes": size})
+
+    def chunk(data):
+        send({"event": "view-source-chunk", "browser": 1, "id": request_id,
+              "data": data})
+
+    if mode == "error":
+        send({"event": "view-source-error", "browser": 1, "id": request_id,
+              "message": "the frame has no source"})
+        return
+
+    if mode == "huge":
+        # A helper that lies: more than the 16 MiB cap and no truncated flag.
+        # The session has to stop appending on its own, and the gate grades
+        # the exact cap rather than the fake's honesty.
+        size = 17 * 1024 * 1024
+        begin(last_url, "huge", size)
+        filler = "x" * 65536
+        sent = 0
+        while sent < size:
+            piece = filler if sent + len(filler) <= size else filler[: size - sent]
+            chunk(piece)
+            sent += len(piece)
+        send({"event": "view-source-end", "browser": 1, "id": request_id,
+              "truncated": False})
+        return
+
+    if mode == "multibyte":
+        # Whole characters only — the JSON layer cannot carry half of one — but
+        # the boundaries all land inside the multibyte run, which is what the
+        # host's plain concatenation has to survive.
+        text = "<html><body>中文内容" + ("汉字测试🎉序列" * 3000) + "结尾</body></html>"
+        pieces = [text[i:i + 9777] for i in range(0, len(text), 9777)]
+    elif mode == "slow":
+        text = "<html><body>slow " + ("chunk " * 40) + "</body></html>"
+        pieces = [text[i:i + 16] for i in range(0, len(text), 16)]
+    else:
+        text = ("<html><head><title>small</title></head>"
+                "<body>cefnest fake source</body></html>")
+        pieces = [text]
+
+    begin(last_url, "fake", len(text.encode("utf-8")))
+    for piece in pieces:
+        chunk(piece)
+        if mode == "slow":
+            time.sleep(0.1)
+
+    # The sender's own byte count and g_str_hash (signed-char djb2, pinned
+    # against the library), so a gate — or a human — can tell transport
+    # corruption from a wrong expectation.
+    h = 5381
+    for byte in text.encode("utf-8"):
+        h = (h * 33 + (byte if byte < 128 else byte - 256)) & 0xFFFFFFFF
+    log("view-source sent bytes=%d hash=%d chunks=%d" %
+        (len(text.encode("utf-8")), h, len(pieces)))
+    send({"event": "view-source-end", "browser": 1, "id": request_id,
+          "truncated": False})
+
+
 # select() watches the kernel's buffer and makefile() keeps a buffer of its own:
 # a command that arrives in the same read as the one before it then sits in Python
 # while select says there is nothing to read, and it waits there for a second line
@@ -533,6 +609,12 @@ while True:
         log("context-menu-dismiss")
         continue
 
+    if command.get("cmd") == "view-source":
+        # The command has no reply of its own — only the events above — so the
+        # echo on stderr is the whole trace a gate can assert on.
+        handle_view_source()
+        continue
+
     if command.get("cmd") == "permission-respond":
         respond_id = command.get("id")
         held = None
@@ -600,6 +682,7 @@ while True:
         continue
 
     url = command.get("url", "")
+    last_url = url
 
     if ".invalid" in url:
         # Measured shape of a navigation that never commits: load-error, then the

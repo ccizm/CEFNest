@@ -180,6 +180,18 @@ void               chromium_session_pause_download  (ChromiumSession *self,
 void               chromium_session_resume_download (ChromiumSession *self,
                                                      int id);
 
+/* View Source. The context menu's "查看网页源代码" lands here and so can a
+ * host: one request for the active browser's main frame source. The answer
+ * is not this call but ::view-source (browser, url, source) — or
+ * ::view-source-error (browser, message). @source is the DOM as Chromium
+ * serialized it, script changes included; it is NOT the network's original
+ * bytes, and hosts that care about the difference should say so in their own
+ * UI. With the auto-source-window property on (the default) the session also
+ * opens its own read-only source window; set it to FALSE to keep only the
+ * signal and draw a window of your own. The @source string is only valid
+ * during the signal emission — copy it to keep it. */
+void               chromium_session_view_source   (ChromiumSession *self);
+
 /* In-page search. chromium_session_find () starts a search or steps through the
  * one already running: the pattern goes over every time (next=TRUE means "the
  * next / previous match of this same search"), because the helper keeps no find

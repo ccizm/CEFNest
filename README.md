@@ -14,6 +14,12 @@ surface, and the widget paints it like any other content.
 - Host-answerable APIs: downloads, find, context menu, permission prompts,
   page ↔ host messages, clipboard and drag & drop across the window edge
 - Zoom, mute, accessibility (ORCA-ready AT-SPI), frame count
+- The context menu's View Source is the component's own read-only window:
+  line numbers, syntax highlighting, find, wrap, copy — the source stays in
+  memory, no temp file, no external editor
+- The context menu's View Source is the component's own read-only window:
+  line numbers, syntax highlighting, find, wrap, copy; the source stays in
+  memory — no temp file, no external editor
 
 ## How it works
 
@@ -137,6 +143,7 @@ inline in `src/chromium-session.h`.
 | Context menu | answer `::context-menu` with `context_menu_select()` / `context_menu_dismiss()` |
 | Permissions | answer `::permission-request` with `permission_respond()` |
 | Tabs / windows | `new_browser()` · `select_browser()` · `close_browser()` |
+| View source | `view_source()` → answered by `::view-source` / `::view-source-error`; the `auto-source-window` property (default on) decides whether the component's window opens |
 | Page / misc | `set_muted()` · `zoom("in"/"out"/"reset")` · `set_accessibility()` |
 
 **Signals**
@@ -160,6 +167,8 @@ inline in `src/chromium-session.h`.
 | `::page-message` | `json` | page called `cefnestPostMessage()`; reply via `run_javascript` |
 | `::primary-selection` / `::copy-text` / `::open-url` | `text` / `text` / `url` | selection bridge, menu copy, menu "open in new window" |
 | `::zoom-changed` | `level` | 0.0 = 100 %; also after each main-frame load |
+| `::view-source` | `browser, url, source` | a View Source request completed; `source` is valid only during the emission |
+| `::view-source-error` | `browser, message` | the source never arrived |
 | `::closed` | `reason` | helper gone for good; `start()` again for a new page |
 | `::helper-exited` | — | the process has been reaped; destroy the display here |
 
@@ -207,6 +216,8 @@ seed/watch variables, `CHROMIUM_A11Y`); see `src/main.c`.
   costs the page its next ask.
 - Page audio bypasses the widget; `set_muted()` is the only switch.
 - The renderer is sandboxed; the helper itself is not, and cannot be.
+- View Source shows the **serialized DOM** — script changes included — not
+  the network's original bytes.
 - The API is not stable — link against a build you built yourself.
 
 ## Documentation
@@ -214,6 +225,14 @@ seed/watch variables, `CHROMIUM_A11Y`); see `src/main.c`.
 - `docs/control-channel.md` — the NDJSON protocol between session and helper
   (commands, events, the four interaction shapes). Only needed for custom
   helpers or direct channel work.
+- `docs/view-source-window.zh-CN.md` — the design proposal for the component's
+  own View Source window (Chinese): root cause, helper source streaming, the
+  GtkSourceView window, edge cases, tests and release surface. Read it before
+  implementing.
+- `docs/performance-pending-decisions.md` — the performance items still open
+  after the 2026-10 P0/P1 batches: dmabuf release timing (correctness),
+  occluded windows, the vetoed injection-script changes, and the demoted shm
+  fallback path. Read this before picking performance work back up.
 - `site/` — the project page (Vite + Vue + Bootstrap); `npm run dev` and
   `npm run build` inside it.
 

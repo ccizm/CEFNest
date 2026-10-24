@@ -9,6 +9,9 @@ project(
 
 gtk_dep = dependency('gtk4', version: '>=4.14')
 json_dep = dependency('json-glib-1.0')
+# The component's View Source window is drawn with GtkSourceView; a host
+# linking libcefnest links it too, so it belongs to the .pc requires as well.
+gsv_dep = dependency('gtksourceview-5', version: '>=5.4')
 wl_server_dep = dependency('wayland-server')
 wl_client_dep = dependency('wayland-client')
 xkb_dep = dependency('xkbcommon')

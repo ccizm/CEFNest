@@ -70,6 +70,7 @@ ALL_RUNS=(
   "proof||240"
   "unit|meson test -C builddir|240"
   "framing|./test/framing-gate.sh|420"
+  "source|./test/source-gate.sh|240"
   "pixel|./test/pixel-gate.sh|240"
   "find|./test/find-gate.sh|600"
   "permission|./test/permission-gate.sh|960"

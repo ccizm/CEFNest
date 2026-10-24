@@ -348,6 +348,37 @@ EOF
   # background, whose 返回 is enabled by the navigation that dismissed the menu.
   expect 'menu row 0 id=26501 type=command enabled=1' "$WORK/real-nav.log" real-nav
   expect 'menu row 0 id=100 type=command enabled=1' "$WORK/real-nav.log" real-nav
+
+  # 9. 查看网页源代码 (132): intercepted by the helper, streamed to the host,
+  #    shown in the component's window. CEF's own default — a temp file plus
+  #    the desktop's text viewer — must not run: the CEFSource* count is the
+  #    direct evidence. The second request is the view-source step rather than
+  #    another right click, because the source window now sits where the click
+  #    would land; both paths converge in the helper.
+  cefsource_before=$(ls -1 /tmp/CEFSource* 2>/dev/null | wc -l)
+  script real-view-source <<EOF
+load $PAGE
+wait 3000
+click 600 400 273
+wait 1200
+menu-pick 132
+wait 1500
+view-source
+wait 1500
+close
+EOF
+  run_demo real-view-source "$WORK/real-view-source.log" "$HELPER"
+  cefsource_after=$(ls -1 /tmp/CEFSource* 2>/dev/null | wc -l)
+  expect 'demo: view-source url=file://.*menu-page\.html bytes=[1-9][0-9]* hash=' \
+    "$WORK/real-view-source.log" real-view-source
+  expect_count 'demo: view-source url=' "$WORK/real-view-source.log" 2 real-view-source
+  expect_count 'source window: created' "$WORK/real-view-source.log" 1 real-view-source
+  expect_count 'source window: reused' "$WORK/real-view-source.log" 1 real-view-source
+  if [ "$cefsource_after" = "$cefsource_before" ]; then
+    ok "real-view-source: no temp CEFSource file was written"
+  else
+    bad "real-view-source: /tmp/CEFSource* went $cefsource_before -> $cefsource_after"
+  fi
 fi
 
 echo

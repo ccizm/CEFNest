@@ -133,6 +133,7 @@ CefRefPtr<CefWindow> g_window;
 struct BrowserSlot {
   int slot = 0;                 /* request-side key, until CEF assigns id */
   bool windowed = false;
+  std::string title;            /* last OnTitleChange, for event labels */
   CefRefPtr<CefBrowser> browser;
   CefRefPtr<CefBrowserView> view;
   CefRefPtr<CefWindow> window;
@@ -147,33 +148,6 @@ CefRefPtr<CefWindow> g_tab_window;
 
 int CreateNewBrowser(const std::string& url, bool windowed);
 void SelectBrowserById(int id);
-
-/* One synthetic Tab (or Shift+Tab) into the page, which is the only way to
- * move the page's own focus traversal from outside the renderer: the step
- * lands on the first (backwards: last) focusable element when nothing in the
- * page is focused yet, and on the edge it becomes a take-focus event back to
- * the host. Sent as a task because the control channel hands commands over
- * on this thread already; the delay-free posting only keeps the send off the
- * JSON parse path. */
-class FocusAdvanceTask : public CefTask {
- public:
-  FocusAdvanceTask(CefRefPtr<CefBrowser> browser, bool forward)
-      : browser_(browser), forward_(forward) {}
-  void Execute() override {
-    CefKeyEvent ev = {};
-    ev.windows_key_code = 0x09; /* VK_TAB */
-    ev.modifiers = forward_ ? 0 : EVENTFLAG_SHIFT_DOWN;
-    ev.type = KEYEVENT_RAWKEYDOWN;
-    browser_->GetHost()->SendKeyEvent(ev);
-    ev.type = KEYEVENT_KEYUP;
-    browser_->GetHost()->SendKeyEvent(ev);
-  }
-
- private:
-  CefRefPtr<CefBrowser> browser_;
-  bool forward_;
-  IMPLEMENT_REFCOUNTING(FocusAdvanceTask);
-};
 
 // Close every browser the helper holds. OnBeforeClose only ends the message
 // loop once the slot map is empty, so a close aimed at one browser leaves the
@@ -657,6 +631,110 @@ static BrowserSlot* FindSlotForBrowser(CefRefPtr<CefBrowser> browser) {
   return it == g_browser_slots.end() ? nullptr : &it->second;
 }
 
+/* ------------------------------------------------------------------ *
+ * View Source: streaming one frame's HTML to the host                *
+ *                                                                    *
+ * The library's default for the menu id is CefFrame::ViewSource():   *
+ * the DOM serialized into a temp file, then the desktop's text       *
+ * viewer — the wrong shape for a component, and a temp file nobody   *
+ * asked for. Instead the source is fetched with GetSource() and      *
+ * streamed over the control channel: the session's line limit is    *
+ * 4 MiB and a page's source passes it easily once JSON-escaped, so   *
+ * the one CefString becomes begin / chunk* / end, 64 KiB to a        *
+ * chunk and cut on UTF-8 boundaries, 16 MiB the hard cap.            *
+ * What arrives is the DOM as GetSource() serializes it — script      *
+ * changes included — not the network's original bytes; the host      *
+ * documents that.                                                    *
+ * ------------------------------------------------------------------ */
+constexpr size_t kSourceChunkBytes = 64 * 1024;
+constexpr size_t kSourceMaxBytes = 16 * 1024 * 1024;
+int g_next_source_id = 1;
+
+class SourceStream : public CefStringVisitor {
+ public:
+  SourceStream(int id, int browser_id, const std::string& url,
+               const std::string& title)
+      : id_(id), browser_id_(browser_id), url_(url), title_(title) {}
+
+  void Visit(const CefString& source) override {
+    CEF_REQUIRE_UI_THREAD();
+    const std::string text = source.ToString();
+
+    if (text.empty()) {
+      CefRefPtr<CefDictionaryValue> dict = NewEvent("view-source-error");
+      dict->SetInt("browser", browser_id_);
+      dict->SetInt("id", id_);
+      dict->SetString("message", "the frame has no source");
+      Emit(dict);
+      return;
+    }
+
+    const size_t total = std::min(text.size(), kSourceMaxBytes);
+    const bool truncated = text.size() > kSourceMaxBytes;
+
+    CefRefPtr<CefDictionaryValue> begin = NewEvent("view-source-begin");
+    begin->SetInt("browser", browser_id_);
+    begin->SetInt("id", id_);
+    begin->SetString("url", url_);
+    begin->SetString("title", title_);
+    begin->SetInt("bytes", static_cast<int>(total));
+    Emit(begin);
+
+    for (size_t at = 0; at < total; ) {
+      size_t take = std::min(kSourceChunkBytes, total - at);
+      /* Never split a UTF-8 sequence: a leading byte is never 10xxxxxx, so
+       * stepping the cut back while it lands on a continuation byte keeps
+       * every chunk whole characters. take can only reach 0 on malformed
+       * input, where one byte at a time still terminates. */
+      while (take > 0 && at + take < total &&
+             (static_cast<unsigned char>(text[at + take]) & 0xC0) == 0x80)
+        take--;
+      CefRefPtr<CefDictionaryValue> chunk = NewEvent("view-source-chunk");
+      chunk->SetInt("browser", browser_id_);
+      chunk->SetInt("id", id_);
+      chunk->SetString("data", text.substr(at, take));
+      Emit(chunk);
+      at += take > 0 ? take : 1;
+    }
+
+    CefRefPtr<CefDictionaryValue> end = NewEvent("view-source-end");
+    end->SetInt("browser", browser_id_);
+    end->SetInt("id", id_);
+    end->SetBool("truncated", truncated);
+    Emit(end);
+  }
+
+ private:
+  int id_;
+  int browser_id_;
+  std::string url_;
+  std::string title_;
+
+  IMPLEMENT_REFCOUNTING(SourceStream);
+};
+
+/* The menu id and the control command share this one path. Reports the
+ * outcome itself (a gone frame becomes a view-source-error), so callers
+ * only decide what "nothing to stream" means for them. */
+static void
+EmitFrameSource(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame) {
+  if (!frame || !frame->IsValid()) {
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("view-source-error");
+    dict->SetInt("browser", browser ? browser->GetIdentifier() : 0);
+    dict->SetInt("id", g_next_source_id++);
+    dict->SetString("message", "the frame is gone");
+    Emit(dict);
+    return;
+  }
+
+  const BrowserSlot* slot = FindSlotForBrowser(browser);
+  const std::string title = slot ? slot->title : std::string();
+
+  frame->GetSource(new SourceStream(g_next_source_id++,
+                                    browser->GetIdentifier(),
+                                    frame->GetURL().ToString(), title));
+}
+
 void SelectBrowserById(int id) {
   auto it = g_browser_slots.find(id);
   if (it == g_browser_slots.end() || !it->second.browser)
@@ -1120,6 +1198,18 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
         // chooses the file, exactly as it does for a page-initiated download.
         browser->GetHost()->StartDownload(url);
         return true;
+      case MENU_ID_VIEW_SOURCE: {
+        /* Intercepted: the source streams to the host instead of CEF's
+         * ViewSource() writing a temp file for the desktop's text viewer.
+         * The page's own viewer (a loaded view-source: URL) has no source
+         * worth fetching, and the recursion guard is the URL itself. */
+        const std::string target = frame ? frame->GetURL().ToString()
+                                         : params->GetPageUrl().ToString();
+        if (target.empty() || target.rfind("view-source:", 0) == 0)
+          return true;
+        EmitFrameSource(browser, frame ? frame : browser->GetMainFrame());
+        return true;
+      }
       default:
         // Generic CEF ids: let the library's default implementation run.
         return false;
@@ -1559,17 +1649,14 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
-  if (name == "focus-advance") {
-    /* One step of the page's own traversal. The host asks for this when the
-     * focus chain enters the view — so the first (backwards: last) focusable
-     * element takes focus — and hosts may ask directly through the view. */
+  if (name == "view-source") {
+    /* The menu id and this command share one path: the active browser's
+     * main frame streams to the host. */
     if (!g_browser) {
       EmitStatus("no-browser");
       return;
     }
-    const bool forward =
-        !command->HasKey("forward") || command->GetBool("forward");
-    CefPostTask(TID_UI, new FocusAdvanceTask(g_browser, forward));
+    EmitFrameSource(g_browser, g_browser->GetMainFrame());
     return;
   }
 
@@ -2284,6 +2371,8 @@ class HelperClient : public CefClient,
 
   void OnTitleChange(CefRefPtr<CefBrowser> browser,
                      const CefString& title) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      slot->title = title.ToString();
     CefRefPtr<CefDictionaryValue> dict = NewEvent("title");
     dict->SetString("title", title.ToString());
     Emit(dict);

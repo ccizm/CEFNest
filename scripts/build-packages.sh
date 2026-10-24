@@ -193,7 +193,7 @@ fi
 # library itself adds on top of those is GTK (pinned to the version the tree
 # needs), graphene, the Wayland server library and json-glib; without graphene
 # the package still installs by accident, because GTK happens to pull it in.
-LIB_ONLY_DEPS="libgtk-4-1 (>= 4.14), libgraphene-1.0-0, libwayland-server0, libjson-glib-1.0-0 | libjson-glib-1.0-0t64"
+LIB_ONLY_DEPS="libgtk-4-1 (>= 4.14), libgtksourceview-5-0, libgraphene-1.0-0, libwayland-server0, libjson-glib-1.0-0 | libjson-glib-1.0-0t64"
 MAIN_DEPS="$HELPER_DEPS, $LIB_ONLY_DEPS"
 
 # CEF's own license text travels with the package that carries CEF's binaries,
@@ -366,6 +366,7 @@ BuildArch: $RPM_ARCH
 
 Requires: glibc >= 2.39
 Requires: gtk4 >= 4.14
+Requires: gtksourceview5
 Requires: libwayland-server
 Requires: libxkbcommon
 Requires: json-glib

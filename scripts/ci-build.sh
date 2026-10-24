@@ -23,7 +23,7 @@ $SUDO ./scripts/ci-prepare-tzdata.sh
 
 $SUDO apt-get install -y --no-install-recommends \
   build-essential meson ninja-build pkg-config git linux-libc-dev \
-  libgtk-4-dev libwayland-dev libxkbcommon-dev libjson-glib-dev \
+  libgtk-4-dev libgtksourceview-5-dev libwayland-dev libxkbcommon-dev libjson-glib-dev \
   libgbm-dev libdrm-dev wayland-protocols rpm \
   cmake curl bzip2 ca-certificates python3 \
   libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 \

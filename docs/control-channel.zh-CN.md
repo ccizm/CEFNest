@@ -40,6 +40,7 @@
 | `download-pause` / `download-resume` | `id` | 只对已经拿到 item 回调的下载有效 |
 | `find` | `pattern`、`forward`、`match_case`、`next` | 不返回 ack，结果以 `find-result` 事件送达 |
 | `find-stop` | `clear`（默认为 true） | 结束查找并清除高亮 |
+| `view-source` | — | 请求激活浏览器主 frame 的源码，以 `view-source-begin`/`-chunk`/`-end` 事件流回；菜单里的"查看网页源代码"走同一条路。无 ack——事件即应答 |
 | `context-menu-select` | `id`、`flags`（可选） | 应答 `context-menu`；helper 一次只保留一个请求 |
 | `context-menu-dismiss` | — | 关闭菜单，不选择任何项 |
 | `permission-respond` | `id`、`result`（`accept`/`deny`/`dismiss`） | 应答 `permission-request`；media 的 `accept` 必须授予整个权限掩码 |
@@ -53,6 +54,10 @@
 | `browser-selected` | `browser`、`windowed` |
 | `browser-closed` | `browser` |
 | `take-focus` | `browser`、`next`（页面的 Tab 遍历走出了文档边缘；宿主应把焦点链交给 view 之后——`next` 为 false 时是之前——的控件） |
+| `view-source-begin` | `browser`、`id`、`url`、`title`、`bytes`（源码是序列化后的 DOM，含脚本改动，不是网络的原始字节） |
+| `view-source-chunk` | `browser`、`id`、`data`（每块 64 KiB，完整 UTF-8 字符，有序） |
+| `view-source-end` | `browser`、`id`、`truncated`（helper 上限 16 MiB；新的 `begin` 会放弃进行中的传输） |
+| `view-source-error` | `browser`、`id`、`message`（可单独到来——frame 可能在流出任何内容前就已失效） |
 | `address` / `title` | `url` / `title`（`address` 只在导航真正提交后发出） |
 | `loading` | `loading`、`can_go_back`、`can_go_forward` |
 | `load-end` | `url`、`http_code`（**失败时也会触发，此时 `http_code` 为 0**） |

@@ -42,6 +42,7 @@ whoever spawns the helper.
 | `download-pause` / `download-resume` | `id` | only for a download that already has its item callback |
 | `find` | `pattern`, `forward`, `match_case`, `next` | no ack; answers arrive as `find-result` |
 | `find-stop` | `clear` (default true) | ends the search and drops the highlight |
+| `view-source` | — | stream the active browser's main frame source back as `view-source-begin`/`-chunk`/`-end`; the menu's View Source takes the same path. No ack — the events are the answer |
 | `context-menu-select` | `id`, `flags` (optional) | answers `context-menu`; the helper holds one request at a time |
 | `context-menu-dismiss` | — | close the menu, select nothing |
 | `permission-respond` | `id`, `result` (`accept`/`deny`/`dismiss`) | answers `permission-request`; a media `accept` must grant the whole mask |
@@ -55,6 +56,10 @@ whoever spawns the helper.
 | `browser-selected` | `browser`, `windowed` |
 | `browser-closed` | `browser` |
 | `take-focus` | `browser`, `next` (the page's Tab traversal ran off the edge of the document; the host answers by handing the focus chain to the widget after — `next` false: before — the view) |
+| `view-source-begin` | `browser`, `id`, `url`, `title`, `bytes` (the source is the serialized DOM, script changes included, not the network's original bytes) |
+| `view-source-chunk` | `browser`, `id`, `data` (64 KiB per chunk, whole UTF-8; ordered) |
+| `view-source-end` | `browser`, `id`, `truncated` (the helper caps at 16 MiB; a second `begin` abandons the transfer in flight) |
+| `view-source-error` | `browser`, `id`, `message` (alone, or after a `begin` — the frame can be gone before anything streamed) |
 | `address` / `title` | `url` / `title` (`address` only for committed navigations) |
 | `loading` | `loading`, `can_go_back`, `can_go_forward` |
 | `load-end` | `url`, `http_code` (**fires on failure too, with code 0**) |

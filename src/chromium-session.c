@@ -1,3 +1,5 @@
+#define G_LOG_DOMAIN "chromium-session"
+
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +10,7 @@
 #include <json-glib/json-glib.h>
 
 #include "chromium-session.h"
+#include "source-window.h"
 
 #ifndef HELPER_PATH
 #define HELPER_PATH "cefnest-helper"
@@ -58,13 +61,29 @@ enum {
   SIG_ZOOM_CHANGED,
   SIG_COPY_TEXT,
   SIG_OPEN_URL,
+  SIG_VIEW_SOURCE,
+  SIG_VIEW_SOURCE_ERROR,
   SIG_CLOSED,
   SIG_HELPER_EXITED,
   N_SIGNALS
 };
+
+enum {
+  PROP_0,
+  /* The class's one and only property so far: whether the session opens its
+   * own View Source window, or only reports ::view-source and leaves the
+   * window to the host. */
+  PROP_AUTO_SOURCE_WINDOW,
+};
 static guint signals[N_SIGNALS];
 
 static void chromium_session_dispose  (GObject *object);
+static void chromium_session_get_property (GObject *object, guint property,
+                                           GValue *value, GParamSpec *pspec);
+static void chromium_session_set_property (GObject *object, guint property,
+                                           const GValue *value,
+                                           GParamSpec *pspec);
+static void source_transfer_reset (ChromiumSession *self);
 static void chromium_session_finalize (GObject *object);
 
 static void send_json (ChromiumSession *self, JsonNode *root);
@@ -140,9 +159,25 @@ struct _ChromiumSession {
   gulong menu_active_handler;
 
   /* Permission requests this side has asked about and not yet answered. Unlike a
-   * menu, several are open at once, so it is a set of ids rather than a flag —
-   * and an id leaves the set as soon as the helper dismisses it under the host. */
+     menu, several are open at once, so it is a set of ids rather than a flag —
+     and an id leaves the set as soon as the helper dismisses it under the host. */
   GHashTable *permission_held;
+
+  /* A view-source transfer in flight. The helper streams one request at a time
+     (begin → chunk* → end, or error) and a second begin abandons the first, so
+     this is one slot, not a list. */
+  struct {
+    guint id;
+    int browser;
+    char *url;
+    char *title;
+    GString *text;
+    gboolean active;
+  } source;
+  /* The component's own source window, weak: the user closing it only NULLs
+     the pointer, and the next request makes a new one. */
+  GtkWidget *source_window;
+  gboolean auto_source_window;
 };
 
 G_DEFINE_TYPE (ChromiumSession, chromium_session, G_TYPE_OBJECT)
@@ -305,6 +340,9 @@ mark_closed (ChromiumSession *self, const char *why)
 
   g_message ("session: helper stopped (%s)", why);
   chromium_session_set_state (self, NULL, NULL, FALSE, FALSE, FALSE);
+  /* A transfer the helper was streaming dies with it; the half-assembled
+   * string is not a source anyone can read. */
+  source_transfer_reset (self);
   g_signal_emit (self, signals[SIG_CLOSED], 0, why);
 }
 
@@ -344,6 +382,80 @@ event_flag (JsonObject *object, const char *key)
 {
   return json_object_has_member (object, key) ?
            json_object_get_boolean_member (object, key) : FALSE;
+}
+
+/* ------------------------------------------------------------------ *
+ * View Source                                                         *
+ *                                                                      *
+ * The helper streams one frame's HTML as view-source-begin/chunk/end  *
+ * (or -error) events, cut to fit the channel's line limit. This side  *
+ * reassembles it, reports ::view-source, and — unless the host turned *
+ * auto-source-window off — shows it in the component's own window.    *
+ * The text is the DOM as GetSource() serialized it, script changes    *
+ * included; it is not the network's original bytes.                   *
+ * ------------------------------------------------------------------ */
+
+/* The helper caps a stream at 16 MiB; the same cap here means a broken or
+ * hostile helper cannot grow the string without end. */
+#define SOURCE_HOST_MAX (16u << 20)
+
+static void
+source_transfer_reset (ChromiumSession *self)
+{
+  self->source.active = FALSE;
+  self->source.id = 0;
+  self->source.browser = 0;
+  g_clear_pointer (&self->source.url, g_free);
+  g_clear_pointer (&self->source.title, g_free);
+  if (self->source.text)
+    {
+      g_string_free (self->source.text, TRUE);
+      self->source.text = NULL;
+    }
+}
+
+static gboolean
+source_transfer_current (ChromiumSession *self, JsonObject *object)
+{
+  return self->source.active &&
+         self->source.id == (guint) event_int (object, "id");
+}
+
+static void
+source_transfer_finished (ChromiumSession *self, gboolean truncated)
+{
+  GtkRoot *root = self->view ? gtk_widget_get_root (GTK_WIDGET (self->view))
+                             : NULL;
+
+  g_signal_emit (self, signals[SIG_VIEW_SOURCE], 0,
+                 self->source.browser,
+                 self->source.url ? self->source.url : "",
+                 self->source.text ? self->source.text->str : "");
+
+  if (self->auto_source_window)
+    {
+      /* Reused when the previous window is still alive: two requests, one
+       * window, the second text replaces the first. */
+      g_debug ("source window: %s",
+               self->source_window ? "reused" : "created");
+      if (!self->source_window)
+        {
+          self->source_window = cefnest_source_window_new ();
+          g_object_add_weak_pointer (G_OBJECT (self->source_window),
+                                     (gpointer *) &self->source_window);
+        }
+      cefnest_source_window_show (self->source_window,
+                                  GTK_IS_WINDOW (root) ? GTK_WINDOW (root)
+                                                       : NULL,
+                                  self->source.url, self->source.title,
+                                  self->source.text ? self->source.text->str
+                                                    : "",
+                                  self->source.text
+                                    ? (gssize) self->source.text->len : 0,
+                                  truncated);
+    }
+
+  source_transfer_reset (self);
 }
 
 static double
@@ -488,6 +600,60 @@ handle_event (ChromiumSession *self, const char *line)
       if (self->view)
         chromium_view_release_chain_focus (self->view,
                                            event_flag (object, "next"));
+      return;
+    }
+
+  if (!strcmp (event, "view-source-begin"))
+    {
+      /* A second begin abandons the first transfer: the helper only streams
+       * one request at a time, so this is a restart, not an overlap. */
+      source_transfer_reset (self);
+      self->source.active = TRUE;
+      self->source.id = (guint) event_int (object, "id");
+      self->source.browser = (int) event_int (object, "browser");
+      self->source.url = g_strdup (event_string (object, "url"));
+      self->source.title = g_strdup (event_string (object, "title"));
+      self->source.text = g_string_new (NULL);
+      return;
+    }
+
+  if (!strcmp (event, "view-source-chunk"))
+    {
+      if (!source_transfer_current (self, object))
+        return;
+      /* Chunks are ordered, and each is whole UTF-8; appending is all the
+       * reassembly there is. The cap is the silent stop for a stream that
+       * lied about its size. */
+      if (self->source.text && self->source.text->len < SOURCE_HOST_MAX)
+        g_string_append (self->source.text, event_string (object, "data"));
+      return;
+    }
+
+  if (!strcmp (event, "view-source-end"))
+    {
+      if (!source_transfer_current (self, object))
+        return;
+      source_transfer_finished (self, event_flag (object, "truncated"));
+      return;
+    }
+
+  if (!strcmp (event, "view-source-error"))
+    {
+      /* An error can follow a begin (mid-stream failure) or arrive alone:
+       * the frame can be gone before anything was streamed, which is what
+       * the helper's EmitFrameSource() reports with no begin in front. */
+      if (source_transfer_current (self, object))
+        {
+          int browser = self->source.browser;
+
+          source_transfer_reset (self);
+          g_signal_emit (self, signals[SIG_VIEW_SOURCE_ERROR], 0, browser,
+                         event_string (object, "message"));
+        }
+      else if (!self->source.active)
+        g_signal_emit (self, signals[SIG_VIEW_SOURCE_ERROR], 0,
+                       (int) event_int (object, "browser"),
+                       event_string (object, "message"));
       return;
     }
 
@@ -1116,28 +1282,6 @@ send_command (ChromiumSession *self, const char *cmd)
 
   json_builder_begin_object (builder);
   command_add_string (builder, "cmd", cmd);
-  json_builder_end_object (builder);
-
-  root = json_builder_get_root (builder);
-  send_json (self, root);
-}
-
-/* The view entered the focus chain (or a host stepped the page): one Tab's
- * worth of the page's own traversal, synthesized on the Chromium side where
- * the page's idea of "next focusable" lives. */
-static void
-session_on_view_focus_advance (ChromiumView *view, gboolean forward,
-                               ChromiumSession *self)
-{
-  g_autoptr (JsonBuilder) builder = json_builder_new ();
-  g_autoptr (JsonNode) root = NULL;
-
-  if (!self->output)
-    return;
-
-  json_builder_begin_object (builder);
-  command_add_string (builder, "cmd", "focus-advance");
-  command_add_boolean (builder, "forward", forward);
   json_builder_end_object (builder);
 
   root = json_builder_get_root (builder);
@@ -2293,15 +2437,6 @@ chromium_session_set_view (ChromiumSession *self, ChromiumView *view)
   if (self->view)
     g_object_unref (self->view);
   self->view = view;
-
-  /* The chain entering the view is a page-focus advance: the helper owns
-   * the page's idea of "next focusable", so the request travels the control
-   * channel. connect_object, so a session that outlives its view loses the
-   * handler with the view. */
-  if (view)
-    g_signal_connect_object (view, "focus-advance",
-                             G_CALLBACK (session_on_view_focus_advance),
-                             self, 0);
 }
 
 void
@@ -2645,6 +2780,27 @@ chromium_session_stop_finding (ChromiumSession *self, gboolean clear_selection)
   send_json (self, root);
 }
 
+/**
+ * chromium_session_view_source:
+ * @self: the session
+ *
+ * Asks for the active browser's main frame source — the same request the
+ * context menu's "查看网页源代码" makes. The answer arrives as
+ * #ChromiumSession::view-source (and, with #ChromiumSession:auto-source-window
+ * on, the component's own source window); there is no receipt for the
+ * command itself. What Chromium hands back is the serialized DOM, script
+ * changes included, not the network's original bytes.
+ *
+ * Since: 154.0.34
+ */
+void
+chromium_session_view_source (ChromiumSession *self)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  send_command (self, "view-source");
+}
+
 const char *
 chromium_session_get_helper_path (ChromiumSession *self)
 {
@@ -2708,6 +2864,25 @@ chromium_session_class_init (ChromiumSessionClass *klass)
 
   object_class->dispose = chromium_session_dispose;
   object_class->finalize = chromium_session_finalize;
+  object_class->get_property = chromium_session_get_property;
+  object_class->set_property = chromium_session_set_property;
+
+  /**
+   * ChromiumSession:auto-source-window:
+   *
+   * Whether the session opens its own View Source window when page source
+   * arrives (the default), or only emits ::view-source and leaves the
+   * window to the host — which is what a host with windows of its own
+   * wants, since the session can only guess the parent from its one view.
+   *
+   * Since: 154.0.34
+   */
+  g_object_class_install_property
+    (object_class, PROP_AUTO_SOURCE_WINDOW,
+     g_param_spec_boolean ("auto-source-window", "Auto source window",
+                           "Open the component's own View Source window",
+                           TRUE,
+                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   signals[SIG_CHANGED] =
     g_signal_new ("changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
@@ -2783,6 +2958,40 @@ chromium_session_class_init (ChromiumSessionClass *klass)
   signals[SIG_OPEN_URL] =
     g_signal_new ("open-url", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::view-source:
+   * @self: the session
+   * @browser: the browser the source came from
+   * @url: the frame's URL
+   * @source: the frame's HTML as Chromium serialized the DOM — script
+   *   changes included, not the network's original bytes. Only valid
+   *   during the emission; keep a copy to use it later.
+   *
+   * A View Source request completed. Emitted whether or not the session
+   * opens its own window (see #ChromiumSession:auto-source-window).
+   *
+   * Since: 154.0.34
+   */
+  signals[SIG_VIEW_SOURCE] =
+    g_signal_new ("view-source", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::view-source-error:
+   * @self: the session
+   * @browser: the browser the request was for
+   * @message: why the source never arrived
+   *
+   * Since: 154.0.34
+   */
+  signals[SIG_VIEW_SOURCE_ERROR] =
+    g_signal_new ("view-source-error", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_STRING);
+
   signals[SIG_PAGE_MESSAGE] =
     g_signal_new ("page-message", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
@@ -2843,9 +3052,44 @@ chromium_session_init (ChromiumSession *self)
   self->title = g_strdup ("");
   self->cancellable = g_cancellable_new ();
   self->permission_held = g_hash_table_new (g_direct_hash, g_direct_equal);
+  /* The property spec's default does not reach the field on its own: without
+   * this the pspec says TRUE and the session still ships windows closed. */
+  self->auto_source_window = TRUE;
   /* Nothing has started, so there is nothing to report as closed yet. */
   self->closed_emitted = TRUE;
   self->a11y_forced = g_strcmp0 (g_getenv ("CHROMIUM_A11Y"), "1") == 0;
+}
+
+static void
+chromium_session_get_property (GObject *object, guint property,
+                               GValue *value, GParamSpec *pspec)
+{
+  ChromiumSession *self = CHROMIUM_SESSION (object);
+
+  switch (property)
+    {
+    case PROP_AUTO_SOURCE_WINDOW:
+      g_value_set_boolean (value, self->auto_source_window);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property, pspec);
+    }
+}
+
+static void
+chromium_session_set_property (GObject *object, guint property,
+                               const GValue *value, GParamSpec *pspec)
+{
+  ChromiumSession *self = CHROMIUM_SESSION (object);
+
+  switch (property)
+    {
+    case PROP_AUTO_SOURCE_WINDOW:
+      self->auto_source_window = g_value_get_boolean (value);
+      break;
+    default:
+      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property, pspec);
+    }
 }
 
 static void
@@ -2886,6 +3130,12 @@ chromium_session_dispose (GObject *object)
    * off, and its ::closed must not answer a helper that is going away. */
   self->menu_pending = FALSE;
   menu_release (self);
+
+  /* A half-streamed source belongs to a helper that is going away, and the
+   * window is this side's own: close both with the session. */
+  source_transfer_reset (self);
+  if (self->source_window)
+    gtk_window_destroy (GTK_WINDOW (self->source_window));
 
   if (self->a11y_proxy)
     {

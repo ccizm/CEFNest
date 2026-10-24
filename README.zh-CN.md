@@ -13,6 +13,8 @@ Wayland compositor 直接合成进控件。既不使用 XWayland，也不做离�
 - 可由宿主应答的 API：下载、查找、右键菜单、权限提示、页面 ↔ 宿主消息、
   跨窗口边界的剪贴板与拖放
 - 缩放、静音、无障碍（ORCA 可直接使用的 AT-SPI）、帧计数
+- 右键"查看网页源代码"是组件自带的只读源码窗口：行号、语法高亮、查找、
+  自动换行、复制；源码只在内存中流转，不再写临时文件、不再拉起外部编辑器
 
 ## 工作原理
 
@@ -46,6 +48,7 @@ Wayland compositor 直接合成进控件。既不使用 XWayland，也不做离�
 | Wayland（server + client） | 1.21+（`axis_value120`） |
 | wayland-protocols | 含 `cursor-shape`、`fractional-scale`、`text-input` |
 | xkbcommon / json-glib / gbm + libdrm | 任意较新版本 |
+| GtkSourceView | 5.4+（源码窗口） |
 | meson / ninja / cmake | meson 1.3+，cmake 3.16+ |
 | CEF（`cef_binary_*_linux64_minimal`） | 已在 stable 154.0.34 上验证通过 |
 
@@ -132,6 +135,7 @@ User-Agent 切换。每个示例演示什么，见
 | 右键菜单 | 用 `context_menu_select()` / `context_menu_dismiss()` 应答 `::context-menu` |
 | 权限 | 用 `permission_respond()` 应答 `::permission-request` |
 | 标签页 / 窗口 | `new_browser()` · `select_browser()` · `close_browser()` |
+| 查看源码 | `view_source()` → 结果经 `::view-source` / `::view-source-error` 返回；`auto-source-window` 属性（默认开）决定是否自动弹出组件源码窗口 |
 | 页面 / 其他 | `set_muted()` · `zoom("in"/"out"/"reset")` · `set_accessibility()` |
 
 **信号**
@@ -155,6 +159,8 @@ User-Agent 切换。每个示例演示什么，见
 | `::page-message` | `json` | 页面调用了 `cefnestPostMessage()`；用 `run_javascript` 回复 |
 | `::primary-selection` / `::copy-text` / `::open-url` | `text` / `text` / `url` | 选区桥接、菜单复制、菜单中的“在新窗口打开” |
 | `::zoom-changed` | `level` | 0.0 = 100%；每次主框架加载后也会触发一次 |
+| `::view-source` | `browser, url, source` | 一次查看源码请求完成；`source` 仅在发射期间有效 |
+| `::view-source-error` | `browser, message` | 源码没能取回 |
 | `::closed` | `reason` | helper 已永久退出；要打开新页面需重新调用 `start()` |
 | `::helper-exited` | — | 进程已被回收；此时再销毁自己的 display 对象 |
 
@@ -201,12 +207,20 @@ demo 还会读取一些额外的开关（`CEFNEST_DOWNLOAD_*`、`CEFNEST_PERMISS
 - 权限只能授予或拒绝，不能缩小范围；未应答的权限还会让页面失去下一次请求的机会。
 - 页面音频绕过控件；`set_muted()` 是唯一的开关。
 - 渲染进程运行在沙箱中；helper 本身没有沙箱，也不可能有。
+- "查看网页源代码"显示的是**序列化后的 DOM**（包含脚本运行后的改动），
+  不是网络返回的原始字节。
 - API 尚不稳定——请链接到自己构建的版本。
 
 ## 文档
 
 - `docs/control-channel.zh-CN.md` —— session 与 helper 之间的 NDJSON 协议
   （命令、事件、四种交互形态）。只有自行编写 helper 或直接驱动通道时才需要。
+- `docs/view-source-window.zh-CN.md` —— “查看网页源代码”子窗口的完整设计提案：
+  根因、helper 取源与分块协议、session 的 GtkSourceView 窗口、边界情况、
+  测试与发布面。实现前先读它。
+- `docs/performance-pending-decisions.md` —— 2026-10 的 P0/P1 两批性能工作
+  收官后仍待决策的事项：dmabuf release 时机（正确性）、遮挡窗口、实测否决
+  的注入脚本改动、降级后的 shm 回退路径。重启性能工作前先读它。
 - `site/` —— 项目主页（Vite + Vue + Bootstrap）；在目录里运行 `npm run dev`
   或 `npm run build`。
 

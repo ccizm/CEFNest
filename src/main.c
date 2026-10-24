@@ -582,6 +582,35 @@ open_url_in_new_window (const char *url)
 }
 
 static void
+session_view_source (ChromiumSession *session, int browser, const char *url,
+                     const char *source, gpointer data)
+{
+  (void) session; (void) browser; (void) data;
+  const char *dump = g_getenv ("CEFNEST_SOURCE_DUMP");
+
+  /* Debug helper: what actually arrived, next to what was sent. */
+  if (dump && *dump && source)
+    g_file_set_contents (dump, source, (gssize) strlen (source), NULL);
+
+  /* The source gate grades this line: url, byte count, a content hash (the
+   * same 32-bit g_str_hash the gate recomputes), and — through the source
+   * window's own debug line — the truncated marker. */
+  g_printerr ("demo: view-source url=%s bytes=%zu hash=%u\n",
+              url ? url : "", source ? strlen (source) : (size_t) 0,
+              source ? g_str_hash (source) : 0);
+}
+
+static void
+session_view_source_error (ChromiumSession *session, int browser,
+                           const char *message, gpointer data)
+{
+  (void) session; (void) data;
+
+  g_printerr ("demo: view-source-error browser=%d %s\n", browser,
+              message ? message : "");
+}
+
+static void
 session_copy_text (ChromiumSession *session, const char *text, gpointer data)
 {
   GdkClipboard *clipboard;
@@ -1749,6 +1778,10 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_copy_text), NULL);
   g_signal_connect (demo.session, "open-url",
                     G_CALLBACK (session_open_url), NULL);
+  g_signal_connect (demo.session, "view-source",
+                    G_CALLBACK (session_view_source), NULL);
+  g_signal_connect (demo.session, "view-source-error",
+                    G_CALLBACK (session_view_source_error), NULL);
   g_signal_connect (demo.session, "load-end", G_CALLBACK (session_load_end), NULL);
   g_signal_connect (demo.session, "load-error",
                     G_CALLBACK (session_load_error), NULL);
@@ -1783,6 +1816,12 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_browser_selected), NULL);
   g_signal_connect (demo.session, "browser-closed",
                     G_CALLBACK (session_browser_closed), NULL);
+
+  /* Test hook: the source gate turns the component's own window off to grade
+   * the ::view-source-only path; a real host would set the property for its
+   * own reasons (its own window management, usually). */
+  if (g_strcmp0 (g_getenv ("CEFNEST_SOURCE_WINDOW"), "0") == 0)
+    g_object_set (demo.session, "auto-source-window", FALSE, NULL);
 
   if (!chromium_session_start (demo.session, initial_url (), &error))
     {
@@ -2190,7 +2229,7 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "js-expr <expression>", "a11y-on", "a11y-off", "frames",
  * "new-tab <url>", "new-window <url>", "select-browser <id>",
- * "close-browser <id>", "wait <ms>", "hide", "show",
+ * "close-browser <id>", "wait <ms>", "hide", "show", "view-source",
  * "shot <path>", "dump <path>", "hover <x> <y>",
  * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
  * "drag-hold <x0> <y0> <x1> <y1> [button]", "release [button]", "surfaces",
@@ -2737,6 +2776,15 @@ script_run_next (void)
       else if (!strcmp (line, "find-stop"))
         {
           find_bar_close ();
+          continue;
+        }
+      else if (!strcmp (line, "view-source"))
+        {
+          /* The same request the context menu's 查看网页源代码 makes; the
+           * answer is the ::view-source line below, which is what the source
+           * gate grades. */
+          chromium_session_view_source (demo.session);
+          g_printerr ("demo: view-source requested\n");
           continue;
         }
       else if (!strncmp (line, "menu-pick ", 10))
