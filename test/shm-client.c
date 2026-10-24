@@ -82,6 +82,8 @@ typedef struct {
   int height;
   int stride;
   int mapped;
+  unsigned attach_serial;     /* commit counter at this buffer's last attach */
+  int releases;               /* releases seen since that attach */
   struct wl_buffer *wl_buffer;
   /* dmabuf only: a bo backs the buffer and data maps its first plane. */
   struct gbm_bo *bo;
@@ -142,6 +144,16 @@ static int use_dmabuf;
 static unsigned int perf_frames_target;
 static int use_fullscreen, fs_enter_sent, fs_exit_sent;
 static int dmabuf_failed;
+
+/* Every wl_surface_commit sent, main window and second window alike, so a
+ * dmabuf buffer's release can be graded against the commit stream: the
+ * compositor owes the release only after the commit that replaced the buffer.
+ * tearing_down suspends the gate where releases legitimately arrive without a
+ * replacement: surfaces being destroyed release what they still hold. */
+static unsigned commit_serial;
+static int dmabuf_releases_checked;
+static int dmabuf_release_graded;
+static int tearing_down;
 
 /* Clipboard. --copy makes the client take a selection, --paste makes it ask
  * for whatever the compositor advertises, so both directions get exercised
@@ -875,6 +887,9 @@ draw (void)
   if (viewport)
     wp_viewport_set_destination (viewport, width, height);
   wl_surface_commit (surface);
+  commit_serial++;
+  buffer->attach_serial = commit_serial;
+  buffer->releases = 0;
   buffer->mapped = 1;
 
   callback = wl_surface_frame (surface);
@@ -888,6 +903,35 @@ draw (void)
              frames, width, height, device_width, device_height, client_scale);
 }
 
+/* The compositor owes a dmabuf buffer its release only once the commit that
+ * retires it has been replaced: the on-screen texture samples the client's
+ * memory until then, so an early release is a license to tear. shm buffers
+ * are copied out at commit and released there, which is why this only grades
+ * runs whose buffers actually went through the dma-buf path. */
+static void
+dmabuf_release_check (Buffer *buffer)
+{
+  if (!use_dmabuf || dmabuf_failed || tearing_down)
+    return;
+
+  buffer->releases++;
+  if (buffer->releases > 1)
+    {
+      fprintf (stderr, "client: %d: dmabuf release gate FAILED: buffer %p "
+                       "released twice without being attached again\n",
+               __LINE__, (void *) buffer);
+      exit (1);
+    }
+  if (commit_serial <= buffer->attach_serial)
+    {
+      fprintf (stderr, "client: %d: dmabuf release gate FAILED: buffer %p "
+                       "from commit %u released before any commit replaced it\n",
+               __LINE__, (void *) buffer, buffer->attach_serial);
+      exit (1);
+    }
+  dmabuf_releases_checked++;
+}
+
 static void
 buffer_release (void *data, struct wl_buffer *wl_buffer)
 {
@@ -896,6 +940,7 @@ buffer_release (void *data, struct wl_buffer *wl_buffer)
   if (buffer->wl_buffer == wl_buffer)
     {
       buffer->mapped = 0;
+      dmabuf_release_check (buffer);
       second_after_release (buffer);
     }
 }
@@ -1015,6 +1060,18 @@ frame_done (void *data, struct wl_callback *callback, uint32_t time)
       fprintf (stderr, "client: shm-release gate passed: opcode 1 of wl_shm was "
                        "taken, and %d frames later this connection is still "
                        "being served\n", frames - 3);
+    }
+
+  /* The same shape as the shm-release grade: only a moving window produces
+   * enough attaches and releases to be worth reading, and the check itself
+   * ran in buffer_release() all along. */
+  if (use_dmabuf && !dmabuf_failed && !dmabuf_release_graded &&
+      frames > 40 && dmabuf_releases_checked >= 4)
+    {
+      dmabuf_release_graded = 1;
+      fprintf (stderr, "client: dmabuf release gate passed: %d releases, each "
+                       "strictly after its replacing commit\n",
+               dmabuf_releases_checked);
     }
 
   /* The same rule as the probes above: the window has to be mapped and the seat
@@ -1219,6 +1276,9 @@ second_draw (void)
   if (second.viewport)
     wp_viewport_set_destination (second.viewport, second.width, second.height);
   wl_surface_commit (second.surface);
+  commit_serial++;
+  buffer->attach_serial = commit_serial;
+  buffer->releases = 0;
   buffer->mapped = 1;
 }
 
@@ -1241,6 +1301,10 @@ second_close (void)
     return;
 
   fprintf (stderr, "client: second window torn down\n");
+
+  /* Destroying this surface releases its held buffer without a replacing
+   * commit, which is protocol-legal — the order gate must not grade it. */
+  tearing_down = 1;
 
   xdg_toplevel_destroy (second.toplevel);
   xdg_surface_destroy (second.xdg_surface);

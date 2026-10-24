@@ -112,6 +112,7 @@ static const struct wp_fractional_scale_v1_interface fractional_scale_impl;
  * ------------------------------------------------------------------ */
 
 static void  nested_start_frame_clock (NestedCompositor *self);
+static void  surface_set_current_dmabuf (NestedSurface *self, Buffer *buffer);
 static void  surface_resource_destroyed (struct wl_resource *resource);
 static void  pool_resource_destroyed (struct wl_resource *resource);
 static void  nested_compositor_release_shm (NestedCompositor *self,
@@ -249,10 +250,12 @@ nested_surface_init (NestedSurface *self)
   wl_list_init (&self->nested_link);
   wl_list_init (&self->frame_callbacks);
   wl_list_init (&self->pending_user.link);
+  wl_list_init (&self->current_user.link);
   wl_list_init (&self->fractional_links);
   wl_list_init (&self->popup_children);
   wl_list_init (&self->popup_link);
   self->pending_user.surface = self;
+  self->current_user.surface = self;
 
   /* Negative means unset: no crop, no destination size, so the surface keeps
    * the size of the buffer it attaches. */
@@ -277,6 +280,10 @@ nested_surface_dispose (GObject *object)
       wl_list_init (&self->pending_user.link);
       self->pending_user.buffer = NULL;
     }
+
+  /* The held buffer's replacement is this surface going away, so the release
+   * the swapchain semantics owe it goes out now rather than never. */
+  surface_set_current_dmabuf (self, NULL);
 
   /* Out of the parent's draw order before anything else can look at it. A
    * parent cannot be disposed while a child still refers to it, so the list it
@@ -450,6 +457,33 @@ surface_set_pending (NestedSurface *self, Buffer *buffer)
     wl_list_init (&self->pending_user.link);
 }
 
+/* A dmabuf texture samples the client's own memory, so the buffer behind the
+ * committed texture cannot be released yet: handing it back would let the
+ * client rewrite pixels that may still be sampled. Swapchain semantics — the
+ * release of the retired buffer goes out exactly here, with the commit that
+ * has just made a new texture current (or with clear/destroy, when there is
+ * no replacement coming). Re-attaching the same buffer releases nothing. */
+static void
+surface_set_current_dmabuf (NestedSurface *self, Buffer *buffer)
+{
+  if (self->current_user.buffer == buffer)
+    return;
+
+  if (self->current_user.buffer)
+    {
+      wl_buffer_send_release (self->current_user.buffer->resource);
+      wl_list_remove (&self->current_user.link);
+      wl_list_init (&self->current_user.link);
+      self->current_user.buffer = NULL;
+    }
+
+  if (buffer)
+    {
+      self->current_user.buffer = buffer;
+      wl_list_insert (&buffer->users, &self->current_user.link);
+    }
+}
+
 static void
 surface_clear_content (NestedSurface *self)
 {
@@ -464,6 +498,10 @@ surface_clear_content (NestedSurface *self)
 
   was_primary = self->nested && self == self->nested->primary;
   was_painted = surface_is_painted (self);
+
+  /* Nothing will replace the content this buffer carried, so the release it
+   * has been waiting for goes out with the content itself. */
+  surface_set_current_dmabuf (self, NULL);
 
   g_clear_object (&self->texture);
   g_clear_pointer (&self->shm_shadow, g_free);
@@ -1133,7 +1171,12 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
             g_debug ("nested: surface %p commits %dx%d",
                      (void *) self, natural_width, natural_height);
 
-          wl_buffer_send_release (buffer->resource);
+          /* shm buffers were copied out above, so the client may rewrite them
+           * right away; a dmabuf buffer stays held until replaced. */
+          if (buffer->is_dmabuf)
+            surface_set_current_dmabuf (self, buffer);
+          else
+            wl_buffer_send_release (buffer->resource);
           repaint = TRUE;
         }
       else

@@ -140,6 +140,11 @@ struct _NestedSurface {
   struct wl_list frame_callbacks;
   BufferUser pending_user;
   gboolean pending_attach;
+  /* The dmabuf buffer the committed texture was built from. It is still on
+   * screen, so its wl_buffer release waits for the commit that replaces it —
+   * swapchain semantics; the slot rides the buffer's users list so a client
+   * destroying the wl_buffer clears it like any other holder. */
+  BufferUser current_user;
 
   /* Crop and scale state, in "natural" coordinates: buffer pixels divided by
    * the buffer scale, which is what wp_viewport.set_source uses. The pending
