@@ -53,7 +53,8 @@ Wayland compositor 直接合成进控件。既不使用 XWayland，也不做离�
 | CEF（`cef_binary_*_linux64_minimal`） | 已在 stable 156.0.14 上验证通过 |
 
 `wayland-scanner` 必须在 `PATH` 上。渲染还需要可用的非特权用户命名空间（Chromium
-的沙箱依赖它）；如果系统限制了这一点，见**常见问题**。
+的沙箱依赖它）；如果系统限制了这一点，见
+[docs/troubleshooting.zh-CN.md](docs/troubleshooting.zh-CN.md)。
 
 ## 构建
 
@@ -120,112 +121,25 @@ User-Agent 切换、持久数据目录。每个示例演示什么，见
 ## 数据目录
 
 **不指定目录时，session 不向磁盘写任何东西。** helper 以 Chromium 的
-incognito 模式运行：cookies、localStorage、IndexedDB 和 HTTP 缓存都在内存里；
-CEF 必须写的那一个安装级目录是 `$XDG_RUNTIME_DIR` 下（未设置时是 `/dev/shm`）
-的 0700 临时目录，helper 正常退出时删除，被杀死留下的残根由下一次启动清扫。
-`~/.cache` 下不会出现任何东西，CEF 也不会回退到 `~/.config/cef_user_data`。
-
-要让页面数据跨重启保留，在 `start()` 之前指定一个绝对路径：
+incognito 模式运行：cookies、localStorage、IndexedDB 和 HTTP 缓存都在内存里，
+CEF 必须写的那一个安装级目录是 `$XDG_RUNTIME_DIR` 下的 0700 临时目录，
+`~/.cache` 下不会出现任何东西。要让页面数据跨重启保留，在 `start()` 之前
+指定一个绝对路径：
 
 ```c
 chromium_session_set_data_directory (session, "/home/me/.local/share/myapp/cefnest");
 chromium_session_start (session, "https://example.com", &error);
 ```
 
-| `start()` 之前 | `root_cache_path` | `cache_path` | 结果 |
-| --- | --- | --- | --- |
-| 不设置（默认） | `$XDG_RUNTIME_DIR/cefnest-helper-<pid>-XXXXXX`，0700 | 空 | incognito，内存缓存；退出删临时目录，残留由下次启动清扫 |
-| `set_data_directory (session, P)` | `P` | `P/browser` | 持久 profile：cookies 与存储跨重启保留 |
-
-规则：
-
-- 必须是绝对路径。`~` 不会展开，相对路径会让 `start()` 以
-  `G_IO_ERROR_INVALID_ARGUMENT` 失败。
-- 目录不存在时按 0700 创建。CEFNest 从不自行删除它；唯一的删除入口是
-  `chromium_session_clear_data()`，它保留属性值（下一次 `start()` 会把目录
-  重新建成空的）。
-- 一个目录只归一个 helper：第二个 session 指向已在使用的目录会尽早失败。
-  同进程由登记表返回 `G_IO_ERROR_BUSY`；跨进程时 helper 的 `flock` 拒绝，
-  该 session 以 "process exited" 关闭。
-- 这是一个完整的 profile。CEF 要求 `cache_path` 位于 `root_cache_path`
-  之下，因此不存在“缓存落盘、cookies 只在内存”的拆法。
-- 即便是持久模式，session cookie 仍随 helper 一起消失
-  （`persist_session_cookies` 为 false）。
-- session 运行期间设置该属性只对下一次 `start()` 生效，不影响当前 helper。
-
-**放在哪里。** 用 `g_get_user_data_dir()`——通常是
-`~/.local/share/<应用>/…`。**不要放 `~/.cache`**：XDG 把那个目录定义为可随时
-清理的，BleachBit 之类的工具会静默删掉登录态，用户看到的是“随机掉登录”。
-数据是否随卸载删除由平台决定，而不是 CEFNest：
-
-| 安装形态 | 数据目录的结局 |
-| --- | --- |
-| Flatpak | 沙箱内该路径落在 `~/.var/app/<id>/…`；`flatpak uninstall --delete-data` 会带走 |
-| Snap | `snap remove --purge` 删除 |
-| deb / rpm | 与 Chromium、Firefox 的 Linux 惯例一致：用户数据随卸载保留；请自行删除或调用 `clear_data()` |
-
-demo 接受 `--data-dir=<绝对路径>`；不传时 demo 同样是 incognito。
-
-standalone helper 用同一个契约，只是入口是环境变量：
-`CHROMIUM_HELPER_DATA_DIR=/绝对路径 ./cefnest-helper` 即持久模式，不设置即
-incognito。宿主始终替子进程做决定：库在 spawn 之前会 unset
-`CHROMIUM_HELPER_DATA_DIR`，所以宿主环境里残留的同名变量不会把 session
-变成落盘模式。
-
-旧版本会派生 `~/.cache/cefnest-helper*` 缓存目录。现在没有任何代码再写那里，
-也没有任何代码会替你删除它们；升级后手动清理：
-
-```sh
-rm -rf ~/.cache/cefnest-helper ~/.cache/cefnest-helper-hosted-*
-```
+完整契约——规则、目录放在哪里、各安装形态下卸载的行为、standalone helper
+的环境变量、旧版 `~/.cache` 目录的清理——见
+[docs/data-directory.zh-CN.md](docs/data-directory.zh-CN.md)。
 
 ## API
 
 `ChromiumView` 是控件；`ChromiumSession` 是控制平面，负责启动 helper 并跟踪页面。
-每个调用的完整约定都写在 `src/chromium-session.h` 的行内注释里。
-
-**方法**
-
-| 分组 | 调用 |
-| --- | --- |
-| 生命周期 | `chromium_session_new()` · `set_view()` · `start()` · `stop()` |
-| 数据目录 | `set_data_directory()` · `get_data_directory()` · `clear_data()`；`data-directory` 属性 |
-| 导航 | `load_uri()` · `go_back()` · `go_forward()` · `reload()` · `stop_loading()` |
-| 状态 | `get_uri()` · `get_title()` · `get_loading()` · `get_can_go_back()` · `get_can_go_forward()` · `get_running()` · `get_muted()` · `get_zoom_level()` · `get_frame_count()` · `get_helper_path()` |
-| JavaScript | `run_javascript()` · `run_javascript_expression()` → 结果通过 `::script-result` 返回 |
-| 下载 | 用 `accept_download()` / `reject_download()` 应答 `::download-begin`；进行中的下载可用 `pause_download()` / `resume_download()` |
-| 查找 | `find()` · `stop_finding()` → 结果通过 `::find-result` 返回 |
-| 右键菜单 | 用 `context_menu_select()` / `context_menu_dismiss()` 应答 `::context-menu` |
-| 权限 | 用 `permission_respond()` 应答 `::permission-request` |
-| 标签页 / 窗口 | `new_browser()` · `select_browser()` · `close_browser()` |
-| 查看源码 | `view_source()` → 结果经 `::view-source` / `::view-source-error` 返回；`auto-source-window` 属性（默认开）决定是否自动弹出组件源码窗口 |
-| 页面 / 其他 | `set_muted()` · `zoom("in"/"out"/"reset")` · `set_accessibility()` |
-
-**信号**
-
-| 信号 | 参数 | 说明 |
-| --- | --- | --- |
-| `::changed` | — | URI / 标题 / 加载状态 / 前进后退状态 / 静音状态发生变化 |
-| `::ready` | — | helper 握手完成 |
-| `::load-end` | `url, http_code` | 失败时也会触发，此时 `http_code` 为 0 |
-| `::load-error` | `error_code, url, message` | 一次未能完成提交的导航 |
-| `::renderer-exited` | `status, error_code, message` | 页面的渲染进程已退出 |
-| `::script-result` | `id, ok, value, message` | `run_javascript` 调用的结果 |
-| `::download-begin` | `id, url, suggested_name, mime_type, total_bytes` | 必须应答 |
-| `::download-progress` / `::download-end` | 见头文件 | 每跨过一个整数百分比就上报一次进度 |
-| `::find-result` | `identifier, count, active_ordinal, final` | 一次请求可能产生多条结果 |
-| `::context-menu` | `x, y, items` | 返回 TRUE 表示由你自行绘制菜单，之后必须应答 |
-| `::permission-request` | `id, kind, origin, permissions, raw` | 返回 TRUE 表示由你负责应答；默认行为是拒绝 |
-| `::permission-dismissed` | `id, result` | 一个挂起的提示已被页面替换 |
-| `::browser-created` / `::browser-selected` / `::browser-closed` | `id, …` | 标签页与窗口的生命周期 |
-| `::popup-requested` | `url` | target=_blank；前台弹窗已就地导航 |
-| `::page-message` | `json` | 页面调用了 `cefnestPostMessage()`；用 `run_javascript` 回复 |
-| `::primary-selection` / `::copy-text` / `::open-url` | `text` / `text` / `url` | 选区桥接、菜单复制、菜单中的“在新窗口打开” |
-| `::zoom-changed` | `level` | 0.0 = 100%；每次主框架加载后也会触发一次 |
-| `::view-source` | `browser, url, source` | 一次查看源码请求完成；`source` 仅在发射期间有效 |
-| `::view-source-error` | `browser, message` | 源码没能取回 |
-| `::closed` | `reason` | helper 已永久退出；要打开新页面需重新调用 `start()` |
-| `::helper-exited` | — | 进程已被回收；此时再销毁自己的 display 对象 |
+每个调用的完整约定都写在 `src/chromium-session.h` 的行内注释里；方法与信号的
+分组速览见 [docs/api.zh-CN.md](docs/api.zh-CN.md)。
 
 ## demo 环境变量
 
@@ -240,22 +154,16 @@ rm -rf ~/.cache/cefnest-helper ~/.cache/cefnest-helper-hosted-*
 | `CHROMIUM_USER_AGENT` | 在 helper 启动时写入的默认 User-Agent |
 | `G_MESSAGES_DEBUG` | **空格分隔**的日志域：`all`，或 `nested chromium-view chromium-session` |
 
-demo 还接受 `--data-dir=<绝对路径>`（见**数据目录**），并读取一些额外的开关
+demo 还接受 `--data-dir=<绝对路径>`（见
+[docs/data-directory.zh-CN.md](docs/data-directory.zh-CN.md)），并读取一些额外的开关
 （`CEFNEST_DOWNLOAD_*`、`CEFNEST_PERMISSION`、
 `CEFNEST_DRAG_OUT`、`CHROMIUM_WINDOW`、`CHROMIUM_FRAME_METRICS`、剪贴板 seed/watch
 变量、`CHROMIUM_A11Y`），见 `src/main.c`。
 
 ## 常见问题
 
-| 症状 | 处置 |
-| --- | --- |
-| helper 启动时报 `No usable sandbox!` | 系统限制了非特权用户命名空间。为 `cefnest-helper` 安装一个允许 userns 的 AppArmor profile（推荐），或设置 `CHROMIUM_HELPER_NO_SANDBOX=1` |
-| `start()` 报 `no helper binary at …` | 报错里的路径就是实际尝试的路径：安装 `cefnest-helper`，或用 `CEFNEST_HELPER` 指向绝对路径；在开发树里先运行 cmake |
-| 窗口出现，页面区域一片空白 | 确认 helper 正在运行，且当前是原生 Wayland 会话（`GDK_BACKEND=wayland`）；X11 下不会渲染 |
-| 设置了 `G_MESSAGES_DEBUG` 却没有任何日志 | 域列表必须用**空格**分隔；用逗号分隔的列表匹配不到任何域 |
-| 关闭最后一个标签页，页面就没了 | 一个 session 对应一个 helper；先新建一个 browser，或正确处理 `::closed` |
-| 在 `::helper-exited` 之前先看到 `Lost connection to Wayland compositor` | 这是正常的销毁顺序——等收到 `::helper-exited` 之后再销毁自己的 display |
-| helper 在 stderr 上几乎不出声 | 刻意为之：Chromium 日志级别为 WARNING，逐事件的 INFO 输出已去掉；警告与错误仍会打印 |
+症状 → 处置速查表——沙箱被拒、helper 缺失、页面区域空白、日志域不输出、销毁
+顺序——见 [docs/troubleshooting.zh-CN.md](docs/troubleshooting.zh-CN.md)。
 
 ## 已知限制
 
@@ -277,6 +185,11 @@ demo 还接受 `--data-dir=<绝对路径>`（见**数据目录**），并读取�
 
 ## 文档
 
+- `docs/data-directory.zh-CN.md` —— 数据目录契约：默认不落盘、一个路径持久化、
+  互斥与卸载行为、旧版 `~/.cache` 目录的清理。
+- `docs/api.zh-CN.md` —— 方法与信号速览；权威契约在 `src/chromium-session.h`。
+- `docs/troubleshooting.zh-CN.md` —— 症状 → 处置，从 `No usable sandbox!` 到
+  日志域。
 - `docs/control-channel.zh-CN.md` —— session 与 helper 之间的 NDJSON 协议
   （命令、事件、四种交互形态）。只有自行编写 helper 或直接驱动通道时才需要。
 - `site/` —— 项目主页（Vite + Vue + Bootstrap）；在目录里运行 `npm run dev`

@@ -17,9 +17,6 @@ surface, and the widget paints it like any other content.
 - The context menu's View Source is the component's own read-only window:
   line numbers, syntax highlighting, find, wrap, copy — the source stays in
   memory, no temp file, no external editor
-- The context menu's View Source is the component's own read-only window:
-  line numbers, syntax highlighting, find, wrap, copy; the source stays in
-  memory — no temp file, no external editor
 
 ## How it works
 
@@ -53,12 +50,13 @@ surface, and the widget paints it like any other content.
 | Wayland (server + client) | 1.21+ (`axis_value120`) |
 | wayland-protocols | with `cursor-shape`, `fractional-scale`, `text-input` |
 | xkbcommon / json-glib / gbm + libdrm | any recent |
+| GtkSourceView | 5.4+ (View Source window) |
 | meson / ninja / cmake | meson 1.3+, cmake 3.16+ |
 | CEF (`cef_binary_*_linux64_minimal`) | verified with stable 156.0.14 |
 
 `wayland-scanner` must be on `PATH`. Rendering needs working unprivileged user
-namespaces (Chromium's sandbox); see **Troubleshooting** if your host restricts
-them.
+namespaces (Chromium's sandbox); see
+[docs/troubleshooting.md](docs/troubleshooting.md) if your host restricts them.
 
 ## Build
 
@@ -129,120 +127,27 @@ What each one shows is listed in [examples/README.md](examples/README.md).
 
 **A session keeps nothing on disk unless you name a directory.** With no data
 directory the helper runs as Chromium's incognito: cookies, localStorage,
-IndexedDB and the HTTP cache live in memory, and the one install-level
-directory CEF insists on writing is a mode-0700 temporary directory under
-`$XDG_RUNTIME_DIR` (or `/dev/shm` when that is unset). It is removed when the
-helper exits, and a root left behind by a killed helper is swept on the next
-start. Nothing is ever written under `~/.cache`, and CEF is never allowed to
-fall back to `~/.config/cef_user_data`.
-
-To keep page data across restarts, name one absolute path before `start()`:
+IndexedDB and the HTTP cache live in memory, the one install-level directory
+CEF insists on writing is a mode-0700 temporary directory under
+`$XDG_RUNTIME_DIR`, and nothing is ever written under `~/.cache`. To keep page
+data across restarts, name one absolute path before `start()`:
 
 ```c
 chromium_session_set_data_directory (session, "/home/me/.local/share/myapp/cefnest");
 chromium_session_start (session, "https://example.com", &error);
 ```
 
-| Before `start()` | `root_cache_path` | `cache_path` | Result |
-| --- | --- | --- | --- |
-| nothing (default) | `$XDG_RUNTIME_DIR/cefnest-helper-<pid>-XXXXXX`, mode 0700 | empty | incognito, in-memory cache; the temporary directory goes on exit, leftovers are swept on the next start |
-| `set_data_directory (session, P)` | `P` | `P/browser` | persistent profile: cookies and storage survive restarts |
-
-Rules:
-
-- The path must be absolute. `~` is not expanded, and a relative path makes
-  `start()` fail with `G_IO_ERROR_INVALID_ARGUMENT`.
-- The directory is created with mode 0700 when missing. CEFNest never deletes
-  it on its own; `chromium_session_clear_data()` is the one eraser, and it
-  keeps the property set (the next `start()` recreates the directory empty).
-- One directory, one helper: a second session pointed at a directory already
-  in use fails early. In the same process the registry returns
-  `G_IO_ERROR_BUSY` from `start()`; across processes the helper's `flock`
-  refuses it, so that session closes with "process exited".
-- It is one complete profile. CEF requires `cache_path` to live below
-  `root_cache_path`, so there is no "cache on disk, cookies in memory" split.
-- Session cookies die with the helper even in persistent mode
-  (`persist_session_cookies` is false).
-- Setting the property while a session runs affects the next `start()`, not
-  the running helper.
-
-**Where to put it.** Use `g_get_user_data_dir()` — normally
-`~/.local/share/<app>/…`. Do **not** use `~/.cache`: XDG defines it as
-disposable, so a cleaner such as BleachBit can silently erase logins, and the
-user sees "randomly logged out". Expect the platform, not CEFNest, to decide
-whether data follows an uninstall:
-
-| Install shape | What happens to the data directory |
-| --- | --- |
-| Flatpak | inside the sandbox the path resolves under `~/.var/app/<id>/…`; `flatpak uninstall --delete-data` removes it |
-| Snap | removed by `snap remove --purge` |
-| deb / rpm | user data survives uninstall, as it does for Chromium and Firefox; delete it yourself or call `clear_data()` |
-
-The demo accepts `--data-dir=<absolute path>`; without it the demo is
-incognito too.
-
-A standalone helper uses the same contract as an environment variable:
-`CHROMIUM_HELPER_DATA_DIR=/absolute/path ./cefnest-helper` is persistent,
-unset is incognito. A host always decides for its child: the library unsets
-`CHROMIUM_HELPER_DATA_DIR` before spawning, so a value inherited from the
-host's environment cannot turn a session disk-backed.
-
-Older builds derived a cache directory under `~/.cache/cefnest-helper*`.
-Nothing writes there any more, and nothing deletes those directories for you;
-remove them after upgrading:
-
-```sh
-rm -rf ~/.cache/cefnest-helper ~/.cache/cefnest-helper-hosted-*
-```
+The full contract — the rules, where to put the directory and what an
+uninstall does with it per packaging format, the standalone helper's
+environment variable, and cleaning up the pre-156 `~/.cache` directories — is
+in [docs/data-directory.md](docs/data-directory.md).
 
 ## API
 
 `ChromiumView` is the widget; `ChromiumSession` is the control plane that
 starts the helper and tracks the page. Full per-call contracts are documented
-inline in `src/chromium-session.h`.
-
-**Methods**
-
-| Group | Calls |
-| --- | --- |
-| Lifecycle | `chromium_session_new()` · `set_view()` · `start()` · `stop()` |
-| Data | `set_data_directory()` · `get_data_directory()` · `clear_data()`; the `data-directory` property |
-| Navigation | `load_uri()` · `go_back()` · `go_forward()` · `reload()` · `stop_loading()` |
-| State | `get_uri()` · `get_title()` · `get_loading()` · `get_can_go_back()` · `get_can_go_forward()` · `get_running()` · `get_muted()` · `get_zoom_level()` · `get_frame_count()` · `get_helper_path()` |
-| JavaScript | `run_javascript()` · `run_javascript_expression()` → answer on `::script-result` |
-| Downloads | answer `::download-begin` with `accept_download()` / `reject_download()`; in flight: `pause_download()` / `resume_download()` |
-| Find | `find()` · `stop_finding()` → answers on `::find-result` |
-| Context menu | answer `::context-menu` with `context_menu_select()` / `context_menu_dismiss()` |
-| Permissions | answer `::permission-request` with `permission_respond()` |
-| Tabs / windows | `new_browser()` · `select_browser()` · `close_browser()` |
-| View source | `view_source()` → answered by `::view-source` / `::view-source-error`; the `auto-source-window` property (default on) decides whether the component's window opens |
-| Page / misc | `set_muted()` · `zoom("in"/"out"/"reset")` · `set_accessibility()` |
-
-**Signals**
-
-| Signal | Carries | Notes |
-| --- | --- | --- |
-| `::changed` | — | uri / title / loading / back-forward / mute state moved |
-| `::ready` | — | helper handshake done |
-| `::load-end` | `url, http_code` | fires on failure too, with code 0 |
-| `::load-error` | `error_code, url, message` | a navigation that never committed |
-| `::renderer-exited` | `status, error_code, message` | the page's render process died |
-| `::script-result` | `id, ok, value, message` | answer to a `run_javascript` call |
-| `::download-begin` | `id, url, suggested_name, mime_type, total_bytes` | must be answered |
-| `::download-progress` / `::download-end` | see header | progress per whole percent |
-| `::find-result` | `identifier, count, active_ordinal, final` | one request may answer more than once |
-| `::context-menu` | `x, y, items` | return TRUE to draw your own menu, then answer |
-| `::permission-request` | `id, kind, origin, permissions, raw` | return TRUE to own the answer; default is deny |
-| `::permission-dismissed` | `id, result` | a held prompt was replaced by the page |
-| `::browser-created` / `::browser-selected` / `::browser-closed` | `id, …` | tab and window lifecycle |
-| `::popup-requested` | `url` | target=_blank; foreground ones already navigated in place |
-| `::page-message` | `json` | page called `cefnestPostMessage()`; reply via `run_javascript` |
-| `::primary-selection` / `::copy-text` / `::open-url` | `text` / `text` / `url` | selection bridge, menu copy, menu "open in new window" |
-| `::zoom-changed` | `level` | 0.0 = 100 %; also after each main-frame load |
-| `::view-source` | `browser, url, source` | a View Source request completed; `source` is valid only during the emission |
-| `::view-source-error` | `browser, message` | the source never arrived |
-| `::closed` | `reason` | helper gone for good; `start()` again for a new page |
-| `::helper-exited` | — | the process has been reaped; destroy the display here |
+inline in `src/chromium-session.h`; the method and signal digest — every call
+group and what each signal carries — is in [docs/api.md](docs/api.md).
 
 ## Demo environment variables
 
@@ -257,22 +162,16 @@ inline in `src/chromium-session.h`.
 | `CHROMIUM_USER_AGENT` | default User-Agent baked in at helper startup |
 | `G_MESSAGES_DEBUG` | **space**-separated log domains: `all`, or `nested chromium-view chromium-session` |
 
-The demo also accepts `--data-dir=<absolute path>` (see **Data directory**),
-and reads extra knobs (`CEFNEST_DOWNLOAD_*`, `CEFNEST_PERMISSION`,
+The demo also accepts `--data-dir=<absolute path>` (see
+[docs/data-directory.md](docs/data-directory.md)), and reads extra knobs (`CEFNEST_DOWNLOAD_*`, `CEFNEST_PERMISSION`,
 `CEFNEST_DRAG_OUT`, `CHROMIUM_WINDOW`, `CHROMIUM_FRAME_METRICS`, the clipboard
 seed/watch variables, `CHROMIUM_A11Y`); see `src/main.c`.
 
 ## Troubleshooting
 
-| Symptom | Fix |
-| --- | --- |
-| `No usable sandbox!` at helper start | the host restricts unprivileged user namespaces. Install an AppArmor profile allowing userns for `cefnest-helper` (recommended), or set `CHROMIUM_HELPER_NO_SANDBOX=1` |
-| `start()` says `no helper binary at …` | that exact path is what was tried: install `cefnest-helper`, or point `CEFNEST_HELPER` at an absolute path; in a dev tree, run cmake first |
-| Window shows a blank page area | confirm the helper is running and the session is a native Wayland session (`GDK_BACKEND=wayland`); X11 does not render |
-| `G_MESSAGES_DEBUG` prints nothing | the domain list is **space**-separated; a comma list matches nothing |
-| Closing the last tab closes the page | one session is one helper; open a new browser first, or handle `::closed` |
-| `Lost connection to Wayland compositor` before `::helper-exited` | normal teardown order — destroy your display only after `::helper-exited` |
-| The helper is quiet on stderr | deliberate: Chromium's log severity is WARNING, so per-event INFO chatter is gone; warnings and errors still print |
+The symptom → fix table — sandbox refusals, a missing helper, a blank page
+area, log domains that print nothing, teardown order — is in
+[docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Known limitations
 
@@ -295,6 +194,13 @@ seed/watch variables, `CHROMIUM_A11Y`); see `src/main.c`.
 
 ## Documentation
 
+- `docs/data-directory.md` — the data-directory contract: nothing on disk by
+  default, one path for a persistent profile, exclusivity, uninstall
+  behaviour, legacy `~/.cache` cleanup.
+- `docs/api.md` — the method and signal digest; the authoritative contract is
+  `src/chromium-session.h`.
+- `docs/troubleshooting.md` — symptom → fix, from `No usable sandbox!` to log
+  domains.
 - `docs/control-channel.md` — the NDJSON protocol between session and helper
   (commands, events, the four interaction shapes). Only needed for custom
   helpers or direct channel work.
