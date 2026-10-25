@@ -28,5 +28,6 @@ helper 的查找方式见仓库根目录 `README.zh-CN.md` 的**安装**一节�
 | `errors.c` | 三种“页面已不是原来的样子”的信号：`::load-error`、`::renderer-exited`、`::closed`，以及各自如何接入 |
 | `observe.c` | 帧计数器与无障碍开关：让“页面卡住了”变得可测量 |
 | `useragent.c` | 在运行时切换 User-Agent：重启 session，新的 `CHROMIUM_USER_AGENT` 会随 helper 一起生效 |
+| `persistent.c` | 数据目录：localStorage 跨重启读回，以及用户要求遗忘时的 `clear_data()` |
 
 每个文件的头注释就是它的完整说明；先读 `minimal.c`，再按需取用。

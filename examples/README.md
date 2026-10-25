@@ -29,6 +29,7 @@ protocol between session and helper: [`docs/control-channel.md`](../docs/control
 | `errors.c` | the three "the page is not what it was" signals: `::load-error`, `::renderer-exited`, `::closed` — and how to wire each |
 | `observe.c` | the frame counter and the accessibility switch: making "the page froze" measurable |
 | `useragent.c` | switching the User-Agent at runtime: restart the session, the new `CHROMIUM_USER_AGENT` rides with the helper |
+| `persistent.c` | a data directory: localStorage read back across restarts, and `clear_data()` when the user asks to forget |
 
 Each file's header comment is its full write-up; start with `minimal.c` and
 pick what you need.

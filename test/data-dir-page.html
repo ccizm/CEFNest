@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>DATA-DIR-PAGE</title>
+<script>
+  // test/data-dir-gate.sh reads this back in a second run: localStorage is the
+  // visible half of "the profile survived", and the only one a script can
+  // assert without opening DevTools.
+  localStorage.setItem('cefnest-gate', 'persisted');
+</script>
+<body style="font: 16px sans-serif">
+  <h1>data directory gate page</h1>
+  <p>This page wrote <code>cefnest-gate=persisted</code> to localStorage.</p>
+</body>

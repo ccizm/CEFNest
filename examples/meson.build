@@ -28,6 +28,7 @@ examples_files = [
   'observe.c',     # frame counter and the accessibility switch
   'useragent.c',   # switch the User-Agent by restarting the helper
   'focus-chain.c', # gtk widgets and page elements in one tab order
+  'persistent.c',  # a data directory: localStorage across restarts, clear_data()
 ]
 
 foreach file : examples_files

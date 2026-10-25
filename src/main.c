@@ -15,6 +15,9 @@ typedef struct {
   ChromiumView *view;
   GSubprocess *child;
   char **client_argv;
+  /* --data-dir=<absolute path>: the demo's one persistent profile, handed to
+   * the session before start(). NULL means the default: no disk at all. */
+  char *data_directory;
   /* What the process hands back once the run is over. Only a scripted run that
    * was cut short gives it anything but 0; see script_helper_gone(). */
   int exit_status;
@@ -518,17 +521,14 @@ session_popup_requested (ChromiumSession *session, const char *url, gpointer dat
 
 /* A menu action that the helper executes is only half of a browser action:
  * copying is the host clipboard, and "new window" is a second widget with its
- * own helper. The demo implements the latter by starting another copy of
- * itself with a unique CEF profile, so two windows never fight over
- * ~/.cache/cefnest-helper-hosted. */
+ * own helper. Each helper gets its own ephemeral profile unless its host names
+ * a data directory, so two windows no longer fight over one Chromium profile
+ * and this is just "start another copy of the demo". */
 static void
 open_url_in_new_window (const char *url)
 {
   GError *error = NULL;
   g_autofree char *exe = g_file_read_link ("/proc/self/exe", &error);
-  g_autofree char *uuid = NULL;
-  g_autofree char *cache = NULL;
-  g_autofree char *config = NULL;
   GSubprocessLauncher *launcher;
   GSubprocess *child;
   const char *argv[] = { NULL, NULL };
@@ -541,15 +541,7 @@ open_url_in_new_window (const char *url)
       return;
     }
 
-  uuid = g_uuid_string_random ();
-  cache = g_build_filename (g_get_user_cache_dir (), "cefnest-window", uuid, NULL);
-  config = g_build_filename (g_get_user_config_dir (), "cefnest-window", uuid, NULL);
-  g_mkdir_with_parents (cache, 0700);
-  g_mkdir_with_parents (config, 0700);
-
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_NONE);
-  g_subprocess_launcher_setenv (launcher, "XDG_CACHE_HOME", cache, TRUE);
-  g_subprocess_launcher_setenv (launcher, "XDG_CONFIG_HOME", config, TRUE);
   g_subprocess_launcher_setenv (launcher, "CHROMIUM_URL", url, TRUE);
   g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_SESSION_SCRIPT");
   g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_DUMP");
@@ -1823,8 +1815,25 @@ build_toolbar (GtkHeaderBar *header)
   if (g_strcmp0 (g_getenv ("CEFNEST_SOURCE_WINDOW"), "0") == 0)
     g_object_set (demo.session, "auto-source-window", FALSE, NULL);
 
+  if (demo.data_directory)
+    chromium_session_set_data_directory (demo.session, demo.data_directory);
+
   if (!chromium_session_start (demo.session, initial_url (), &error))
     {
+      /* A run that was asked for a persistent profile must not fall back to a
+       * session-less window: say why and exit, so a script sees the failure.
+       * Every other start failure keeps the old behaviour — a warning and a
+       * demo with no page. */
+      if (demo.data_directory)
+        {
+          g_printerr ("demo: %s\n", error->message);
+          g_clear_error (&error);
+          g_clear_object (&demo.session);
+          demo.exit_status = 1;
+          g_application_quit (G_APPLICATION (demo.app));
+          return;
+        }
+
       g_warning ("demo: %s", error->message);
       g_clear_error (&error);
       g_clear_object (&demo.session);
@@ -3528,10 +3537,21 @@ main (int argc, char *argv[])
 
   /* Everything after the program name is the inner client command line; keep
    * it away from GApplication, which would try to parse its own options. Copy
-   * the strings: the array is released with g_strfreev(), which owns them. */
+   * the strings: the array is released with g_strfreev(), which owns them.
+   * --data-dir= is the demo's own option, so it is taken out here rather than
+   * handed to a client that would only read it as a URL. */
   args = g_ptr_array_new ();
   for (i = 1; i < argc; i++)
-    g_ptr_array_add (args, g_strdup (argv[i]));
+    {
+      if (g_str_has_prefix (argv[i], "--data-dir="))
+        {
+          g_free (demo.data_directory);
+          demo.data_directory = g_strdup (argv[i] + strlen ("--data-dir="));
+          continue;
+        }
+
+      g_ptr_array_add (args, g_strdup (argv[i]));
+    }
   if (args->len == 0)
     g_ptr_array_add (args, g_strdup (demo_find_client ()));
   g_ptr_array_add (args, NULL);
@@ -3555,6 +3575,7 @@ main (int argc, char *argv[])
 
   g_object_unref (app);
   g_strfreev (demo.client_argv);
+  g_free (demo.data_directory);
   /* Not a fixed 0: a scripted run cut short by its helper dying sets
    * demo.exit_status, and a harness only sees the difference if it is handed out. */
   return demo.exit_status;

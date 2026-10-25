@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +41,7 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
@@ -216,61 +218,100 @@ std::string PickUrl(int argc, char** argv) {
   return kDefaultUrl;
 }
 
-std::string CacheDirectory(const std::string& name) {
-  std::string base = EnvOrEmpty("XDG_CACHE_HOME");
-  if (base.empty()) {
-    std::string home = EnvOrEmpty("HOME");
-    base = home.empty() ? "/tmp" : home + "/.cache";
-  }
-  std::string dir = base + "/" + name;
-  std::error_code error;
-  std::filesystem::create_directories(dir, error);
-  return dir;
+// Where an ephemeral profile lives: a tmpfs directory whose contents vanish on
+// reboot even when a helper crashes and never removes them. XDG_RUNTIME_DIR is
+// the user's own (mode 0700, already required by Wayland); /dev/shm is the
+// fallback because it is tmpfs too. Never ~/.cache and never /tmp: the first is
+// something a cleaner may delete, the second is often a disk.
+std::string RuntimeBaseDir() {
+  const std::string runtime = EnvOrEmpty("XDG_RUNTIME_DIR");
+  return runtime.empty() ? "/dev/shm" : runtime;
 }
 
-// Chromium allows one browser process per cache directory: a second helper
-// pointed at the same profile prints "Opening in an existing browser session"
-// and exits — and the collision has also been observed to take the first
-// helper down with it. Hosts each listen on their own socket, so the socket
-// path is a stable per-instance identity: hash it into the directory name and
-// concurrent hosts stop sharing a profile. The same host keeps the same
-// directory across runs, so cookies and the GPU cache are still reused.
-std::string SocketCacheSuffix(const std::string& socket_path) {
-  uint64_t hash = 1469598103934665603ull;   // FNV-1a
-  for (unsigned char c : socket_path) {
-    hash ^= c;
-    hash *= 1099511628211ull;
+// "<base>/cefnest-helper-<pid>-XXXXXX", created by mkdtemp (mode 0700) and
+// deliberately identifiable: SweepEphemeralRoots() reads the pid back out of
+// the name. Empty means it could not be created, and the caller must not start
+// a browser without a profile root.
+std::string MakeEphemeralRoot() {
+  std::string pattern =
+      RuntimeBaseDir() + "/cefnest-helper-" + std::to_string(getpid()) +
+      "-XXXXXX";
+  if (mkdtemp(pattern.data()) == nullptr) {
+    fprintf(stderr, "helper: cannot create an ephemeral profile in %s: %s\n",
+            pattern.c_str(), strerror(errno));
+    return "";
   }
-  char out[17];
-  snprintf(out, sizeof(out), "%016llx",
-           static_cast<unsigned long long>(hash));
-  return out;
+  return pattern;
 }
 
-// Hosts come and go — crashed ones especially — so their per-instance
-// directories would pile up forever without a sweep. Anything not touched for
-// two weeks goes. The current instance's directory is created moments later
-// and is brand new, so it is never its own victim; a failure to remove is
-// ignored: the sweep is best effort and must never block startup.
-void PruneStaleCacheDirs(const std::string& keep) {
-  std::string base = EnvOrEmpty("XDG_CACHE_HOME");
-  if (base.empty()) {
-    std::string home = EnvOrEmpty("HOME");
-    base = home.empty() ? "/tmp" : home + "/.cache";
-  }
+// A crashed helper cannot remove its own tmpfs directory, so the next one does
+// it. Only "cefnest-helper-" directories whose pid is gone (ESRCH) are
+// victims: a live pid may be a helper, and this process's own root must never
+// be touched. Best effort: a name that does not parse or a directory that will
+// not go is left alone.
+void SweepEphemeralRoots(const std::string& base) {
   std::error_code error;
-  const auto cutoff = std::filesystem::file_time_type::clock::now() -
-                      std::chrono::hours(24 * 14);
-  for (const auto& entry :
-       std::filesystem::directory_iterator(base, error)) {
-    const std::string name = entry.path().filename().string();
-    if (name.rfind("cefnest-helper-hosted-", 0) != 0 ||
-        entry.path().string() == keep)
+  for (const auto& entry : std::filesystem::directory_iterator(base, error)) {
+    std::error_code kind_error;
+    if (!entry.is_directory(kind_error) || kind_error)
       continue;
-    auto last = std::filesystem::last_write_time(entry.path(), error);
-    if (!error && last < cutoff)
+
+    const std::string name = entry.path().filename().string();
+    constexpr char kPrefix[] = "cefnest-helper-";
+    if (name.rfind(kPrefix, 0) != 0)
+      continue;
+
+    size_t at = sizeof(kPrefix) - 1;
+    pid_t pid = 0;
+    const size_t digits = at;
+    while (at < name.size() && name[at] >= '0' && name[at] <= '9') {
+      if (pid > (INT_MAX - 9) / 10) {
+        pid = 0;
+        break;
+      }
+      pid = pid * 10 + (name[at++] - '0');
+    }
+    if (at == digits || at >= name.size() || name[at] != '-')
+      continue;
+    if (pid <= 0 || pid == getpid())
+      continue;
+
+    // EPERM means the pid exists and belongs to somebody else: alive enough.
+    if (kill(pid, 0) == -1 && errno == ESRCH)
       std::filesystem::remove_all(entry.path(), error);
   }
+}
+
+// The one authoritative lock on a persistent data directory. It is taken by
+// the helper and held for the life of the process: the kernel drops it on
+// exit, crash included, so there is no stale lock to clean up and no pid file
+// to go out of date. The descriptor is intentionally never closed.
+bool LockDataDirectory(const std::string& dir) {
+  static int lock_fd = -1;
+  if (lock_fd >= 0)
+    return true;
+
+  const std::string path = dir + "/.cefnest.lock";
+  lock_fd = open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  if (lock_fd < 0) {
+    fprintf(stderr, "helper: cannot open %s: %s\n", path.c_str(),
+            strerror(errno));
+    return false;
+  }
+  if (flock(lock_fd, LOCK_EX | LOCK_NB) == -1) {
+    close(lock_fd);
+    lock_fd = -1;
+    return false;
+  }
+  return true;
+}
+
+void RemoveTree(const std::string& path) {
+  std::error_code error;
+  std::filesystem::remove_all(path, error);
+  if (error)
+    fprintf(stderr, "helper: could not remove %s: %s\n", path.c_str(),
+            error.message().c_str());
 }
 
 class Control;
@@ -2733,15 +2774,39 @@ int main(int argc, char** argv) {
   if (!auto_quit.empty())
     g_auto_quit_ms = std::strtol(auto_quit.c_str(), nullptr, 10);
 
-  std::string cache_dir;
-  if (socket_path.empty()) {
-    // Standalone mode: one fixed profile, one instance at a time by design.
-    cache_dir = CacheDirectory("cefnest-helper");
+  // A data directory is the host's or the standalone user's decision, and
+  // nothing here invents one: without CHROMIUM_HELPER_DATA_DIR there is no
+  // persistence at all, only a tmpfs root for what CEF insists on writing.
+  // The host names the directory for its own session; the environment variable
+  // is also the standalone entry point.
+  const std::string given = EnvOrEmpty("CHROMIUM_HELPER_DATA_DIR");
+  const bool ephemeral = given.empty();
+  std::string root;
+  std::string profile;
+  if (ephemeral) {
+    root = MakeEphemeralRoot();
+    if (root.empty())
+      return 1;
   } else {
-    cache_dir = CacheDirectory("cefnest-helper-hosted-" +
-                               SocketCacheSuffix(socket_path));
+    // A misspelt path must fail loudly: quietly falling back to an ephemeral
+    // profile would turn "persistent" into "silently lost on exit".
+    std::error_code error;
+    if (given.front() != '/' || !std::filesystem::is_directory(given, error)) {
+      fprintf(stderr, "helper: data directory not usable: %s\n", given.c_str());
+      return 1;
+    }
+    if (!LockDataDirectory(given)) {
+      fprintf(stderr, "helper: data directory is in use: %s\n", given.c_str());
+      return 1;
+    }
+    root = given;
+    profile = given + "/browser";
   }
-  fprintf(stderr, "helper: cache=%s\n", cache_dir.c_str());
+  if (ephemeral)
+    fprintf(stderr, "helper: cache mode=ephemeral root=%s\n", root.c_str());
+  else
+    fprintf(stderr, "helper: cache mode=persistent root=%s profile=%s\n",
+            root.c_str(), profile.c_str());
 
   CefSettings settings;
   // Sandbox on unless the host takes it off on purpose, and no fallback: a host
@@ -2769,8 +2834,13 @@ int main(int argc, char** argv) {
     if (!ua.empty())
       CefString(&settings.user_agent).FromString(ua);
   }
-  CefString(&settings.root_cache_path).FromString(cache_dir);
-  CefString(&settings.cache_path).FromString(cache_dir + "/browser");
+  // root_cache_path is never empty: that is the structural half of "no data
+  // directory means no disk", because a CEF with nothing here falls back to
+  // ~/.config/cef_user_data. cache_path stays empty in ephemeral mode, which
+  // is what makes the profile in-memory (Chromium's incognito).
+  CefString(&settings.root_cache_path).FromString(root);
+  if (!profile.empty())
+    CefString(&settings.cache_path).FromString(profile);
 
   const std::string resources = EnvOrEmpty("CEF_RESOURCES_PATH");
   if (!resources.empty()) {
@@ -2781,6 +2851,8 @@ int main(int argc, char** argv) {
 
   if (!CefInitialize(main_args, settings, app, nullptr)) {
     fprintf(stderr, "helper: CefInitialize failed\n");
+    if (ephemeral)
+      RemoveTree(root);
     return 1;
   }
 
@@ -2790,15 +2862,13 @@ int main(int argc, char** argv) {
   // is simply gone by the time there is a message loop to leave.
   signals.Start();
 
-  // The stale-cache sweep is unbounded filesystem work over ~/.cache (entries
+  // Removing a dead helper's tmpfs root is unbounded filesystem work (entries
   // to stat, whole trees to remove), so it runs on its own thread: the reader
   // is already answering the host, and CefInitialize and the message loop must
-  // not queue behind a scan of whatever else lives in the cache directory. It
-  // touches nothing but the filesystem, and every exit path below joins it —
-  // a thread outliving main() would race the C runtime's teardown.
-  std::thread prune;
-  if (!socket_path.empty())
-    prune = std::thread([keep = cache_dir] { PruneStaleCacheDirs(keep); });
+  // not queue behind a scan of the runtime directory. Standalone runs sweep
+  // too — they leave the same kind of root behind. Every exit path below joins
+  // it: a thread outliving main() would race the C runtime's teardown.
+  std::thread sweep([] { SweepEphemeralRoots(RuntimeBaseDir()); });
 
   // Hosted: no initial navigation. The empty document a browser starts with is
   // not a history entry of its own — the host's first load replaces it, which is
@@ -2814,8 +2884,10 @@ int main(int argc, char** argv) {
     signals.Stop();
     control.Shutdown();
     CefShutdown();
-    if (prune.joinable())
-      prune.join();
+    if (sweep.joinable())
+      sweep.join();
+    if (ephemeral)
+      RemoveTree(root);
     return 1;
   }
   g_select_slot = first_slot;
@@ -2825,8 +2897,10 @@ int main(int argc, char** argv) {
   control.Shutdown();
   g_control = nullptr;
   CefShutdown();
-  if (prune.joinable())
-    prune.join();
+  if (sweep.joinable())
+    sweep.join();
+  if (ephemeral)
+    RemoveTree(root);
   fprintf(stderr, "helper: exited\n");
   return 0;
 }

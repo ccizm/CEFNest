@@ -17,11 +17,12 @@
 # ends in a deny, and the accept that is asserted is a notification, which needs
 # no device.
 #
-# Each real run gets its own XDG_CACHE_HOME so it starts on a profile nobody else
-# decided on: state left behind by the run before it would be a decision this run
-# asserts but never made. Measured, a permission the host denied is still asked of
-# the host the next time, so this is isolation
-# between runs rather than a defence against a remembered answer.
+# Each real run gets its own XDG_CACHE_HOME for the caches outside CEF
+# (fontconfig, Mesa). The Chromium profile is ephemeral unless a host names a
+# data directory, so one run cannot carry a remembered answer into the next
+# anyway. Measured, a permission the host denied is still asked of the host the
+# next time, so this is isolation between runs rather than a defence against a
+# remembered answer.
 #
 #   ./test/permission-gate.sh            # fake + real
 #   ./test/permission-gate.sh fake       # only the half that needs no browser

@@ -21,6 +21,39 @@ gboolean           chromium_session_start         (ChromiumSession *self,
                                                    GError **error);
 void               chromium_session_stop          (ChromiumSession *self);
 
+/* Where the helper keeps the page's own data — cookies, localStorage,
+ * IndexedDB, the HTTP cache — and whether it keeps any at all.
+ *
+ * The default is no directory: the helper runs an in-memory profile
+ * (Chromium's incognito), and the few files CEF must write for the install go
+ * into a private directory on tmpfs that is removed when the helper exits. A
+ * host that wants a persistent profile sets an absolute @path; everything the
+ * page stores then lives under it, and the next start() with the same path
+ * sees the cookies and storage the previous run left behind.
+ *
+ * The path is checked in chromium_session_start (), not here: a relative path
+ * — and therefore a "~"-prefixed one, which is not expanded — is refused
+ * there, the directory is created with mode 0700 if it does not exist, and a
+ * directory a live session already holds, in this process or in another, is
+ * refused rather than shared. Setting this while a helper runs changes
+ * nothing until the next start(): the helper reads it once, at spawn time.
+ *
+ * Chromium keeps session cookies in memory even in this mode, so they do not
+ * survive a restart; that is Chromium's own rule, not a switch here. There is
+ * no way to store the HTTP cache on disk while keeping cookies in memory —
+ * this directory is one complete profile. */
+void               chromium_session_set_data_directory (ChromiumSession *self,
+                                                        const char *path);
+const char        *chromium_session_get_data_directory (ChromiumSession *self);
+
+/* Remove the data directory and everything under it. Refused while this
+ * session runs and while a helper in any process still holds the directory;
+ * TRUE means it is gone, including the case where there was nothing there.
+ * The property keeps its value, so the next start() recreates the directory
+ * and the host does not have to set it again. */
+gboolean           chromium_session_clear_data         (ChromiumSession *self,
+                                                        GError **error);
+
 /* Runtime accessibility. The session watches org.a11y.Status's
  * ScreenReaderEnabled property on the session bus and calls this itself; a host
  * may also force it. TRUE maps to CefBrowserHost::SetAccessibilityState(

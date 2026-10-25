@@ -18,9 +18,14 @@ Set by the host when it spawns the subprocess:
 | `GDK_BACKEND` | `wayland` |
 | `XDG_SESSION_TYPE` | `wayland` |
 | `CHROMIUM_HELPER_SOCKET` | full path of the control-channel socket |
+| `CHROMIUM_HELPER_DATA_DIR` | absolute path of a persistent profile; absent means incognito |
 
-`DISPLAY` and `WAYLAND_SOCKET` are removed; every other variable belongs to
-whoever spawns the helper.
+`DISPLAY` and `WAYLAND_SOCKET` are removed. `CHROMIUM_HELPER_DATA_DIR` is set
+only when the host asked for a data directory — otherwise it is removed even
+if the host's own environment had it — and every other variable belongs to
+whoever spawns the helper. A helper started by hand reads the same variable:
+an absolute path selects a persistent profile, absence selects incognito with
+a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 
 ## Commands (host → helper)
 

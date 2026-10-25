@@ -1,8 +1,10 @@
 #define G_LOG_DOMAIN "chromium-session"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 #include <gio/gio.h>
@@ -70,10 +72,12 @@ enum {
 
 enum {
   PROP_0,
-  /* The class's one and only property so far: whether the session opens its
-   * own View Source window, or only reports ::view-source and leaves the
-   * window to the host. */
+  /* Whether the session opens its own View Source window, or only reports
+   * ::view-source and leaves the window to the host. */
   PROP_AUTO_SOURCE_WINDOW,
+  /* The persistent profile directory, or NULL for the default ephemeral
+   * profile. Only start() reads it. */
+  PROP_DATA_DIRECTORY,
 };
 static guint signals[N_SIGNALS];
 
@@ -85,6 +89,7 @@ static void chromium_session_set_property (GObject *object, guint property,
                                            GParamSpec *pspec);
 static void source_transfer_reset (ChromiumSession *self);
 static void chromium_session_finalize (GObject *object);
+static void release_data_directory (ChromiumSession *self);
 
 static void send_json (ChromiumSession *self, JsonNode *root);
 static void command_add_string (JsonBuilder *builder, const char *key,
@@ -118,6 +123,12 @@ struct _ChromiumSession {
   char *uri;
   char *title;
   char *startup_url;
+  /* The profile directory the host asked for, and the exact string this
+   * process has registered for it while a helper is alive. The second is what
+   * release_data_directory() removes, so a host that changes the property
+   * mid-run does not release the path the old helper is still using. */
+  char *data_directory;
+  char *claimed_data_directory;
   gboolean loading;
   gboolean can_go_back;
   gboolean can_go_forward;
@@ -131,6 +142,9 @@ struct _ChromiumSession {
    * through CefShutdown(). Teardown must not SIGKILL over that announcement:
    * see chromium_session_dispose(). */
   gboolean helper_is_exiting;
+  /* The current helper was started without a data directory, so it owns a
+   * private tmpfs root the host has to remove when it SIGKILLs the process. */
+  gboolean child_ephemeral;
 
   /* Screen-reader detection: org.a11y.Status.ScreenReaderEnabled on the session
    * bus is the property Orca/gsd maintains. It drives the helper's runtime
@@ -2179,7 +2193,9 @@ child_waited (GObject *source, GAsyncResult *result, gpointer data)
        * new helper is about to use. */
       if (self->child && source == G_OBJECT (self->child))
         {
+          release_data_directory (self);
           g_clear_object (&self->child);
+          self->child_ephemeral = FALSE;
           drop_connection (self);
 
           /* ::closed said the page is gone; this says the process that held it
@@ -2272,6 +2288,285 @@ close_listener (ChromiumSession *self)
     }
 }
 
+/* Data directories claimed by live sessions in this process. The helper's own
+ * flock is the authority across processes; this table is what lets start()
+ * refuse the same path twice before a second helper exists to kill. Created on
+ * first use. */
+static GHashTable *data_directories;
+
+static void
+release_data_directory (ChromiumSession *self)
+{
+  if (!self->claimed_data_directory)
+    return;
+
+  if (data_directories)
+    g_hash_table_remove (data_directories, self->claimed_data_directory);
+  g_clear_pointer (&self->claimed_data_directory, g_free);
+}
+
+static void
+claim_data_directory (ChromiumSession *self)
+{
+  if (!data_directories)
+    data_directories = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                              g_free, NULL);
+
+  release_data_directory (self);
+  self->claimed_data_directory = g_strdup (self->data_directory);
+  g_hash_table_add (data_directories, g_strdup (self->data_directory));
+}
+
+/* TRUE when @dir is held by a helper, or when the lock cannot be examined at
+ * all: both mean "do not start". The helper's flock is the authority; this
+ * precheck only turns the common collision into an error from start(). */
+static gboolean
+data_directory_locked (const char *dir, GError **error)
+{
+  g_autofree char *lock_path = g_build_filename (dir, ".cefnest.lock", NULL);
+  int fd = open (lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+
+  if (fd < 0)
+    {
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
+                   "cannot open data directory lock %s: %s",
+                   lock_path, g_strerror (errno));
+      return TRUE;
+    }
+
+  if (flock (fd, LOCK_EX | LOCK_NB) == -1)
+    {
+      int saved = errno;
+
+      close (fd);
+      if (saved == EWOULDBLOCK)
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_BUSY,
+                     "data directory is in use by another session: %s", dir);
+      else
+        g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved),
+                     "cannot lock data directory %s: %s", dir,
+                     g_strerror (saved));
+      return TRUE;
+    }
+
+  /* Released right away: the helper must be the one holding it, and a second
+   * descriptor in this process would be the thing in its way. */
+  close (fd);
+  return FALSE;
+}
+
+static gboolean
+prepare_data_directory (ChromiumSession *self, GError **error)
+{
+  const char *dir = self->data_directory;
+  gboolean ours;
+
+  if (!dir || !*dir)
+    return TRUE;
+
+  if (!g_path_is_absolute (dir))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                   "data directory must be an absolute path: %s", dir);
+      return FALSE;
+    }
+
+  ours = g_strcmp0 (self->claimed_data_directory, dir) == 0;
+  if (!ours && data_directories &&
+      g_hash_table_contains (data_directories, dir))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_BUSY,
+                   "data directory already in use by another session: %s", dir);
+      return FALSE;
+    }
+
+  /* A leaf that is a file: mkdir would fail with EEXIST, which reads like a
+   * concurrency problem rather than the configuration mistake it is. */
+  if (g_file_test (dir, G_FILE_TEST_EXISTS) &&
+      !g_file_test (dir, G_FILE_TEST_IS_DIR))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_DIRECTORY,
+                   "data directory is not a directory: %s", dir);
+      return FALSE;
+    }
+
+  if (g_mkdir_with_parents (dir, 0700) == -1)
+    {
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (errno),
+                   "cannot create data directory %s: %s", dir,
+                   g_strerror (errno));
+      return FALSE;
+    }
+
+  /* A restart keeps its own directory: the helper being torn down still holds
+   * the lock, and waiting for that kill to land here would only block the
+   * thread on a lock this session is about to take back. */
+  if (!ours && data_directory_locked (dir, error))
+    return FALSE;
+
+  return TRUE;
+}
+
+/* GLib has no recursive delete, and every host that owns a profile would
+ * otherwise write this. Children go before the directory that holds them. */
+static gboolean
+remove_tree (const char *path, GError **error)
+{
+  g_autoptr (GFile) dir = g_file_new_for_path (path);
+  g_autoptr (GFileEnumerator) entries = NULL;
+  GFileInfo *info;
+
+  entries = g_file_enumerate_children (dir,
+                                       G_FILE_ATTRIBUTE_STANDARD_NAME ","
+                                       G_FILE_ATTRIBUTE_STANDARD_TYPE,
+                                       G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+                                       NULL, error);
+  if (!entries)
+    return FALSE;
+
+  while ((info = g_file_enumerator_next_file (entries, NULL, error)) != NULL)
+    {
+      g_autoptr (GFile) child =
+        g_file_get_child (dir, g_file_info_get_name (info));
+      gboolean is_dir =
+        g_file_info_get_file_type (info) == G_FILE_TYPE_DIRECTORY;
+
+      g_object_unref (info);
+      if (is_dir ? !remove_tree (g_file_peek_path (child), error)
+                 : !g_file_delete (child, NULL, error))
+        return FALSE;
+    }
+
+  if (error && *error)
+    return FALSE;
+
+  return g_file_delete (dir, NULL, error);
+}
+
+/* SIGKILL is delivered asynchronously, and until it lands Chromium still owns
+ * the directory: files deleted in that window come back. A zombie has stopped
+ * executing and can only be reaped, so wait for that state before touching the
+ * tree. The child's own wait callback runs on the main context this function is
+ * blocking, so the pid is normally still there; a pid that is already gone was
+ * reaped and is equally safe. This is Linux-only, like the helper. */
+static void
+wait_for_child_stop (const char *identifier)
+{
+  g_autofree char *stat_path = g_strdup_printf ("/proc/%s/stat", identifier);
+  gint64 deadline = g_get_monotonic_time () + G_TIME_SPAN_SECOND;
+
+  for (;;)
+    {
+      g_autofree char *stat = NULL;
+      const char *close, *state = NULL;
+
+      if (!g_file_get_contents (stat_path, &stat, NULL, NULL))
+        return;
+
+      /* "pid (comm) state ...": comm may contain spaces and parentheses, so
+       * the state is the field after the last ')'. */
+      close = strrchr (stat, ')');
+      if (close && close[1] == ' ')
+        state = close + 2;
+      if (state && *state == 'Z')
+        return;
+
+      if (g_get_monotonic_time () >= deadline)
+        return;
+      g_usleep (1000);
+    }
+}
+
+/* The helper removes its own scratch root on every exit it can reach. A host
+ * stop is a SIGKILL, which is not one of them: the helper never runs its tail
+ * and the root would sit in tmpfs until the next helper's sweep. The host made
+ * that exit unreachable, so it removes the root instead. The child is a zombie
+ * until reaped and cannot have its pid reused, so a name match can only be this
+ * helper's root; anything else in the runtime directory is left alone.
+ *
+ * Deletion is retried until the directory is gone: SIGKILL stops the browser
+ * process, but Chromium's own children can still touch its cache for a moment,
+ * which makes a single pass fail with ENOENT or ENOTEMPTY. A root that refuses
+ * to go inside the deadline is left to the next helper's sweep. */
+static void
+remove_child_scratch (GSubprocess *child)
+{
+  const char *identifier = g_subprocess_get_identifier (child);
+  const char *runtime;
+  g_autofree char *prefix = NULL;
+  g_autoptr (GFile) base = NULL;
+  gint64 deadline;
+
+  if (!identifier)
+    return;
+
+  wait_for_child_stop (identifier);
+
+  /* The helper reads XDG_RUNTIME_DIR exactly, with /dev/shm as its fallback;
+   * g_get_user_runtime_dir() would add a fallback of its own. */
+  runtime = g_getenv ("XDG_RUNTIME_DIR");
+  if (!runtime || !*runtime)
+    runtime = "/dev/shm";
+
+  prefix = g_strdup_printf ("cefnest-helper-%s-", identifier);
+  base = g_file_new_for_path (runtime);
+  deadline = g_get_monotonic_time () + 2 * G_TIME_SPAN_SECOND;
+
+  for (;;)
+    {
+      g_autoptr (GFileEnumerator) entries = NULL;
+      GError *error = NULL;
+      GFileInfo *info;
+      gboolean found = FALSE;
+
+      entries = g_file_enumerate_children (base,
+                                           G_FILE_ATTRIBUTE_STANDARD_NAME ","
+                                           G_FILE_ATTRIBUTE_STANDARD_TYPE,
+                                           G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+                                           NULL, &error);
+      if (!entries)
+        {
+          g_debug ("session: cannot scan %s for %s: %s", runtime, prefix,
+                   error->message);
+          g_error_free (error);
+          return;
+        }
+
+      while ((info = g_file_enumerator_next_file (entries, NULL, &error)) != NULL)
+        {
+          const char *name = g_file_info_get_name (info);
+          gboolean is_dir =
+            g_file_info_get_file_type (info) == G_FILE_TYPE_DIRECTORY;
+
+          if (is_dir && g_str_has_prefix (name, prefix))
+            {
+              g_autoptr (GFile) candidate = g_file_get_child (base, name);
+
+              found = TRUE;
+              remove_tree (g_file_peek_path (candidate), NULL);
+            }
+          g_object_unref (info);
+        }
+
+      if (error)
+        {
+          g_debug ("session: scanning %s for %s failed: %s", runtime, prefix,
+                   error->message);
+          g_error_free (error);
+        }
+
+      if (!found)
+        return;
+      if (g_get_monotonic_time () >= deadline)
+        {
+          g_debug ("session: could not finish removing %s; the next helper "
+                   "will sweep it", prefix);
+          return;
+        }
+      g_usleep (20 * 1000);
+    }
+}
+
 gboolean
 chromium_session_start (ChromiumSession *self, const char *initial_url,
                         GError **error)
@@ -2284,6 +2579,11 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
 
   g_return_val_if_fail (CHROMIUM_IS_SESSION (self), FALSE);
   g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  /* Before the teardown below: a bad path must not cost the host the session
+   * it already has. */
+  if (!prepare_data_directory (self, error))
+    return FALSE;
 
   if (self->child)
     {
@@ -2303,9 +2603,24 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
         g_cancellable_cancel (self->cancellable);
       g_clear_handle_id (&self->accept_retry_id, g_source_remove);
       g_subprocess_force_exit (self->child);
+      if (self->child_ephemeral)
+        remove_child_scratch (self->child);
+      else
+        {
+          /* A persistent helper holds the directory's flock until the process
+           * is actually dead; the next helper would lose that race. */
+          const char *identifier = g_subprocess_get_identifier (self->child);
+
+          if (identifier)
+            wait_for_child_stop (identifier);
+        }
       g_clear_object (&self->child);
+      self->child_ephemeral = FALSE;
       close_listener (self);
       drop_connection (self);
+      /* The next helper claims whatever path this start() was configured
+       * with; the one the old process held is free once the kill lands. */
+      release_data_directory (self);
     }
   if (!self->view)
     {
@@ -2365,6 +2680,16 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
   g_subprocess_launcher_setenv (launcher, "XDG_SESSION_TYPE", "wayland", TRUE);
   g_subprocess_launcher_setenv (launcher, "CHROMIUM_HELPER_SOCKET",
                                 self->socket_path, TRUE);
+  /* The helper's profile is this session's decision, never the caller's
+   * environment: an inherited CHROMIUM_HELPER_DATA_DIR would make a host that
+   * asked for incognito disk-backed, and the other way round. Unsetting it
+   * explicitly is the half that matters — CEF writes to ~/.config/cef_user_data
+   * when nothing points it elsewhere. */
+  if (self->data_directory && *self->data_directory)
+    g_subprocess_launcher_setenv (launcher, "CHROMIUM_HELPER_DATA_DIR",
+                                  self->data_directory, TRUE);
+  else
+    g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_HELPER_DATA_DIR");
   g_subprocess_launcher_unsetenv (launcher, "DISPLAY");
   g_subprocess_launcher_unsetenv (launcher, "WAYLAND_SOCKET");
 
@@ -2389,6 +2714,12 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
 
   g_free (self->startup_url);
   self->startup_url = g_strdup (initial_url);
+  self->child_ephemeral = !(self->data_directory && *self->data_directory);
+
+  if (self->data_directory && *self->data_directory)
+    claim_data_directory (self);
+  else
+    release_data_directory (self);
 
   self->running = TRUE;
   self->stopping = FALSE;
@@ -2417,12 +2748,99 @@ chromium_session_stop (ChromiumSession *self)
     g_cancellable_cancel (self->cancellable);
 
   if (self->child && !self->helper_is_exiting)
-    g_subprocess_force_exit (self->child);
+    {
+      gboolean ephemeral = self->child_ephemeral;
+
+      g_subprocess_force_exit (self->child);
+
+      /* SIGKILL is the one exit the helper cannot clean up behind. Its root is
+       * named after this pid, which the zombie cannot lose until it is reaped,
+       * so this cannot hit another helper's directory. */
+      if (ephemeral)
+        remove_child_scratch (self->child);
+    }
 
   close_listener (self);
   drop_connection (self);
   mark_closed (self, "stopped by the host");
   self->stopping = FALSE;
+}
+
+void
+chromium_session_set_data_directory (ChromiumSession *self, const char *path)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  if (g_strcmp0 (self->data_directory, path && *path ? path : NULL) == 0)
+    return;
+
+  g_free (self->data_directory);
+  self->data_directory = path && *path ? g_strdup (path) : NULL;
+  g_object_notify (G_OBJECT (self), "data-directory");
+}
+
+const char *
+chromium_session_get_data_directory (ChromiumSession *self)
+{
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), NULL);
+  return self->data_directory;
+}
+
+gboolean
+chromium_session_clear_data (ChromiumSession *self, GError **error)
+{
+  const char *dir;
+  g_autofree char *lock_path = NULL;
+  gboolean removed;
+  int fd = -1;
+
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), FALSE);
+  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
+
+  if (self->running)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_BUSY,
+                           "cannot clear the data directory while the session runs");
+      return FALSE;
+    }
+
+  dir = self->data_directory;
+  if (!dir || !*dir)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "no data directory is set");
+      return FALSE;
+    }
+
+  /* Nothing there is a success: the caller asked for "gone", and it is. */
+  if (!g_file_test (dir, G_FILE_TEST_EXISTS))
+    return TRUE;
+
+  /* Only a helper creates this file, and a helper holds its lock for as long
+   * as it lives — so a missing file means nobody to ask, and a lock that
+   * cannot be taken means somebody still has the directory. The descriptor
+   * stays open across the removal so no helper can take the lock in between. */
+  lock_path = g_build_filename (dir, ".cefnest.lock", NULL);
+  fd = open (lock_path, O_RDWR | O_CLOEXEC);
+  if (fd >= 0 && flock (fd, LOCK_EX | LOCK_NB) == -1)
+    {
+      int saved = errno;
+
+      close (fd);
+      if (saved == EWOULDBLOCK)
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_BUSY,
+                     "data directory is in use by another session: %s", dir);
+      else
+        g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved),
+                     "cannot lock data directory %s: %s", dir,
+                     g_strerror (saved));
+      return FALSE;
+    }
+
+  removed = remove_tree (dir, error);
+  if (fd >= 0)
+    close (fd);
+  return removed;
 }
 
 void
@@ -2884,6 +3302,24 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                            TRUE,
                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  /**
+   * ChromiumSession:data-directory:
+   *
+   * The persistent profile directory — cookies, localStorage, IndexedDB and
+   * the HTTP cache all live under it — or %NULL (the default) for an
+   * in-memory, incognito profile whose helper-side scratch files sit on tmpfs
+   * and are removed when the helper exits. See
+   * chromium_session_set_data_directory() for the path rules; the property is
+   * read once per start(), by the helper that start() spawns.
+   */
+  g_object_class_install_property
+    (object_class, PROP_DATA_DIRECTORY,
+     g_param_spec_string ("data-directory", "Data directory",
+                          "Persistent profile directory, or NULL for none",
+                          NULL,
+                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                          G_PARAM_EXPLICIT_NOTIFY));
+
   signals[SIG_CHANGED] =
     g_signal_new ("changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
@@ -3071,6 +3507,9 @@ chromium_session_get_property (GObject *object, guint property,
     case PROP_AUTO_SOURCE_WINDOW:
       g_value_set_boolean (value, self->auto_source_window);
       break;
+    case PROP_DATA_DIRECTORY:
+      g_value_set_string (value, self->data_directory);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property, pspec);
     }
@@ -3086,6 +3525,9 @@ chromium_session_set_property (GObject *object, guint property,
     {
     case PROP_AUTO_SOURCE_WINDOW:
       self->auto_source_window = g_value_get_boolean (value);
+      break;
+    case PROP_DATA_DIRECTORY:
+      chromium_session_set_data_directory (self, g_value_get_string (value));
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property, pspec);
@@ -3106,6 +3548,10 @@ chromium_session_dispose (GObject *object)
   if (self->cancellable)
     g_cancellable_cancel (self->cancellable);
 
+  /* The claim outlives the process only while a helper holds the directory;
+   * a disposed session lets go of the path so another one may try it. */
+  release_data_directory (self);
+
   if (self->child)
     {
       /* A helper that announced its own exit is inside CefShutdown() right now,
@@ -3114,7 +3560,13 @@ chromium_session_dispose (GObject *object)
        * pending child_waited holds a reference, so the object still goes away
        * with the process. */
       if (!self->helper_is_exiting)
-        g_subprocess_force_exit (self->child);
+        {
+          gboolean ephemeral = self->child_ephemeral;
+
+          g_subprocess_force_exit (self->child);
+          if (ephemeral)
+            remove_child_scratch (self->child);
+        }
       g_clear_object (&self->child);
     }
 
@@ -3164,6 +3616,8 @@ chromium_session_finalize (GObject *object)
   g_free (self->uri);
   g_free (self->title);
   g_free (self->startup_url);
+  g_free (self->data_directory);
+  g_clear_pointer (&self->claimed_data_directory, g_free);
   g_hash_table_destroy (self->permission_held);
 
   G_OBJECT_CLASS (chromium_session_parent_class)->finalize (object);

@@ -5,8 +5,8 @@
 # `systemctl stop`, a desktop-session logout and a plain `kill` end the helper
 # with SIGTERM/SIGHUP/SIGINT. Left at the default action those stop it inside
 # CefRunMessageLoop: no CefShutdown, and the profile it owns keeps a
-# SingletonLock the next helper on that profile then collides with ("Opening in
-# an existing browser session").
+# SingletonLock behind — a next helper on that persistent data directory then
+# collides with it ("Opening in an existing browser session").
 #
 # No other gate here covers this, because the host's own stop is not a signal
 # anyone answers: chromium_session_stop() force-exits the child, i.e. SIGKILL.
@@ -62,7 +62,9 @@ PAGE="file://$ROOT/test/dnd-page.html"
 }
 
 RUN=$(mktemp -d)
-CACHE_BASE=${XDG_CACHE_HOME:-${HOME}/.cache}
+# The helper's profile is a private tmpfs root named after its pid. That is
+# where the lock lives now; ~/.cache is no longer involved.
+RUNTIME_BASE=${XDG_RUNTIME_DIR:-/dev/shm}
 fails=0
 ok()  { printf '  ok   %s\n' "$1"; }
 bad() { printf '  FAIL %s\n' "$1"; fails=$((fails + 1)); }
@@ -89,9 +91,8 @@ signal_case() {
   # before the signal ever lands. See the comment at the top of the file.
   { echo "load $PAGE"; echo "wait 12000"; echo "quit"; } > "$session"
 
-  # The previous case's profiles: SingletonLock is found by name below, so an
-  # old one would be read as this case leaving it behind.
-  rm -rf "$CACHE_BASE"/cefnest-helper*
+  # No profile cleanup between cases: each helper creates its own root, and the
+  # lock is looked up under that helper's pid below.
   env CHROMIUM_SESSION_SCRIPT="$session" "$DEMO" >"$log" 2>&1 &
   demo=$!
 
@@ -124,7 +125,11 @@ signal_case() {
   fi
 
   local lock
-  lock=$(find "$CACHE_BASE" -name SingletonLock -print -quit 2>/dev/null)
+  # Ephemeral mode: the tmpfs root is the user data directory, so the lock sits
+  # directly under it. Persistent mode adds the browser/ profile; both are under
+  # the root this helper's pid names.
+  lock=$(find "$RUNTIME_BASE/cefnest-helper-$helper-"* -maxdepth 2 \
+           -name SingletonLock -print -quit 2>/dev/null)
   if [ -z "$lock" ]; then
     bad "$name: no SingletonLock to begin with — the last check would prove nothing"
     return

@@ -39,6 +39,18 @@ helper_path = executable(
 
 test('helper-path', helper_path, suite: 'unit', timeout: 30)
 
+# The data directory's rules without a display or a Chromium: path validation
+# runs before start() wants a view, and clear_data()'s lock test is a real
+# second process holding the real flock.
+data_dir = executable(
+  'data-dir',
+  [ 'data-dir.c' ],
+  dependencies: [ libcefnest_dep ],
+  install: false,
+)
+
+test('data-dir', data_dir, suite: 'unit', timeout: 60)
+
 # Replays evdev events through /dev/uinput, so the widget -> nested seat path
 # can be driven without a hand on the real devices. Needs write access to the
 # node, which normally means running it through sudo.

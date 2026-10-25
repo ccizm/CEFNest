@@ -17,8 +17,13 @@
 | `GDK_BACKEND` | `wayland` |
 | `XDG_SESSION_TYPE` | `wayland` |
 | `CHROMIUM_HELPER_SOCKET` | 控制通道 socket 的完整路径 |
+| `CHROMIUM_HELPER_DATA_DIR` | 持久 profile 的绝对路径；不存在即 incognito |
 
-`DISPLAY` 和 `WAYLAND_SOCKET` 会被移除；其余变量都由启动 helper 的一方负责。
+`DISPLAY` 和 `WAYLAND_SOCKET` 会被移除。`CHROMIUM_HELPER_DATA_DIR` 只在宿主
+指定了数据目录时设置；否则即便宿主自己的环境里有这个变量，它也会被移除。
+其余变量都由启动 helper 的一方负责。手工启动的 helper 读取同一个变量：
+绝对路径即持久 profile，不设置即 incognito，使用 `$XDG_RUNTIME_DIR`（或
+`/dev/shm`）下的私有目录。
 
 ## 命令（宿主 → helper）
 

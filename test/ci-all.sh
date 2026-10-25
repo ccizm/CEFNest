@@ -79,6 +79,7 @@ ALL_RUNS=(
   "menu|./test/menu-gate.sh|780"
   "primary|./test/primary-gate.sh|240"
   "multi|./test/multi-browser-gate.sh|240"
+  "datadir|./test/data-dir-gate.sh|420"
   "signal|./test/helper-signal-gate.sh|240"
   "soak|./test/sandbox-soak.sh|600"
 )
