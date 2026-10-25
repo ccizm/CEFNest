@@ -28,7 +28,8 @@ typedef struct {
   GtkWidget *window;
   GtkSourceBuffer *buffer;
   GtkSourceView *view;
-  GtkLabel *heading;
+  GtkLabel *heading;          /* the page it came from, bottom-left */
+  GtkToggleButton *search_toggle;
   GtkSearchBar *search_bar;
   GtkSearchEntry *search_entry;
   GtkLabel *match_label;
@@ -119,7 +120,24 @@ on_search_stop (GtkSearchEntry *entry, gpointer data)
   SourceWindow *state = data;
 
   gtk_search_bar_set_search_mode (state->search_bar, FALSE);
+  /* The toggle has to follow the bar down, or it sits there claiming the
+   * search is open when Esc closed it. */
+  gtk_toggle_button_set_active (state->search_toggle, FALSE);
   gtk_widget_grab_focus (GTK_WIDGET (state->view));
+}
+
+/* The toolbar's 查找 is the one true switch for the bar: an explicit handler,
+ * not a property binding — the bar manages its own mode under key capture,
+ * and a binding lost that fight. */
+static void
+on_search_toggled (GtkToggleButton *button, gpointer data)
+{
+  SourceWindow *state = data;
+  gboolean open = gtk_toggle_button_get_active (button);
+
+  gtk_search_bar_set_search_mode (state->search_bar, open);
+  if (open)
+    gtk_widget_grab_focus (GTK_WIDGET (state->search_entry));
 }
 
 static gboolean
@@ -129,6 +147,7 @@ on_focus_search (GtkWidget *widget, GVariant *args, gpointer data)
   gboolean open = !gtk_search_bar_get_search_mode (state->search_bar);
 
   gtk_search_bar_set_search_mode (state->search_bar, open);
+  gtk_toggle_button_set_active (state->search_toggle, open);
   if (open)
     gtk_widget_grab_focus (GTK_WIDGET (state->search_entry));
   else
@@ -206,40 +225,18 @@ GtkWidget *
 cefnest_source_window_new (void)
 {
   SourceWindow *state = g_new0 (SourceWindow, 1);
-  GtkWidget *window, *box, *header, *label, *scrolled, *search_box;
+  GtkWidget *window, *box, *toolbar, *label, *scrolled, *search_box;
   GtkWidget *button, *shortcut_controller;
   GtkSourceSearchSettings *settings;
 
   window = gtk_window_new ();
   state->window = window;
+  /* The window's own title bar carries its name and the window manager's
+   * close button — the one close button. Everything about the page lives in
+   * the bottom toolbar, so nothing is said twice. */
   gtk_window_set_title (GTK_WINDOW (window), "查看网页源代码");
   gtk_window_set_default_size (GTK_WINDOW (window), 860, 640);
   gtk_window_set_destroy_with_parent (GTK_WINDOW (window), TRUE);
-
-  header = gtk_header_bar_new ();
-  label = gtk_label_new ("");
-  gtk_label_set_ellipsize (GTK_LABEL (label), PANGO_ELLIPSIZE_END);
-  gtk_widget_set_hexpand (label, TRUE);
-  gtk_widget_set_halign (label, GTK_ALIGN_CENTER);
-  gtk_header_bar_set_title_widget (GTK_HEADER_BAR (header), label);
-  gtk_header_bar_set_show_title_buttons (GTK_HEADER_BAR (header), TRUE);
-  state->heading = GTK_LABEL (label);
-
-  button = gtk_toggle_button_new_with_label ("自动换行");
-  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (button), TRUE);
-  gtk_widget_set_tooltip_text (button, "切换自动换行");
-  gtk_header_bar_pack_end (GTK_HEADER_BAR (header), button);
-  g_signal_connect (button, "toggled", G_CALLBACK (on_wrap_toggled), state);
-
-  button = gtk_button_new_with_label ("复制全部");
-  gtk_widget_set_tooltip_text (button, "把整个源码复制到剪贴板");
-  gtk_header_bar_pack_end (GTK_HEADER_BAR (header), button);
-  g_signal_connect (button, "clicked", G_CALLBACK (on_copy_all), state);
-
-  button = gtk_toggle_button_new_with_label ("查找");
-  gtk_widget_set_tooltip_text (button, "在源码中查找（Ctrl+F）");
-  gtk_header_bar_pack_end (GTK_HEADER_BAR (header), button);
-  g_object_set_data (G_OBJECT (window), "cefnest-search-toggle", button);
 
   state->buffer = gtk_source_buffer_new (NULL);
   gtk_source_buffer_set_highlight_syntax (state->buffer, TRUE);
@@ -281,8 +278,6 @@ cefnest_source_window_new (void)
 
   state->search_bar = GTK_SEARCH_BAR (gtk_search_bar_new ());
   gtk_search_bar_set_child (state->search_bar, search_box);
-  g_object_bind_property (button, "active", state->search_bar, "search-mode",
-                          G_BINDING_DEFAULT);
   /* Typing anywhere in the window starts a search once the bar is open. */
   gtk_search_bar_set_key_capture_widget (state->search_bar, window);
 
@@ -306,11 +301,46 @@ cefnest_source_window_new (void)
                                  GTK_WIDGET (state->view));
   gtk_widget_set_vexpand (scrolled, TRUE);
 
+  /* The toolbar sits under the text it acts on: where the source came from
+   * on the left, the actions on the right. */
+  toolbar = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_widget_add_css_class (toolbar, "toolbar");
+  gtk_widget_set_margin_top (toolbar, 6);
+  gtk_widget_set_margin_bottom (toolbar, 6);
+  gtk_widget_set_margin_start (toolbar, 8);
+  gtk_widget_set_margin_end (toolbar, 8);
+
+  label = gtk_label_new ("");
+  state->heading = GTK_LABEL (label);
+  gtk_label_set_ellipsize (state->heading, PANGO_ELLIPSIZE_END);
+  gtk_widget_set_hexpand (label, TRUE);
+  gtk_widget_set_halign (label, GTK_ALIGN_START);
+  gtk_box_append (GTK_BOX (toolbar), label);
+
+  state->search_toggle =
+    GTK_TOGGLE_BUTTON (gtk_toggle_button_new_with_label ("查找"));
+  gtk_widget_set_tooltip_text (GTK_WIDGET (state->search_toggle),
+                               "在源码中查找（Ctrl+F）");
+  gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (state->search_toggle));
+  g_signal_connect (state->search_toggle, "toggled",
+                    G_CALLBACK (on_search_toggled), state);
+
+  button = gtk_button_new_with_label ("复制全部");
+  gtk_widget_set_tooltip_text (button, "把整个源码复制到剪贴板");
+  gtk_box_append (GTK_BOX (toolbar), button);
+  g_signal_connect (button, "clicked", G_CALLBACK (on_copy_all), state);
+
+  button = gtk_toggle_button_new_with_label ("自动换行");
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (button), TRUE);
+  gtk_widget_set_tooltip_text (button, "切换自动换行");
+  gtk_box_append (GTK_BOX (toolbar), button);
+  g_signal_connect (button, "toggled", G_CALLBACK (on_wrap_toggled), state);
+
   box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
-  gtk_box_append (GTK_BOX (box), header);
   gtk_box_append (GTK_BOX (box), state->truncated_banner);
   gtk_box_append (GTK_BOX (box), GTK_WIDGET (state->search_bar));
   gtk_box_append (GTK_BOX (box), scrolled);
+  gtk_box_append (GTK_BOX (box), toolbar);
   gtk_window_set_child (GTK_WINDOW (window), box);
 
   g_object_set_data_full (G_OBJECT (window), "cefnest-source-window",
@@ -327,7 +357,6 @@ cefnest_source_window_show (GtkWidget *window, GtkWindow *parent,
   SourceWindow *state = g_object_get_data (G_OBJECT (window),
                                            "cefnest-source-window");
   const char *label = title && *title ? title : (url ? url : "");
-  GtkToggleButton *toggle;
   gsize text_bytes;
 
   g_return_if_fail (state != NULL);
@@ -336,6 +365,10 @@ cefnest_source_window_show (GtkWidget *window, GtkWindow *parent,
                              : strlen (text ? text : "");
 
   gtk_label_set_text (state->heading, label);
+  /* The heading ellipsizes; the tooltip is the only place the whole thing
+   * can be read. */
+  gtk_widget_set_tooltip_text (GTK_WIDGET (state->heading),
+                               label ? label : NULL);
 
   gtk_window_set_transient_for (GTK_WINDOW (window),
                                 GTK_IS_WINDOW (parent) ? parent : NULL);
@@ -369,8 +402,7 @@ cefnest_source_window_show (GtkWidget *window, GtkWindow *parent,
   /* A new text resets the search: the counts and the highlights belong to
    * the previous document. */
   gtk_editable_set_text (GTK_EDITABLE (state->search_entry), "");
-  toggle = g_object_get_data (G_OBJECT (window), "cefnest-search-toggle");
-  gtk_toggle_button_set_active (toggle, FALSE);
+  gtk_toggle_button_set_active (state->search_toggle, FALSE);
 
   g_debug ("source window: shown url=%s bytes=%zu truncated=%d",
            url ? url : "", text_bytes, truncated);
