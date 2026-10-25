@@ -115,15 +115,19 @@ on_search_previous (GtkSearchEntry *entry, gpointer data)
 }
 
 static void
-on_search_stop (GtkSearchEntry *entry, gpointer data)
+close_search (SourceWindow *state)
 {
-  SourceWindow *state = data;
-
   gtk_search_bar_set_search_mode (state->search_bar, FALSE);
   /* The toggle has to follow the bar down, or it sits there claiming the
-   * search is open when Esc closed it. */
+   * search is open when something else closed it. */
   gtk_toggle_button_set_active (state->search_toggle, FALSE);
   gtk_widget_grab_focus (GTK_WIDGET (state->view));
+}
+
+static void
+on_search_stop (GtkSearchEntry *entry, gpointer data)
+{
+  close_search (data);
 }
 
 /* The toolbar's 查找 is the one true switch for the bar: an explicit handler,
@@ -144,14 +148,15 @@ static gboolean
 on_focus_search (GtkWidget *widget, GVariant *args, gpointer data)
 {
   SourceWindow *state = data;
-  gboolean open = !gtk_search_bar_get_search_mode (state->search_bar);
 
-  gtk_search_bar_set_search_mode (state->search_bar, open);
-  gtk_toggle_button_set_active (state->search_toggle, open);
-  if (open)
-    gtk_widget_grab_focus (GTK_WIDGET (state->search_entry));
+  if (gtk_search_bar_get_search_mode (state->search_bar))
+    close_search (state);
   else
-    gtk_widget_grab_focus (GTK_WIDGET (state->view));
+    {
+      gtk_search_bar_set_search_mode (state->search_bar, TRUE);
+      gtk_toggle_button_set_active (state->search_toggle, TRUE);
+      gtk_widget_grab_focus (GTK_WIDGET (state->search_entry));
+    }
   return TRUE;
 }
 
@@ -276,6 +281,17 @@ cefnest_source_window_new (void)
   gtk_box_append (GTK_BOX (search_box), GTK_WIDGET (state->match_label));
   gtk_widget_set_hexpand (GTK_WIDGET (state->search_entry), TRUE);
 
+  /* The search's own way out, next to the count it reports: same path Esc
+   * takes. */
+  button = gtk_button_new ();
+  gtk_button_set_icon_name (GTK_BUTTON (button), "window-close-symbolic");
+  gtk_widget_set_tooltip_text (button, "关闭查找");
+  gtk_accessible_update_property (GTK_ACCESSIBLE (button),
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, "关闭查找", -1);
+  gtk_box_append (GTK_BOX (search_box), button);
+  g_signal_connect_swapped (button, "clicked", G_CALLBACK (close_search),
+                            state);
+
   state->search_bar = GTK_SEARCH_BAR (gtk_search_bar_new ());
   gtk_search_bar_set_child (state->search_bar, search_box);
   /* Typing anywhere in the window starts a search once the bar is open. */
@@ -317,29 +333,39 @@ cefnest_source_window_new (void)
   gtk_widget_set_halign (label, GTK_ALIGN_START);
   gtk_box_append (GTK_BOX (toolbar), label);
 
-  state->search_toggle =
-    GTK_TOGGLE_BUTTON (gtk_toggle_button_new_with_label ("查找"));
+  state->search_toggle = GTK_TOGGLE_BUTTON (gtk_toggle_button_new ());
+  gtk_button_set_icon_name (GTK_BUTTON (state->search_toggle),
+                            "edit-find-symbolic");
   gtk_widget_set_tooltip_text (GTK_WIDGET (state->search_toggle),
-                               "在源码中查找（Ctrl+F）");
+                               "查找（Ctrl+F）");
+  gtk_accessible_update_property (GTK_ACCESSIBLE (state->search_toggle),
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, "查找", -1);
   gtk_box_append (GTK_BOX (toolbar), GTK_WIDGET (state->search_toggle));
   g_signal_connect (state->search_toggle, "toggled",
                     G_CALLBACK (on_search_toggled), state);
 
-  button = gtk_button_new_with_label ("复制全部");
-  gtk_widget_set_tooltip_text (button, "把整个源码复制到剪贴板");
+  button = gtk_button_new ();
+  gtk_button_set_icon_name (GTK_BUTTON (button), "edit-copy-symbolic");
+  gtk_widget_set_tooltip_text (button, "复制全部");
+  gtk_accessible_update_property (GTK_ACCESSIBLE (button),
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, "复制全部", -1);
   gtk_box_append (GTK_BOX (toolbar), button);
   g_signal_connect (button, "clicked", G_CALLBACK (on_copy_all), state);
 
-  button = gtk_toggle_button_new_with_label ("自动换行");
+  /* view-wrapped is the icon GNOME's own editors use for soft wrap. */
+  button = gtk_toggle_button_new ();
+  gtk_button_set_icon_name (GTK_BUTTON (button), "view-wrapped-symbolic");
   gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (button), TRUE);
-  gtk_widget_set_tooltip_text (button, "切换自动换行");
+  gtk_widget_set_tooltip_text (button, "自动换行");
+  gtk_accessible_update_property (GTK_ACCESSIBLE (button),
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, "自动换行", -1);
   gtk_box_append (GTK_BOX (toolbar), button);
   g_signal_connect (button, "toggled", G_CALLBACK (on_wrap_toggled), state);
 
   box = gtk_box_new (GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append (GTK_BOX (box), state->truncated_banner);
-  gtk_box_append (GTK_BOX (box), GTK_WIDGET (state->search_bar));
   gtk_box_append (GTK_BOX (box), scrolled);
+  gtk_box_append (GTK_BOX (box), GTK_WIDGET (state->search_bar));
   gtk_box_append (GTK_BOX (box), toolbar);
   gtk_window_set_child (GTK_WINDOW (window), box);
 
