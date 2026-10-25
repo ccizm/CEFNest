@@ -1,10 +1,11 @@
 <script setup>
 import { computed } from 'vue'
-import { repo, debAsset, rpmAsset, releasesPage } from '../data/content'
+import { repoLinks } from '../data/content'
 import { i18n, messages, toggleLocale } from '../i18n'
 import { theme, toggleTheme } from '../theme'
 
 const m = computed(() => messages[i18n.locale])
+const lk = computed(() => repoLinks(i18n.locale))
 const logo = `${import.meta.env.BASE_URL}cefnest.svg`
 </script>
 
@@ -39,18 +40,18 @@ const logo = `${import.meta.env.BASE_URL}cefnest.svg`
           </button>
           <ul class="dropdown-menu dropdown-menu-end">
             <li>
-              <a class="dropdown-item" :href="debAsset">
+              <a class="dropdown-item" :href="lk.debAsset">
                 <i class="bi bi-ubuntu me-2"></i>{{ m.nav.downloadDeb }}
               </a>
             </li>
             <li>
-              <a class="dropdown-item" :href="rpmAsset">
+              <a class="dropdown-item" :href="lk.rpmAsset">
                 <i class="bi bi-boxes me-2"></i>{{ m.nav.downloadRpm }}
               </a>
             </li>
             <li><hr class="dropdown-divider" /></li>
             <li>
-              <a class="dropdown-item" :href="releasesPage" target="_blank" rel="noopener">
+              <a class="dropdown-item" :href="lk.releases" target="_blank" rel="noopener">
                 <i class="bi bi-list-ul me-2"></i>{{ m.nav.allReleases }}
               </a>
             </li>
@@ -58,7 +59,7 @@ const logo = `${import.meta.env.BASE_URL}cefnest.svg`
         </div>
         <a
           class="btn btn-sm btn-outline-dark btn-repo"
-          :href="repo"
+          :href="lk.repo"
           target="_blank"
           rel="noopener"
           :aria-label="m.nav.repo"

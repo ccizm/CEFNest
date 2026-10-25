@@ -1,5 +1,5 @@
 import { reactive, watchEffect } from 'vue'
-import { repo } from './data/content'
+import { repoLinks } from './data/content'
 
 const STORAGE_KEY = 'cefnest-locale'
 
@@ -41,10 +41,10 @@ export const messages = {
       title: '文档',
       note: '完整内容在仓库里。',
       links: [
-        { label: 'README', note: '构建、安装、API 与已知限制', href: `${repo}/-/blob/main/README.zh-CN.md` },
-        { label: '控制通道', note: 'NDJSON 命令与事件', href: `${repo}/-/blob/main/docs/control-channel.zh-CN.md` },
-        { label: '示例', note: '十四个最小宿主', href: `${repo}/-/blob/main/examples/README.zh-CN.md` },
-        { label: 'API 头文件', note: '每个调用的完整契约', href: `${repo}/-/blob/main/src/chromium-session.h` },
+        { label: 'README', note: '构建、安装、API 与已知限制', href: `${repoLinks('zh-CN').blob}/README.zh-CN.md` },
+        { label: '控制通道', note: 'NDJSON 命令与事件', href: `${repoLinks('zh-CN').blob}/docs/control-channel.zh-CN.md` },
+        { label: '示例', note: '十四个最小宿主', href: `${repoLinks('zh-CN').blob}/examples/README.zh-CN.md` },
+        { label: 'API 头文件', note: '每个调用的完整契约', href: `${repoLinks('zh-CN').blob}/src/chromium-session.h` },
       ],
     },
     code: { copy: '复制', copied: '已复制', copyAria: '复制代码', copiedAria: '已复制' },
@@ -86,10 +86,10 @@ export const messages = {
       title: 'Documentation',
       note: 'The full text lives in the repository.',
       links: [
-        { label: 'README', note: 'Build, install, API and known limitations', href: `${repo}/-/blob/main/README.md` },
-        { label: 'Control channel', note: 'NDJSON commands and events', href: `${repo}/-/blob/main/docs/control-channel.md` },
-        { label: 'Examples', note: 'Fourteen minimal hosts', href: `${repo}/-/blob/main/examples/README.md` },
-        { label: 'API headers', note: 'The full contract of every call', href: `${repo}/-/blob/main/src/chromium-session.h` },
+        { label: 'README', note: 'Build, install, API and known limitations', href: `${repoLinks('en').blob}/README.md` },
+        { label: 'Control channel', note: 'NDJSON commands and events', href: `${repoLinks('en').blob}/docs/control-channel.md` },
+        { label: 'Examples', note: 'Fourteen minimal hosts', href: `${repoLinks('en').blob}/examples/README.md` },
+        { label: 'API headers', note: 'The full contract of every call', href: `${repoLinks('en').blob}/src/chromium-session.h` },
       ],
     },
     code: { copy: 'Copy', copied: 'Copied', copyAria: 'Copy code', copiedAria: 'Copied' },

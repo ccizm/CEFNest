@@ -2,11 +2,12 @@
 import { computed } from 'vue'
 import SiteNavbar from './components/SiteNavbar.vue'
 import CodeBlock from './components/CodeBlock.vue'
-import { embed, quickstart, repo } from './data/content'
+import { embed, quickstart, repoLinks } from './data/content'
 import { i18n, messages } from './i18n'
 
 const m = computed(() => messages[i18n.locale])
 const quick = computed(() => quickstart[i18n.locale])
+const lk = computed(() => repoLinks(i18n.locale))
 const logo = `${import.meta.env.BASE_URL}cefnest.svg`
 const ga = `${import.meta.env.BASE_URL}ga-beian.webp`
 </script>
@@ -23,7 +24,7 @@ const ga = `${import.meta.env.BASE_URL}ga-beian.webp`
       <p class="lead">{{ m.hero.lead }}</p>
       <div class="actions">
         <a class="btn btn-dark px-4" href="#start">{{ m.hero.start }}</a>
-        <a class="btn btn-outline-secondary px-4" :href="repo" target="_blank" rel="noopener">
+        <a class="btn btn-outline-secondary px-4" :href="lk.repo" target="_blank" rel="noopener">
           {{ m.hero.source }}
         </a>
       </div>
