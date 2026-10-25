@@ -40,6 +40,7 @@
 | `js-expr` | `code`、`id` | 表达式直接嵌入，不经过 `eval` |
 | `mute` | `on`（省略时切换） | 静音 |
 | `a11y` | `enabled` | `SetAccessibilityState(STATE_ENABLED/DEFAULT)` |
+| `devtools` | `enabled` | 提供右键菜单的「检查」与 F12 / Ctrl+Shift+I；开发者工具 browser 以带 `devtools` 的 `browser-created` 到达 |
 | `download-accept` | `id`、`path` | 绝对路径；父目录由宿主创建 |
 | `download-reject` | `id` | 拒绝尚未开始的下载，或取消进行中的下载 |
 | `download-pause` / `download-resume` | `id` | 只对已经拿到 item 回调的下载有效 |
@@ -55,7 +56,7 @@
 | 事件 | 载荷 |
 | --- | --- |
 | `ready` | `cef`、`pid`、`url`（握手） |
-| `browser-created` | `browser`、`url`、`windowed` |
+| `browser-created` | `browser`、`url`、`windowed`、`devtools`（CEF 为 `ShowDevTools` 创建的开发者工具 browser：始终是 windowed，窗口归 CEF 所有，且永远不会成为激活 browser） |
 | `browser-selected` | `browser`、`windowed` |
 | `browser-closed` | `browser` |
 | `take-focus` | `browser`、`next`（页面的 Tab 遍历走出了文档边缘；宿主应把焦点链交给 view 之后——`next` 为 false 时是之前——的控件） |

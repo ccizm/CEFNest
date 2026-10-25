@@ -132,6 +132,11 @@ struct _NestedSurface {
   struct wl_resource *wl_surface;
   struct wl_resource *xdg_surface;
   struct wl_resource *toplevel;
+  /* The size this toplevel is configured with when a host view of its own
+   * pushes one — a shared compositor hosts a toplevel per host window, and
+   * one allocation cannot size them all. 0 follows the compositor size. */
+  int config_width;
+  int config_height;
   struct wl_resource *popup;
   struct wl_resource *viewport;
   struct wl_resource *fractional;

@@ -28,6 +28,7 @@ protocol between session and helper: [`docs/control-channel.md`](../docs/control
 | `permissions.c` | permission prompts: `::permission-request` as allow/deny rows, and the cost of not answering |
 | `errors.c` | the three "the page is not what it was" signals: `::load-error`, `::renderer-exited`, `::closed` — and how to wire each |
 | `observe.c` | the frame counter and the accessibility switch: making "the page froze" measurable |
+| `devtools.c` | the inspector switch: F12 / the 检查 row, and a GTK window per inspector it opens |
 | `useragent.c` | switching the User-Agent at runtime: restart the session, the new `CHROMIUM_USER_AGENT` rides with the helper |
 | `persistent.c` | a data directory: localStorage read back across restarts, and `clear_data()` when the user asks to forget |
 

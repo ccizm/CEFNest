@@ -23,6 +23,7 @@
 | 标签页 / 窗口 | `new_browser()` · `select_browser()` · `close_browser()` |
 | 查看源码 | `view_source()` → 结果经 `::view-source` / `::view-source-error` 返回；`auto-source-window` 属性（默认开）决定是否自动弹出组件源码窗口 |
 | 页面 / 其他 | `set_muted()` · `zoom("in"/"out"/"reset")` · `set_accessibility()` |
+| 开发者工具 | `set_devtools_enabled()` · `get_devtools_enabled()`；`devtools-enabled` 属性（默认关）——见[开发者工具](../README.zh-CN.md#开发者工具) |
 
 **信号**
 
@@ -40,7 +41,7 @@
 | `::context-menu` | `x, y, items` | 返回 TRUE 表示由你自行绘制菜单，之后必须应答 |
 | `::permission-request` | `id, kind, origin, permissions, raw` | 返回 TRUE 表示由你负责应答；默认行为是拒绝 |
 | `::permission-dismissed` | `id, result` | 一个挂起的提示已被页面替换 |
-| `::browser-created` / `::browser-selected` / `::browser-closed` | `id, …` | 标签页与窗口的生命周期 |
+| `::browser-created` / `::browser-selected` / `::browser-closed` | `id, …` | 标签页与窗口的生命周期；`browser-created` 附带 `url、windowed、devtools` |
 | `::popup-requested` | `url` | target=_blank；前台弹窗已就地导航 |
 | `::page-message` | `json` | 页面调用了 `cefnestPostMessage()`；用 `run_javascript` 回复 |
 | `::primary-selection` / `::copy-text` / `::open-url` | `text` / `text` / `url` | 选区桥接、菜单复制、菜单中的“在新窗口打开” |

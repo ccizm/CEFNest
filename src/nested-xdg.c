@@ -749,6 +749,12 @@ xdg_surface_configure (NestedSurface *self)
     {
       struct wl_array states;
       uint32_t *state;
+      /* The size the host view of this toplevel pushed, or the compositor's
+       * own when it has none: a shared compositor cannot size every window
+       * from one allocation. */
+      int config_width = self->config_width ? self->config_width : nested->width;
+      int config_height = self->config_height ? self->config_height
+                                              : nested->height;
 
       wl_array_init (&states);
       if (nested->window_fullscreen)
@@ -757,13 +763,13 @@ xdg_surface_configure (NestedSurface *self)
           if (state)
             *state = XDG_TOPLEVEL_STATE_FULLSCREEN;
         }
-      else if (self->width == nested->width && self->height == nested->height)
+      else if (self->width == config_width && self->height == config_height)
         {
           state = wl_array_add (&states, sizeof (*state));
           if (state)
             *state = XDG_TOPLEVEL_STATE_MAXIMIZED;
         }
-      xdg_toplevel_send_configure (self->toplevel, nested->width, nested->height,
+      xdg_toplevel_send_configure (self->toplevel, config_width, config_height,
                                    &states);
       wl_array_release (&states);
     }

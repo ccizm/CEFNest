@@ -87,7 +87,7 @@ tab_row (int id, const char *url)
 
 static void
 session_browser_created (ChromiumSession *session, int id, const char *url,
-                         gboolean windowed, gpointer data)
+                         gboolean windowed, gboolean devtools, gpointer data)
 {
   GtkWidget *row;
 

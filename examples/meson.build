@@ -26,6 +26,7 @@ examples_files = [
   'permissions.c', # permission asks as rows with allow/deny
   'errors.c',      # load-error / renderer-exited / closed banners
   'observe.c',     # frame counter and the accessibility switch
+  'devtools.c',    # the inspector switch: F12, 检查, a window per inspector
   'useragent.c',   # switch the User-Agent by restarting the helper
   'focus-chain.c', # gtk widgets and page elements in one tab order
   'persistent.c',  # a data directory: localStorage across restarts, clear_data()

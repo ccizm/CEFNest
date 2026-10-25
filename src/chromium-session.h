@@ -62,6 +62,26 @@ gboolean           chromium_session_clear_data         (ChromiumSession *self,
  * explicit startup override and suppresses the automatic watcher. */
 void               chromium_session_set_accessibility (ChromiumSession *self,
                                                        gboolean enabled);
+
+/* Developer tools. FALSE (the default) is the whole off switch: the context
+ * menu has no 检查 row, F12 and Ctrl+Shift+I do nothing, and the helper never
+ * calls ShowDevTools. TRUE adds those entries; the inspector opens in its own
+ * associated browser, reported as ::browser-created with @windowed and
+ * @devtools TRUE, which the host shows like any other standalone browser.
+ * Closing that window, or closing the page it inspects, closes the other side
+ * through CEF's own association.
+ *
+ * Enabling this hands whoever is at the keyboard full debugging power over
+ * every page this session loads: arbitrary script in the page, and read access
+ * to its storage and cookies. It is a local-user feature, not something to
+ * turn on for content you do not trust. The value may be changed at any time:
+ * a running helper is told immediately, and a later start() reads the value
+ * that is set then.
+ *
+ * There is deliberately no programmatic show/close call in this version. */
+void               chromium_session_set_devtools_enabled (ChromiumSession *self,
+                                                          gboolean enabled);
+gboolean           chromium_session_get_devtools_enabled (ChromiumSession *self);
 /* Optional frame meter: the number of top-level frames the compositor has
  * presented since the session started. It is a counter, not a rate; sample it
  * from a timer if a host wants a graph. */
@@ -77,9 +97,12 @@ void               chromium_session_get_commit_stats (ChromiumSession *self,
 /* One helper can host several browsers. The first one is started by
  * chromium_session_start(); these create further browsers in the same helper.
  * @windowed FALSE puts the browser in the shared tab window, TRUE creates a
- * standalone CefWindow. ::browser-created (id, url, windowed),
+ * standalone CefWindow. ::browser-created (id, url, windowed, devtools),
  * ::browser-selected (id) and ::browser-closed (id) report the lifecycle; CEF
  * assigns @id, so a host should key its own tab/window map from the signal.
+ * @devtools TRUE marks the inspector browser a DevTools request created: it is
+ * always windowed, and CEF owns its window (see
+ * chromium_session_set_devtools_enabled()).
  *
  * @id is also what ::browser-selected names before ::browser-created does: the
  * helper can report a selection for a browser whose created event is still on

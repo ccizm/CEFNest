@@ -77,6 +77,7 @@ ALL_RUNS=(
   "download|./test/download-gate.sh|1050"
   "dnd|./test/dnd-gate.sh|600"
   "menu|./test/menu-gate.sh|780"
+  "devtools|./test/devtools-gate.sh|600"
   "primary|./test/primary-gate.sh|240"
   "multi|./test/multi-browser-gate.sh|240"
   "datadir|./test/data-dir-gate.sh|420"

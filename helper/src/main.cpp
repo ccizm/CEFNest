@@ -126,6 +126,13 @@ const char kDefaultUrl[] =
 
 bool g_quit_requested = false;
 long g_auto_quit_ms = 0;
+/* Off unless the host says otherwise: with this false nothing in the helper
+ * ever calls ShowDevTools, so the bundled frontend stays unreachable. */
+bool g_devtools_enabled = false;
+/* ShowDevTools calls whose browser CEF has not reported yet. The browser's own
+ * URL is not reliable in OnAfterCreated — the initial navigation may not have
+ * started — so this is what tells that callback the browser is the inspector. */
+int g_devtools_creating = 0;
 CefRefPtr<CefBrowser> g_browser;
 CefRefPtr<CefWindow> g_window;
 
@@ -135,6 +142,10 @@ CefRefPtr<CefWindow> g_window;
 struct BrowserSlot {
   int slot = 0;                 /* request-side key, until CEF assigns id */
   bool windowed = false;
+  /* CEF created this browser for ShowDevTools. Adoption moves its view into
+   * a frameless window of ours, so afterwards it looks like any standalone
+   * window; it must never become the active browser. */
+  bool devtools = false;
   std::string title;            /* last OnTitleChange, for event labels */
   CefRefPtr<CefBrowser> browser;
   CefRefPtr<CefBrowserView> view;
@@ -143,6 +154,7 @@ struct BrowserSlot {
 };
 std::map<int, BrowserSlot> g_browser_slots;  /* keyed by CEF browser id */
 std::map<int, int> g_slot_to_browser;        /* pending slot -> assigned id */
+
 int g_next_browser_slot = 1;
 int g_active_browser_id = 0;
 int g_select_slot = 0;
@@ -150,6 +162,7 @@ CefRefPtr<CefWindow> g_tab_window;
 
 int CreateNewBrowser(const std::string& url, bool windowed);
 void SelectBrowserById(int id);
+void ShowDevToolsFor(CefRefPtr<CefBrowser> browser, const CefPoint& point);
 
 // Close every browser the helper holds. OnBeforeClose only ends the message
 // loop once the slot map is empty, so a close aimed at one browser leaves the
@@ -785,6 +798,11 @@ void SelectBrowserById(int id) {
     }
 
   BrowserSlot* slot = &it->second;
+  /* A DevTools browser, however it is hosted, must not become the active
+   * browser: that would point every command and every state event at the
+   * inspector page, so a focus echo from its window is ignored. */
+  if (slot->devtools)
+    return;
   if (slot->browser == g_browser)
     return;   /* already active: a focus echo must not re-enter through
                  the RequestFocus below */
@@ -1086,6 +1104,7 @@ enum {
   kMenuSaveImage,
   kMenuOpenMediaWindow,
   kMenuCopyMediaAddress,
+  kMenuInspect,
 };
 
 class HelperContextMenuHandler : public CefContextMenuHandler {
@@ -1096,6 +1115,12 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
                       CefRefPtr<CefMenuModel> model,
                       CefRefPtr<CefRunContextMenuCallback> callback) override {
     CEF_REQUIRE_UI_THREAD();
+
+    // The inspector's own page keeps CEF's default menu: the host's menu is
+    // built for the page's model, and this browser is never the active one.
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools)
+        return false;
 
     // A menu that was still pending is replaced by this one; put the old
     // selection back before looking at the new params.
@@ -1138,6 +1163,16 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
       model->InsertItemAt(at++, kMenuOpenMediaWindow, "在新窗口打开媒体");
       model->InsertItemAt(at++, kMenuCopyMediaAddress, "复制媒体地址");
       model->InsertSeparatorAt(at++);
+    }
+    /* The host's own row goes last, the way Chrome puts "检查" at the bottom of
+     * its menu. A DevTools browser gets no inspect row: that would open DevTools
+     * on DevTools. */
+    if (g_devtools_enabled) {
+      BrowserSlot* slot = FindSlotForBrowser(browser);
+      if (!slot || !slot->devtools) {
+        model->AddSeparator();
+        model->AddItem(kMenuInspect, "检查");
+      }
     }
 
     CefRefPtr<CefListValue> items = CefListValue::Create();
@@ -1207,6 +1242,13 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
                             EventFlags event_flags) override {
     CEF_REQUIRE_UI_THREAD();
 
+    /* The inspector's default menu is CEF's; the ids are CEF's too, and the
+     * stock ones (View source, Save image) must not be read as this helper's
+     * page commands. */
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools)
+        return false;
+
     CefString url;
     const char* event = nullptr;
 
@@ -1238,6 +1280,14 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
         // Reuse the existing download path: the host gets download-begin and
         // chooses the file, exactly as it does for a page-initiated download.
         browser->GetHost()->StartDownload(url);
+        return true;
+      case kMenuInspect:
+        if (!g_devtools_enabled || !browser->GetHost())
+          return false;
+        /* Chrome's own reading of "Inspect": open the panel with the node under
+         * the cursor already selected. */
+        ShowDevToolsFor(browser,
+                        CefPoint(params->GetXCoord(), params->GetYCoord()));
         return true;
       case MENU_ID_VIEW_SOURCE: {
         /* Intercepted: the source streams to the host instead of CEF's
@@ -1953,6 +2003,14 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
+  if (name == "devtools") {
+    g_devtools_enabled =
+        command->HasKey("enabled") && command->GetBool("enabled");
+    fprintf(stderr, "helper: devtools %s\n",
+            g_devtools_enabled ? "enabled" : "disabled");
+    return;
+  }
+
   if (name == "js" || name == "js-expr") {
     const std::string code = command->GetString("code").ToString();
     if (code.empty()) {
@@ -2199,6 +2257,12 @@ class HelperClient : public CefClient,
   }
 
   void OnTakeFocus(CefRefPtr<CefBrowser> browser, bool next) override {
+    /* The inspector's own focus walk is not the page's; a host moving its
+     * widget focus for it would fight the DevTools frontend. */
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools)
+        return;
+
     /* Blink's sequential traversal ran off the edge of the document: the
      * walk belongs to the host now, and |next| says which way it was going.
      * The host answers by moving focus to the widget after (backwards:
@@ -2249,11 +2313,36 @@ class HelperClient : public CefClient,
         slot = &it->second;
       g_slot_to_browser.erase(pending);
     }
+    /* ShowDevTools content: CEF created this browser itself, so there is no
+     * request slot for it. The frontend URL is the one reliable mark. Give it
+     * a slot anyway — without one its close would still reach the host, but
+     * nothing could find or describe it in the meantime. */
+    if (!slot) {
+      CefRefPtr<CefFrame> frame = browser->GetMainFrame();
+      const std::string url = frame ? frame->GetURL().ToString() : std::string();
+      const bool pending = g_devtools_creating > 0;
+      if (url.rfind("devtools://", 0) == 0 || pending) {
+        if (pending)
+          --g_devtools_creating;
+        BrowserSlot entry;
+        entry.slot = browser->GetIdentifier();
+        entry.windowed = true;
+        entry.devtools = true;
+        entry.browser = browser;
+        if (!url.empty())
+          entry.start_url = url;
+        g_browser_slots[entry.slot] = entry;
+        slot = &g_browser_slots[entry.slot];
+        fprintf(stderr, "helper: devtools browser %d adopted\n",
+                browser->GetIdentifier());
+      }
+    }
     /* Compare the request-side slot with what the host asked to select before
      * the entry is re-keyed: after the re-key, `slot->slot` is a CEF browser
      * id, and the two counters only stay equal until the first creation
-     * failure. Reading it afterwards leaves every later browser unselected. */
-    bool select_this = slot && slot->slot == g_select_slot;
+     * failure. Reading it afterwards leaves every later browser unselected.
+     * A DevTools browser is never what a host asked to select. */
+    bool select_this = slot && !slot->devtools && slot->slot == g_select_slot;
     if (slot) {
       /* The map starts under the request slot so commands can find the view
        * before CEF has finished creating the browser. Copy before erasing:
@@ -2272,9 +2361,10 @@ class HelperClient : public CefClient,
     if (select_this)
       g_select_slot = 0;
 
-    fprintf(stderr, "helper: browser created, id=%d slot=%d windowed=%d\n",
+    fprintf(stderr,
+            "helper: browser created, id=%d slot=%d windowed=%d devtools=%d\n",
             browser->GetIdentifier(), slot ? slot->slot : 0,
-            slot ? slot->windowed : 0);
+            slot ? slot->windowed : 0, slot ? slot->devtools : 0);
 
     CefRefPtr<CefDictionaryValue> created = NewEvent("browser-created");
     created->SetInt("browser", browser->GetIdentifier());
@@ -2282,6 +2372,7 @@ class HelperClient : public CefClient,
                                   ? slot->start_url
                                   : browser->GetMainFrame()->GetURL().ToString());
     created->SetBool("windowed", slot ? slot->windowed : false);
+    created->SetBool("devtools", slot ? slot->devtools : false);
     Emit(created);
 
     /* The first browser still carries the original ready handshake; later
@@ -2380,8 +2471,13 @@ class HelperClient : public CefClient,
 
     if (g_active_browser_id == id) {
       g_browser = nullptr;
-      auto next = g_browser_slots.begin();
-      SelectBrowserById(next->first);
+      /* A DevTools entry can never become active, so the next live page
+       * browser takes over instead. */
+      for (const auto& other : g_browser_slots)
+        if (!other.second.devtools) {
+          SelectBrowserById(other.first);
+          break;
+        }
     }
   }
 
@@ -2389,6 +2485,11 @@ class HelperClient : public CefClient,
                             bool is_loading,
                             bool can_go_back,
                             bool can_go_forward) override {
+    /* Same rule as the title and address: the host's navigation state is the
+     * page's, and the inspector's own loads are not navigation the user made. */
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools)
+        return;
     CefRefPtr<CefDictionaryValue> dict = NewEvent("loading");
     dict->SetBool("loading", is_loading);
     dict->SetBool("can_go_back", can_go_back);
@@ -2412,8 +2513,13 @@ class HelperClient : public CefClient,
 
   void OnTitleChange(CefRefPtr<CefBrowser> browser,
                      const CefString& title) override {
-    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+    if (BrowserSlot* slot = FindSlotForBrowser(browser)) {
       slot->title = title.ToString();
+      /* The host's title/address state belongs to the page it shows. A DevTools
+       * title must not replace it; nothing on the host renders it. */
+      if (slot->devtools)
+        return;
+    }
     CefRefPtr<CefDictionaryValue> dict = NewEvent("title");
     dict->SetString("title", title.ToString());
     Emit(dict);
@@ -2424,6 +2530,9 @@ class HelperClient : public CefClient,
                        const CefString& url) override {
     if (!frame->IsMain())
       return;
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools)
+        return;
     CefRefPtr<CefDictionaryValue> dict = NewEvent("address");
     dict->SetString("url", url.ToString());
     Emit(dict);
@@ -2434,6 +2543,9 @@ class HelperClient : public CefClient,
                  int http_status_code) override {
     if (!frame->IsMain())
       return;
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools)
+        return;
     CefRefPtr<CefDictionaryValue> dict = NewEvent("load-end");
     dict->SetString("url", frame->GetURL().ToString());
     dict->SetInt("http_code", http_status_code);
@@ -2463,6 +2575,9 @@ class HelperClient : public CefClient,
                    const CefString& failedUrl) override {
     if (!frame->IsMain())
       return;
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools)
+        return;
     fprintf(stderr, "helper: load error %d for %s\n", static_cast<int>(errorCode),
             failedUrl.ToString().c_str());
     CefRefPtr<CefDictionaryValue> dict = NewEvent("load-error");
@@ -2480,6 +2595,11 @@ class HelperClient : public CefClient,
                                  TerminationStatus status,
                                  int error_code,
                                  const CefString& error_string) override {
+    /* An inspector crash is not the page's crash: the surface on the host still
+     * shows the page, and ::renderer-exited would say it is gone. */
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools)
+        return;
     fprintf(stderr, "helper: render process terminated (status=%d error=%d)\n",
             static_cast<int>(status), error_code);
     CefRefPtr<CefDictionaryValue> dict = NewEvent("renderer-exited");
@@ -2495,6 +2615,28 @@ class HelperClient : public CefClient,
                      bool* is_keyboard_shortcut) override {
     if (event.type != KEYEVENT_KEYDOWN)
       return false;
+
+    /* The DevTools window keeps its own keys: Esc closes its drawer and F12
+     * belongs to the inspector, not to this helper's shortcuts. */
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools)
+        return false;
+
+    if (g_devtools_enabled) {
+      const bool f12 = event.windows_key_code == 0x7B;
+      const bool ctrl_shift_i =
+          event.windows_key_code == 'I' &&
+          (event.modifiers & EVENTFLAG_CONTROL_DOWN) &&
+          (event.modifiers & EVENTFLAG_SHIFT_DOWN);
+      if (f12 || ctrl_shift_i) {
+        fprintf(stderr, "helper: devtools on %s\n",
+                f12 ? "F12" : "Ctrl+Shift+I");
+        ShowDevToolsFor(browser, CefPoint());
+        if (is_keyboard_shortcut)
+          *is_keyboard_shortcut = true;
+        return true;
+      }
+    }
 
     // Standalone convenience only; a host that loses the socket kills the
     // process anyway.
@@ -2536,23 +2678,41 @@ class HelperClient : public CefClient,
       new HelperPermissionHandler};
 };
 
-class HelperBrowserViewDelegate : public CefBrowserViewDelegate {
- public:
-  cef_runtime_style_t GetBrowserRuntimeStyle() override {
-    return CEF_RUNTIME_STYLE_ALLOY;
-  }
+/* ShowDevTools opens an associated browser CEF windows itself; because every
+ * helper browser is wrapped in a CefBrowserView, CefWindowInfo cannot change
+ * that. The client is ours — slot 0, since this is not a request slot — so the
+ * created/closed events and the URL report come back over the control channel
+ * and the browser can be adopted into a slot. */
+void ShowDevToolsFor(CefRefPtr<CefBrowser> browser, const CefPoint& point) {
+  if (!browser || !browser->GetHost())
+    return;
 
-  IMPLEMENT_REFCOUNTING(HelperBrowserViewDelegate);
-};
+  /* An already-open panel is only focused; no browser is created, so the
+   * pending mark would never be consumed. */
+  if (!browser->GetHost()->HasDevTools())
+    ++g_devtools_creating;
+
+  CefRefPtr<HelperClient> client(new HelperClient(0));
+  browser->GetHost()->ShowDevTools(CefWindowInfo(), client, CefBrowserSettings(),
+                                   point);
+  fprintf(stderr, "helper: devtools requested for browser %d\n",
+          browser->GetIdentifier());
+}
 
 class HelperWindowDelegate : public CefWindowDelegate {
  public:
-  explicit HelperWindowDelegate(CefRefPtr<CefBrowserView> browser_view)
-      : browser_view_(browser_view) {}
+  explicit HelperWindowDelegate(CefRefPtr<CefBrowserView> browser_view,
+                                bool primary = true,
+                                cef_runtime_style_t style =
+                                    CEF_RUNTIME_STYLE_ALLOY)
+      : browser_view_(browser_view), primary_(primary), style_(style) {}
 
   void OnWindowCreated(CefRefPtr<CefWindow> window) override {
     CEF_REQUIRE_UI_THREAD();
-    g_window = window;
+    /* A DevTools shell is not the primary window: the global tracks the one
+     * the Esc-fullscreen handling applies to. */
+    if (primary_)
+      g_window = window;
     window->AddChildView(browser_view_);
     window->Show();
     browser_view_->RequestFocus();
@@ -2627,14 +2787,69 @@ class HelperWindowDelegate : public CefWindowDelegate {
     return CefRect(100, 100, 1000, 700);
   }
 
-  cef_runtime_style_t GetWindowRuntimeStyle() override {
-    return CEF_RUNTIME_STYLE_ALLOY;
-  }
+  /* Alloy everywhere — except the DevTools adopt window: a DevTools popup
+   * view is Chrome style by CEF's own rule (browser_view_impl.cc CHECKs it,
+   * and an Alloy window around one crashes), so its shell must claim Chrome. */
+  cef_runtime_style_t GetWindowRuntimeStyle() override { return style_; }
 
   IMPLEMENT_REFCOUNTING(HelperWindowDelegate);
 
  private:
   CefRefPtr<CefBrowserView> browser_view_;
+  bool primary_ = true;
+  cef_runtime_style_t style_ = CEF_RUNTIME_STYLE_ALLOY;
+};
+
+class HelperBrowserViewDelegate : public CefBrowserViewDelegate {
+ public:
+  explicit HelperBrowserViewDelegate(bool chrome = false) : chrome_(chrome) {}
+  cef_runtime_style_t GetBrowserRuntimeStyle() override {
+    /* A DevTools popup view is Chrome style by CEF's own rule —
+     * browser_view_impl.cc refuses Alloy for DevTools popups, and an Alloy
+     * window around one segfaults. */
+    return chrome_ ? CEF_RUNTIME_STYLE_CHROME : CEF_RUNTIME_STYLE_ALLOY;
+  }
+
+  /* The DevTools popup's view is ours to place: returning our own Chrome
+   * style delegate keeps the view's style legal, and
+   * OnPopupBrowserViewCreated then builds the frameless shell for it instead
+   * of letting CEF build its framed default window. Measured dead ends, both
+   * segfault-adjacent: moving the popup view after creation never maps
+   * before its first frame and segfaults after it, and a Chrome-style window
+   * hosting a fresh view dies in StatusBubble's WaylandBubble — the popup
+   * hook is the one route that maps, paints and stays alive. */
+  CefRefPtr<CefBrowserViewDelegate> GetDelegateForPopupBrowserView(
+      CefRefPtr<CefBrowserView> browser_view,
+      const CefBrowserSettings& settings,
+      CefRefPtr<CefClient> client,
+      bool is_devtools) override {
+    if (is_devtools && g_devtools_enabled)
+      return new HelperBrowserViewDelegate(/*chrome=*/true);
+    return this;
+  }
+
+  bool OnPopupBrowserViewCreated(CefRefPtr<CefBrowserView> browser_view,
+                                 CefRefPtr<CefBrowserView> popup_browser_view,
+                                 bool is_devtools) override {
+    if (!is_devtools || !g_devtools_enabled)
+      return false;
+    CefRefPtr<HelperWindowDelegate> delegate(
+        new HelperWindowDelegate(popup_browser_view,
+                                 /*primary=*/false,
+                                 /*style=*/CEF_RUNTIME_STYLE_CHROME));
+    CefRefPtr<CefWindow> window = CefWindow::CreateTopLevelWindow(delegate);
+    if (!window) {
+      fprintf(stderr, "helper: devtools frameless window failed\n");
+      return false;   /* let CEF build its default window instead */
+    }
+    fprintf(stderr, "helper: devtools popup in a frameless window\n");
+    return true;   /* the view hierarchy is ours now */
+  }
+
+  IMPLEMENT_REFCOUNTING(HelperBrowserViewDelegate);
+
+ private:
+  bool chrome_ = false;
 };
 
 int CreateNewBrowser(const std::string& url, bool windowed) {

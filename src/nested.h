@@ -130,6 +130,14 @@ void              nested_compositor_set_frames_suspended
                                                     (NestedCompositor *self,
                                                      NestedSurface *toplevel,
                                                      gboolean suspended);
+/* Configure @toplevel with a size of its own — a shared compositor hosts a
+ * toplevel per host window, and one allocation cannot size them all. 0 falls
+ * back to the compositor-wide size. Toplevels only; popups are placed by
+ * their rules. */
+void              nested_compositor_set_surface_size
+                                                    (NestedCompositor *self,
+                                                     NestedSurface *toplevel,
+                                                     int width, int height);
 void              nested_compositor_set_frame_clock (NestedCompositor *self,
                                                      GdkFrameClock *clock);
 NestedSurface    *nested_compositor_get_surface     (NestedCompositor *self);

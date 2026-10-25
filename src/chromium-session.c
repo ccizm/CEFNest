@@ -78,6 +78,8 @@ enum {
   /* The persistent profile directory, or NULL for the default ephemeral
    * profile. Only start() reads it. */
   PROP_DATA_DIRECTORY,
+  /* Whether the context menu and F12 may open the inspector. Default off. */
+  PROP_DEVTOOLS_ENABLED,
 };
 static guint signals[N_SIGNALS];
 
@@ -96,6 +98,7 @@ static void command_add_string (JsonBuilder *builder, const char *key,
                                 const char *value);
 static void session_send_a11y (ChromiumSession *self);
 static void session_read_a11y (ChromiumSession *self);
+static void session_send_devtools_state (ChromiumSession *self);
 static void handle_context_menu         (ChromiumSession *self, JsonObject *object);
 static void handle_context_menu_dismissed (ChromiumSession *self);
 static void handle_permission_request   (ChromiumSession *self, JsonObject *object);
@@ -157,6 +160,10 @@ struct _ChromiumSession {
    * or when dispose() gives up on it. */
   gboolean a11y_proxy_pending;
 
+  /* The devtools-enabled property, and what the helper has been told. Sent on
+   * ::ready and whenever it changes while a helper runs. */
+  gboolean devtools_enabled;
+
   /* The context menu the helper last asked about: pending until the host answers
    * it, and the two widgets that draw it while this side is the one that does. */
   gboolean menu_pending;
@@ -214,6 +221,26 @@ session_send_a11y (ChromiumSession *self)
   send_json (self, root);
   g_debug ("session: accessibility %s sent to helper",
            self->a11y_enabled ? "enabled" : "default");
+}
+
+static void
+session_send_devtools_state (ChromiumSession *self)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  if (!self->running)
+    return;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "devtools");
+  json_builder_set_member_name (builder, "enabled");
+  json_builder_add_boolean_value (builder, self->devtools_enabled);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+  g_debug ("session: devtools %s sent to helper",
+           self->devtools_enabled ? "enabled" : "disabled");
 }
 
 static void
@@ -537,6 +564,7 @@ handle_event (ChromiumSession *self, const char *line)
         }
 
       session_send_a11y (self);
+      session_send_devtools_state (self);
       g_signal_emit (self, signals[SIG_READY], 0);
       return;
     }
@@ -587,7 +615,8 @@ handle_event (ChromiumSession *self, const char *line)
       int id = (int) event_int (object, "browser");
       g_signal_emit (self, signals[SIG_BROWSER_CREATED], 0, id,
                      event_string (object, "url"),
-                     event_flag (object, "windowed"));
+                     event_flag (object, "windowed"),
+                     event_flag (object, "devtools"));
       return;
     }
 
@@ -2946,6 +2975,24 @@ chromium_session_set_accessibility (ChromiumSession *self, gboolean enabled)
 }
 
 void
+chromium_session_set_devtools_enabled (ChromiumSession *self, gboolean enabled)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  /* Through the property so a host watching it gets the change too; a running
+   * helper hears about it from set_property. */
+  g_object_set (self, "devtools-enabled", enabled, NULL);
+}
+
+gboolean
+chromium_session_get_devtools_enabled (ChromiumSession *self)
+{
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), FALSE);
+
+  return self->devtools_enabled;
+}
+
+void
 chromium_session_load_uri (ChromiumSession *self, const char *uri)
 {
   g_autoptr (JsonBuilder) builder = json_builder_new ();
@@ -3320,6 +3367,22 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
                           G_PARAM_EXPLICIT_NOTIFY));
 
+  /**
+   * ChromiumSession:devtools-enabled:
+   *
+   * Whether the context menu offers 检查 and F12 / Ctrl+Shift+I open the
+   * inspector, in a window of its own. The default is %FALSE, and that is the
+   * whole off switch: no menu row, no shortcut, and the helper never calls
+   * ShowDevTools. See chromium_session_set_devtools_enabled() for what turning
+   * it on gives the person at the keyboard.
+   */
+  g_object_class_install_property
+    (object_class, PROP_DEVTOOLS_ENABLED,
+     g_param_spec_boolean ("devtools-enabled", "DevTools enabled",
+                           "Offer the inspector in the context menu and on F12",
+                           FALSE,
+                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   signals[SIG_CHANGED] =
     g_signal_new ("changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
@@ -3436,8 +3499,8 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
   signals[SIG_BROWSER_CREATED] =
     g_signal_new ("browser-created", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
-                  0, NULL, NULL, NULL, G_TYPE_NONE, 3,
-                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_BOOLEAN);
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 4,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_BOOLEAN);
   signals[SIG_BROWSER_SELECTED] =
     g_signal_new ("browser-selected", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
@@ -3510,6 +3573,9 @@ chromium_session_get_property (GObject *object, guint property,
     case PROP_DATA_DIRECTORY:
       g_value_set_string (value, self->data_directory);
       break;
+    case PROP_DEVTOOLS_ENABLED:
+      g_value_set_boolean (value, self->devtools_enabled);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property, pspec);
     }
@@ -3528,6 +3594,13 @@ chromium_session_set_property (GObject *object, guint property,
       break;
     case PROP_DATA_DIRECTORY:
       chromium_session_set_data_directory (self, g_value_get_string (value));
+      break;
+    case PROP_DEVTOOLS_ENABLED:
+      if (self->devtools_enabled != g_value_get_boolean (value))
+        {
+          self->devtools_enabled = g_value_get_boolean (value);
+          session_send_devtools_state (self);
+        }
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property, pspec);

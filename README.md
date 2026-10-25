@@ -122,7 +122,7 @@ the helper gets a compositor with a live surface. On window close, call
 More samples in [`examples/`](examples/README.md) — one focused program per
 task: a toolbar, tabs, standalone windows, scripting, a find bar, downloads,
 menus, permissions, error handling, a frame counter, a User-Agent switcher, a
-persistent data directory.
+persistent data directory, the DevTools switch.
 What each one shows is listed in [examples/README.md](examples/README.md).
 
 ## Data directory
@@ -143,6 +143,26 @@ The full contract — the rules, where to put the directory and what an
 uninstall does with it per packaging format, the standalone helper's
 environment variable, and cleaning up the pre-156 `~/.cache` directories — is
 in [docs/data-directory.md](docs/data-directory.md).
+
+## Developer tools
+
+The inspector is off by default and has no other way in: while
+`devtools-enabled` is FALSE the helper never calls `ShowDevTools`, the context
+menu has no 检查 row, and F12 / Ctrl+Shift+I do nothing. Turn it on before
+`start()` — or at any time while a helper runs:
+
+```c
+chromium_session_set_devtools_enabled (session, TRUE);
+```
+
+The inspector opens in a window of its own, as a separate browser associated
+with the page, and reaches the host as `::browser-created` with `devtools` TRUE;
+show it like any standalone browser (`examples/devtools.c` does). Closing the
+inspector leaves the page running, and closing the page takes the inspector with
+it. Enabling the switch gives whoever is at the keyboard full debugging power
+over every page the session loads — arbitrary script in the page, and read
+access to its storage and cookies — so it belongs behind a user's own choice,
+not on by default. The demo exposes the same switch as `--devtools`.
 
 ## API
 
@@ -165,7 +185,8 @@ group and what each signal carries — is in [docs/api.md](docs/api.md).
 | `G_MESSAGES_DEBUG` | **space**-separated log domains: `all`, or `nested chromium-view chromium-session` |
 
 The demo also accepts `--data-dir=<absolute path>` (see
-[docs/data-directory.md](docs/data-directory.md)), and reads extra knobs (`CEFNEST_DOWNLOAD_*`, `CEFNEST_PERMISSION`,
+[docs/data-directory.md](docs/data-directory.md)) and `--devtools` (see
+[Developer tools](#developer-tools)), and reads extra knobs (`CEFNEST_DOWNLOAD_*`, `CEFNEST_PERMISSION`,
 `CEFNEST_DRAG_OUT`, `CHROMIUM_WINDOW`, `CHROMIUM_FRAME_METRICS`, the clipboard
 seed/watch variables, `CHROMIUM_A11Y`); see `src/main.c`.
 

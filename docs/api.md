@@ -25,6 +25,7 @@ samples for every group live in the [examples](../examples/README.md).
 | Tabs / windows | `new_browser()` · `select_browser()` · `close_browser()` |
 | View source | `view_source()` → answered by `::view-source` / `::view-source-error`; the `auto-source-window` property (default on) decides whether the component's window opens |
 | Page / misc | `set_muted()` · `zoom("in"/"out"/"reset")` · `set_accessibility()` |
+| Developer tools | `set_devtools_enabled()` · `get_devtools_enabled()`; the `devtools-enabled` property (default off) — see [Developer tools](../README.md#developer-tools) |
 
 **Signals**
 
@@ -42,7 +43,7 @@ samples for every group live in the [examples](../examples/README.md).
 | `::context-menu` | `x, y, items` | return TRUE to draw your own menu, then answer |
 | `::permission-request` | `id, kind, origin, permissions, raw` | return TRUE to own the answer; default is deny |
 | `::permission-dismissed` | `id, result` | a held prompt was replaced by the page |
-| `::browser-created` / `::browser-selected` / `::browser-closed` | `id, …` | tab and window lifecycle |
+| `::browser-created` / `::browser-selected` / `::browser-closed` | `id, …` | tab and window lifecycle; `browser-created` carries `url, windowed, devtools` |
 | `::popup-requested` | `url` | target=_blank; foreground ones already navigated in place |
 | `::page-message` | `json` | page called `cefnestPostMessage()`; reply via `run_javascript` |
 | `::primary-selection` / `::copy-text` / `::open-url` | `text` / `text` / `url` | selection bridge, menu copy, menu "open in new window" |

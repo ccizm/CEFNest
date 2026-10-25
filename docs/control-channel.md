@@ -42,6 +42,7 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `js-expr` | `code`, `id` | expression embedded directly, no `eval` |
 | `mute` | `on` (default = toggle) | mute |
 | `a11y` | `enabled` | `SetAccessibilityState(STATE_ENABLED/DEFAULT)` |
+| `devtools` | `enabled` | offers 检查 in the context menu and F12 / Ctrl+Shift+I; the inspector browser arrives as `browser-created` with `devtools` true |
 | `download-accept` | `id`, `path` | absolute path; the host creates parent directories |
 | `download-reject` | `id` | refuses an unstarted download, cancels one in flight |
 | `download-pause` / `download-resume` | `id` | only for a download that already has its item callback |
@@ -57,7 +58,7 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | Event | Payload |
 | --- | --- |
 | `ready` | `cef`, `pid`, `url` (handshake) |
-| `browser-created` | `browser`, `url`, `windowed` |
+| `browser-created` | `browser`, `url`, `windowed`, `devtools` (the inspector CEF created for `ShowDevTools`: always windowed, CEF owns its window, and it never becomes the active browser) |
 | `browser-selected` | `browser`, `windowed` |
 | `browser-closed` | `browser` |
 | `take-focus` | `browser`, `next` (the page's Tab traversal ran off the edge of the document; the host answers by handing the focus chain to the widget after — `next` false: before — the view) |

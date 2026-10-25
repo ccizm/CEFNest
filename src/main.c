@@ -18,6 +18,9 @@ typedef struct {
   /* --data-dir=<absolute path>: the demo's one persistent profile, handed to
    * the session before start(). NULL means the default: no disk at all. */
   char *data_directory;
+  /* --devtools: turn the inspector switch on before start(), the same call a
+   * host makes from its own preferences UI. */
+  gboolean devtools;
   /* What the process hands back once the run is over. Only a scripted run that
    * was cut short gives it anything but 0; see script_helper_gone(). */
   int exit_status;
@@ -68,11 +71,11 @@ static uint64_t demo_frame_count (void);
 #endif
 
 static void session_ready (ChromiumSession *session, gpointer data);
-static void open_browser_window (int id);
+static void open_browser_window (int id, gboolean devtools, const char *title);
 static void assign_browser_surfaces (void);
 static void session_browser_created (ChromiumSession *session, int id,
                                      const char *url, gboolean windowed,
-                                     gpointer data);
+                                     gboolean devtools, gpointer data);
 static void session_browser_selected (ChromiumSession *session, int id,
                                       gpointer data);
 static void session_browser_closed (ChromiumSession *session, int id,
@@ -193,13 +196,24 @@ tab_clicked (GtkButton *button, gpointer data)
 
 static void
 session_browser_created (ChromiumSession *session, int id, const char *url,
-                         gboolean windowed, gpointer data)
+                         gboolean windowed, gboolean devtools, gpointer data)
 {
   GtkWidget *button;
   const char *shown = url && *url ? url : (windowed ? "window" : "blank");
 
   if (!demo.tabs)
     return;
+  if (devtools)
+    {
+      /* The inspector lives in its own window like any standalone browser, but
+       * it gets no tab: its focus must not steal the page's address bar. */
+      const char *title = chromium_session_get_title (session);
+
+      g_printerr ("demo: browser %d created [window] devtools=1 %s\n", id,
+                  url && *url ? url : "(no url)");
+      open_browser_window (id, TRUE, title && *title ? title : NULL);
+      return;
+    }
   button = gtk_button_new_with_label (shown);
   gtk_widget_set_tooltip_text (button,
                                windowed ? "standalone browser" : "tab");
@@ -215,7 +229,7 @@ session_browser_created (ChromiumSession *session, int id, const char *url,
   g_printerr ("demo: browser %d created %s%s\n", id, windowed ? "[window] " : "",
               shown);
   if (windowed)
-    open_browser_window (id);
+    open_browser_window (id, FALSE, NULL);
 }
 
 static void
@@ -247,13 +261,14 @@ session_browser_closed (ChromiumSession *session, int id, gpointer data)
 {
   GtkWidget *button;
 
-  if (!demo.tab_buttons)
-    return;
-  button = g_hash_table_lookup (demo.tab_buttons, GINT_TO_POINTER (id));
-  if (button)
+  if (demo.tab_buttons)
     {
-      g_hash_table_remove (demo.tab_buttons, GINT_TO_POINTER (id));
-      gtk_box_remove (GTK_BOX (demo.tabs), button);
+      button = g_hash_table_lookup (demo.tab_buttons, GINT_TO_POINTER (id));
+      if (button)
+        {
+          g_hash_table_remove (demo.tab_buttons, GINT_TO_POINTER (id));
+          gtk_box_remove (GTK_BOX (demo.tabs), button);
+        }
     }
   if (demo.browser_windows)
     {
@@ -299,6 +314,7 @@ assign_browser_surfaces (void)
   if (!demo.assigned_surfaces)
     demo.assigned_surfaces = g_hash_table_new (g_direct_hash, g_direct_equal);
 
+  gboolean requeued = FALSE;
   tops = nested_compositor_get_toplevels (compositor);
 
   /* A key has to be a surface the compositor still has. Closing a window drops
@@ -315,15 +331,31 @@ assign_browser_surfaces (void)
       if (g_list_find (tops, dead))
         continue;
 
+      int dead_id = 0;
       if (dead == demo.tab_surface)
         view = CHROMIUM_VIEW (demo.view);
       else
-        view = g_hash_table_lookup (demo.browser_views,
-                                   g_hash_table_lookup (demo.assigned_surfaces, dead));
+        {
+          dead_id = GPOINTER_TO_INT (g_hash_table_lookup (demo.assigned_surfaces,
+                                                          dead));
+          view = g_hash_table_lookup (demo.browser_views,
+                                      GINT_TO_POINTER (dead_id));
+        }
       if (view)
         chromium_view_set_target_surface (view, NULL);
       if (dead == demo.tab_surface)
         g_clear_object (&demo.tab_surface);
+      else if (view)
+        /* The helper can retire a window and map its replacement within one
+         * tick — adopting the DevTools browser out of CEF's framed window
+         * does exactly that. Re-queue the id, so the replacement surface
+         * lands in the window that just lost its surface instead of leaving
+         * it blank until the next toplevel happens to come. */
+        {
+          demo.pending_window_ids = g_list_append (demo.pending_window_ids,
+                                                   GINT_TO_POINTER (dead_id));
+          requeued = TRUE;
+        }
       g_hash_table_remove (demo.assigned_surfaces, dead);
     }
   g_list_free (keys);
@@ -369,13 +401,23 @@ assign_browser_surfaces (void)
 
       chromium_view_set_target_surface (view, surface);
       g_hash_table_insert (demo.assigned_surfaces, surface, GINT_TO_POINTER (id));
+      g_printerr ("demo: browser %d got a surface\n", id);
     }
   g_list_free_full (tops, g_object_unref);
+  /* A re-queued id can only be satisfied by surfaces already in the list —
+   * none of which will trigger on_toplevels_changed again. */
+  if (requeued)
+    assign_browser_surfaces ();
 }
 
 static void
 on_toplevels_changed (NestedCompositor *compositor, gpointer data)
 {
+  /* The compositor announces its last surfaces going away while it dies, and
+   * that can land after teardown has already cleared demo.view. */
+  if (!demo.view)
+    return;
+
   assign_browser_surfaces ();
   gtk_widget_queue_draw (GTK_WIDGET (demo.view));
 }
@@ -420,7 +462,7 @@ browser_window_close_request (GtkWindow *window, gpointer data)
 }
 
 static void
-open_browser_window (int id)
+open_browser_window (int id, gboolean devtools, const char *title)
 {
   NestedCompositor *compositor;
   ChromiumView *view;
@@ -436,7 +478,15 @@ open_browser_window (int id)
   view = chromium_view_new_shared (compositor, NULL);
   gtk_window_set_default_size (GTK_WINDOW (window), 900, 650);
   gtk_window_set_child (GTK_WINDOW (window), GTK_WIDGET (view));
-  gtk_window_set_title (GTK_WINDOW (window), "CEFNest window");
+  if (devtools)
+    {
+      g_autofree char *label =
+        g_strdup_printf ("DevTools — %s", title && *title ? title : "inspector");
+
+      gtk_window_set_title (GTK_WINDOW (window), label);
+    }
+  else
+    gtk_window_set_title (GTK_WINDOW (window), "CEFNest window");
   gtk_window_present (GTK_WINDOW (window));
 
   g_hash_table_insert (demo.browser_windows, GINT_TO_POINTER (id), window);
@@ -450,7 +500,8 @@ open_browser_window (int id)
                     GINT_TO_POINTER (id));
   g_signal_connect (window, "notify::is-active",
                     G_CALLBACK (browser_window_active), GINT_TO_POINTER (id));
-  g_printerr ("demo: browser %d standalone window\n", id);
+  g_printerr ("demo: browser %d standalone window%s\n", id,
+              devtools ? " (devtools)" : "");
   assign_browser_surfaces ();
 }
 
@@ -1655,6 +1706,24 @@ session_closed (ChromiumSession *session, const char *reason, gpointer data)
    * on its own has to be reported rather than waited for. The reason rides along
    * so the report says what ended the session, not just that it ended. */
   script_note_helper_gone (reason);
+
+  /* Every standalone and DevTools window shows a page nobody is serving any
+   * more. gtk_window_destroy skips close-request, so no close-browser goes out
+   * to a session that is not there, and the destroy handlers clear the tables
+   * (removing the current key during a hash table walk is allowed). */
+  if (demo.browser_windows && g_hash_table_size (demo.browser_windows) > 0)
+    {
+      /* Destroying a window removes it from this very table (the destroy
+       * handler), so plain iteration trips GLib's version check — take the
+       * windows out first and destroy the snapshot. */
+      GList *windows = g_hash_table_get_values (demo.browser_windows);
+      GList *l;
+
+      g_hash_table_steal_all (demo.browser_windows);
+      for (l = windows; l; l = l->next)
+        gtk_window_destroy (GTK_WINDOW (l->data));
+      g_list_free (windows);
+    }
 }
 
 static void
@@ -1762,6 +1831,10 @@ build_toolbar (GtkHeaderBar *header)
 
   demo.session = chromium_session_new (NULL);
   chromium_session_set_view (demo.session, demo.view);
+  /* Before start(): the ready handshake carries the switch to the helper, the
+   * same way the accessibility state does. */
+  if (demo.devtools)
+    chromium_session_set_devtools_enabled (demo.session, TRUE);
   g_signal_connect (demo.session, "ready", G_CALLBACK (session_ready), NULL);
   g_signal_connect (demo.session, "changed", G_CALLBACK (session_changed), NULL);
   g_signal_connect (demo.session, "zoom-changed",
@@ -2237,7 +2310,8 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
 /* CHROMIUM_SESSION_SCRIPT drives the control plane without anyone typing. One
  * step per line: "load <uri>", "back", "forward", "reload", "stop",
  * "js <code>", "js-expr <expression>", "a11y-on", "a11y-off", "frames",
- * "new-tab <url>", "new-window <url>", "select-browser <id>",
+ * "devtools-on", "devtools-off", "new-tab <url>", "new-window <url>",
+ * "select-browser <id>",
  * "close-browser <id>", "wait <ms>", "hide", "show", "view-source",
  * "shot <path>", "dump <path>", "hover <x> <y>",
  * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
@@ -2512,6 +2586,7 @@ script_run_next (void)
                             !strncmp (line, "menu-", 5) ||
                             !strncmp (line, "perm-", 5) ||
                             !strncmp (line, "a11y-", 5) ||
+                            !strncmp (line, "devtools-", 9) ||
                             !strncmp (line, "new-", 4) ||
                             !strncmp (line, "select-browser", 14) ||
                             !strncmp (line, "close-browser", 13)))
@@ -2552,6 +2627,16 @@ script_run_next (void)
       else if (!strcmp (line, "a11y-off"))
         {
           chromium_session_set_accessibility (demo.session, FALSE);
+          continue;
+        }
+      else if (!strcmp (line, "devtools-on"))
+        {
+          chromium_session_set_devtools_enabled (demo.session, TRUE);
+          continue;
+        }
+      else if (!strcmp (line, "devtools-off"))
+        {
+          chromium_session_set_devtools_enabled (demo.session, FALSE);
           continue;
         }
       else if (!strcmp (line, "hide"))
@@ -3538,8 +3623,8 @@ main (int argc, char *argv[])
   /* Everything after the program name is the inner client command line; keep
    * it away from GApplication, which would try to parse its own options. Copy
    * the strings: the array is released with g_strfreev(), which owns them.
-   * --data-dir= is the demo's own option, so it is taken out here rather than
-   * handed to a client that would only read it as a URL. */
+   * --data-dir= and --devtools are the demo's own options, so they are taken
+   * out here rather than handed to a client that would only read them as a URL. */
   args = g_ptr_array_new ();
   for (i = 1; i < argc; i++)
     {
@@ -3547,6 +3632,12 @@ main (int argc, char *argv[])
         {
           g_free (demo.data_directory);
           demo.data_directory = g_strdup (argv[i] + strlen ("--data-dir="));
+          continue;
+        }
+
+      if (!strcmp (argv[i], "--devtools"))
+        {
+          demo.devtools = TRUE;
           continue;
         }
 

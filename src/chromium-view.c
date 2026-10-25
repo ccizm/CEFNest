@@ -213,7 +213,13 @@ chromium_view_push_size (ChromiumView *self)
 
   self->pushed_width = width;
   self->pushed_height = height;
+  /* The compositor-wide size stays the fallback for toplevels no view has
+     claimed; a view hosting one configures it with its own allocation, so
+     two windows on one compositor stop fighting over a single size. */
   nested_compositor_set_size (self->compositor, width, height);
+  if (self->target)
+    nested_compositor_set_surface_size (self->compositor, self->target,
+                                        width, height);
 }
 
 static void
@@ -422,6 +428,19 @@ chromium_view_on_map (GtkWidget *widget, gpointer data)
                       G_CALLBACK (chromium_view_on_scale_notify), self);
 }
 
+/* Route the seat to this view's surface before its events go out. A shared
+ * compositor hosts a toplevel per host window, and the input surface is a
+ * compositor-wide "last speaker": a window that opens and takes focus moves
+ * it there, and a pointer that is already inside another view never fires
+ * enter again — without this re-assertion every click, scroll and key would
+ * land in the window that spoke last instead of the one under the events. */
+static void
+chromium_view_claim_input (ChromiumView *self)
+{
+  if (self->target && self->compositor)
+    nested_compositor_set_input_surface (self->compositor, self->target);
+}
+
 static void
 chromium_view_on_unmap (GtkWidget *widget, gpointer data)
 {
@@ -497,8 +516,7 @@ chromium_view_on_motion_enter (GtkEventControllerMotion *controller,
 {
   ChromiumView *self = data;
 
-  if (self->target)
-    nested_compositor_set_input_surface (self->compositor, self->target);
+  chromium_view_claim_input (self);
 
   /* Record the entry position first: the seat sends enter with the coordinates
    * it last knew, and an entering pointer has not produced a motion event yet. */
@@ -519,6 +537,8 @@ chromium_view_on_motion (GtkEventControllerMotion *controller,
                          double x, double y, gpointer data)
 {
   ChromiumView *self = data;
+
+  chromium_view_claim_input (self);
 
   /* GDK hands out widget-relative logical pixels, which is exactly the space a
    * client's surface lives in now that the scaling is its own business. */
@@ -549,6 +569,9 @@ chromium_view_on_button_event (GtkEventController *controller, GdkEvent *event,
                                gpointer data)
 {
   ChromiumView *self = data;
+
+  chromium_view_claim_input (self);
+
   GdkEventType type = gdk_event_get_event_type (event);
   gboolean pressed;
   guint button;
@@ -590,6 +613,9 @@ chromium_view_on_scroll (GtkEventControllerScroll *controller, double dx, double
                          gpointer data)
 {
   ChromiumView *self = data;
+
+  chromium_view_claim_input (self);
+
   GdkEvent *event = gtk_event_controller_get_current_event (GTK_EVENT_CONTROLLER (controller));
   GdkScrollUnit unit = event ? gdk_scroll_event_get_unit (event) : GDK_SCROLL_UNIT_WHEEL;
   gboolean stop = event ? gdk_scroll_event_is_stop (event) : FALSE;
@@ -807,6 +833,8 @@ chromium_view_on_key_pressed (GtkEventControllerKey *controller, guint keyval,
 {
   ChromiumView *self = data;
 
+  chromium_view_claim_input (self);
+
   /* GDK reports XKB key codes, which are the evdev codes Wayland wants plus 8. */
   if (debug_enabled ())
     g_debug ("input: press keyval=%u (%s) xkb=%u evdev=%u",
@@ -844,7 +872,6 @@ chromium_view_on_has_focus_notify (GObject *object, GParamSpec *pspec, gpointer 
   ChromiumView *self = data;
   gboolean focused = gtk_widget_has_focus (GTK_WIDGET (self));
 
-  g_debug ("focus: has-focus=%d", focused);
   if (focused && self->target)
     nested_compositor_set_input_surface (self->compositor, self->target);
   nested_compositor_set_keyboard_active (self->compositor, focused);
@@ -1134,6 +1161,20 @@ chromium_view_set_target_surface (ChromiumView *self, NestedSurface *target)
 {
   g_return_if_fail (CHROMIUM_IS_VIEW (self));
   g_set_object (&self->target, target);
+
+  /* A view allocates before its target exists, and that allocation has
+   * already gone out as the compositor-wide size: the new target learns the
+   * current allocation here, or it is configured with whatever other window
+   * pushed last — the page in the previous window shrinks to match it. */
+  if (target && self->compositor)
+    {
+      int width = gtk_widget_get_width (GTK_WIDGET (self));
+      int height = gtk_widget_get_height (GTK_WIDGET (self));
+
+      if (width > 0 && height > 0)
+        nested_compositor_set_surface_size (self->compositor, target,
+                                            width, height);
+    }
 
   /* A target that arrives while the view is off the screen starts suspended —
    * a standalone browser window can be hidden before its surface is assigned.

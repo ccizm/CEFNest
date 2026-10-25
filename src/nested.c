@@ -1255,6 +1255,18 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
       if (surface_is_painted (self))
         g_signal_emit (nested, signals[SIGNAL_FRAME], 0);
     }
+  else if (self->is_toplevel)
+    {
+      /* A second toplevel's commit is the picture of the window that hosts
+       * it: the view showing it repaints from this signal, and so does every
+       * other view — it is the one repaint driver they share. Measured with
+       * the DevTools shell: commits here used to fall through to
+       * nested_update_primary() alone, and the main window's page piled up
+       * invisible updates until the next primary or popup commit — scrolling
+       * and selections appeared only when another window was touched. */
+      if (repaint)
+        g_signal_emit (nested, signals[SIGNAL_FRAME], 0);
+    }
   else
     nested_update_primary (nested);
 
@@ -2006,7 +2018,9 @@ fire_pending_frame_callbacks (NestedCompositor *self)
 
   wl_list_for_each (surface, &self->surfaces, nested_link)
     if (!surface_frames_suspended (surface))
-      surface_fire_frame_callbacks (surface, msec);
+      {
+        surface_fire_frame_callbacks (surface, msec);
+      }
 
   nested_flush (self);
 
@@ -2118,7 +2132,6 @@ frame_clock_watchdog (gpointer data)
 
   self->frame_watchdog_id = 0;
   self->clock_alive = FALSE;
-  g_debug ("nested: clock watchdog fired");
 
   nested_start_frame_clock (self);
 
@@ -2178,7 +2191,7 @@ nested_start_frame_clock (NestedCompositor *self)
     }
 
   if (!pending)
-    return;
+
 
   if (self->frame_clock && self->clock_alive)
     {
@@ -2869,6 +2882,27 @@ nested_compositor_get_size (NestedCompositor *self, int *width, int *height)
     *height = self->height;
 }
 
+/* The size a host view pushes for the toplevel it hosts: see the
+ * config_width note in the surface struct. */
+void
+nested_compositor_set_surface_size (NestedCompositor *self,
+                                    NestedSurface *surface,
+                                    int width, int height)
+{
+  g_return_if_fail (NESTED_IS_COMPOSITOR (self));
+  g_return_if_fail (surface != NULL);
+  g_return_if_fail (width >= 0 && height >= 0);
+  if (!surface->toplevel)
+    return;
+
+  if (surface->config_width == width && surface->config_height == height)
+    return;
+
+  surface->config_width = width;
+  surface->config_height = height;
+  xdg_surface_configure (surface);
+}
+
 void
 nested_compositor_set_size (NestedCompositor *self, int width, int height)
 {
@@ -2889,13 +2923,16 @@ nested_compositor_set_size (NestedCompositor *self, int width, int height)
    * destroys that client before it returns, and the surface being walked is
    * taken out of self->surfaces by the destroy callback. Hold a reference to
    * each surface before the walk so the list cannot be mutated under the
-   * iterator, and check xdg_surface again because the callback may have run. */
+   * iterator, and check xdg_surface again because the callback may have run.
+   * A toplevel a host view sizes itself is configured by that view — the
+   * compositor-wide size here is for the ones nobody claimed. */
   {
     GList *surfaces = NULL, *link;
 
     wl_list_for_each (surface, &self->surfaces, nested_link)
       {
-        if (surface->xdg_surface)
+        if (surface->xdg_surface && !(surface->config_width > 0 ||
+                                      surface->config_height > 0))
           surfaces = g_list_prepend (surfaces, g_object_ref (surface));
       }
 
@@ -2946,6 +2983,7 @@ nested_compositor_set_input_surface (NestedCompositor *self,
    * or the seat's focus would hold a pointer to the wrong object type. */
   if (surface)
     g_return_if_fail (NESTED_IS_SURFACE (surface));
+  if (self->input_surface != surface)
   g_set_object (&self->input_surface, surface);
   seat_retarget (self);
 }

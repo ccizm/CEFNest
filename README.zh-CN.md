@@ -117,7 +117,7 @@ chromium_session_start (session, "https://example.com", &error); // 3. 启动
 
 更多示例见 [`examples/`](examples/README.zh-CN.md)——每个任务一个专门的小程序：
 工具栏、标签页、独立窗口、脚本、查找栏、下载、菜单、权限、错误处理、帧计数器、
-User-Agent 切换、持久数据目录。每个示例演示什么，见
+User-Agent 切换、持久数据目录、开发者工具开关。每个示例演示什么，见
 [examples/README.zh-CN.md](examples/README.zh-CN.md)。
 
 ## 数据目录
@@ -136,6 +136,23 @@ chromium_session_start (session, "https://example.com", &error);
 完整契约——规则、目录放在哪里、各安装形态下卸载的行为、standalone helper
 的环境变量、旧版 `~/.cache` 目录的清理——见
 [docs/data-directory.zh-CN.md](docs/data-directory.zh-CN.md)。
+
+## 开发者工具
+
+开发者工具默认关闭，也没有别的入口：`devtools-enabled` 为 FALSE 时 helper 从不调用
+`ShowDevTools`，右键菜单没有「检查」行，F12 / Ctrl+Shift+I 也不起作用。在
+`start()` 之前打开它——或者在 helper 运行期间随时打开：
+
+```c
+chromium_session_set_devtools_enabled (session, TRUE);
+```
+
+开发者工具在以自己的窗口打开，作为与页面关联的独立 browser，以 `devtools` 为
+TRUE 的 `::browser-created` 到达宿主；按普通独立窗口显示即可
+（`examples/devtools.c` 就是这样做的）。关闭开发者工具不影响页面运行，关闭页面则会
+把开发者工具一起带走。打开这个开关等于把 session 加载的每个页面的完全调试权交给
+坐在键盘前的人——可在页面里执行任意脚本，也能读取它的存储与 cookie——所以它应当
+来自用户自己的选择，而不是默认打开。demo 用 `--devtools` 暴露同一个开关。
 
 ## API
 
@@ -157,7 +174,8 @@ chromium_session_start (session, "https://example.com", &error);
 | `G_MESSAGES_DEBUG` | **空格分隔**的日志域：`all`，或 `nested chromium-view chromium-session` |
 
 demo 还接受 `--data-dir=<绝对路径>`（见
-[docs/data-directory.zh-CN.md](docs/data-directory.zh-CN.md)），并读取一些额外的开关
+[docs/data-directory.zh-CN.md](docs/data-directory.zh-CN.md)）与 `--devtools`
+（见[开发者工具](#开发者工具)），并读取一些额外的开关
 （`CEFNEST_DOWNLOAD_*`、`CEFNEST_PERMISSION`、
 `CEFNEST_DRAG_OUT`、`CHROMIUM_WINDOW`、`CHROMIUM_FRAME_METRICS`、剪贴板 seed/watch
 变量、`CHROMIUM_A11Y`），见 `src/main.c`。
