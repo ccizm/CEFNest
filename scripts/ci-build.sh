@@ -108,23 +108,22 @@ CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION)
 
 ## 中文
 
-本版把 CEF 升到 156 稳定版（Chromium $CHROMIUM_VERSION），并带来 154 系列
-之后落地的组件能力：
+本版在同一 CEF 156 稳定版上落地数据目录：默认不再向 ~/.cache 写任何
+profile。
 
-- **CEF 154 → 156**：全新里程碑。实测变化：Chromium 拖放不再提供
-  \`chromium/x-web-custom-data\` 类型（跨边界拖放现在携带 2 种类型），
-  dnd 门禁已按新行为校准；其余门禁（协议、会话脚本、焦点链、遮挡节流、
-  打包）全量复跑通过。
-- **查看网页源代码**：右键菜单的“查看网页源代码”不再写临时文件、不再拉起
-  系统编辑器，而是组件自带的只读源码窗口——行号、语法高亮、查找、自动
-  换行、复制全部；源码经控制通道分块流入，仅在内存中流转。
-  新增 \`chromium_session_view_source()\`、\`::view-source\` 信号与
-  \`auto-source-window\` 属性。运行时新增 GtkSourceView 5 依赖。
-- **Tab 焦点链打通**：Tab/Shift+Tab 可以在 GTK 控件与页面元素之间完整穿行
-  （页面边缘出让给 GTK 焦点链，进入页面落在首个可聚焦元素）。
-- **性能与体积**：被完全遮挡的窗口节流到 2 帧/秒（心跳唤醒）；隐藏窗口
-  停止产帧；dmabuf 缓冲推迟到被顶替时释放（消除撕裂风险）；CEF 运行时
-  打包时 strip——安装体积从约 1.5 GB 降到约 350 MB。
+- **默认无痕、零落盘**：不设置路径时，helper 以 incognito 运行（HTTP 缓存
+  在内存），CEF 必须写的安装级数据进 \$XDG_RUNTIME_DIR 下的 0700 临时
+  目录——退出即删、重启即清。以往"每次会话在 ~/.cache 新建 3.5-8.7 MB 的
+  profile、14 天后才被清理"的行为整体移除。
+- **数据目录 API**：\`chromium_session_set_data_directory()\` 在 start() 前
+  设一个绝对路径，cookies、localStorage、IndexedDB、HTTP 缓存全部落在该
+  目录下并跨重启保留；\`chromium_session_clear_data()\` 一键清除，有会话
+  占用时拒绝。同目录互斥由 \`<dir>/.cefnest.lock\` 的 flock 保证，崩溃自动
+  释放、无陈旧锁。
+- demo 新增 \`--data-dir\`；新增示例 \`examples/persistent.c\`；standalone
+  helper 以 \`CHROMIUM_HELPER_DATA_DIR\` 获得同样的持久化。
+- cefnest-dev 补上缺失的 \`libgtksourceview-5-dev\` 依赖（上一版流水线冒烟
+  失败的原因），rpm devel 同步补 \`gtksourceview5-devel\`。
 - 安装包形态沿用两包制：\`cefnest\`（库 + helper + CEF 运行时）、
   \`cefnest-dev\`（头文件与 \`cefnest.pc\`）。
 
@@ -143,31 +142,29 @@ CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION)
 
 ## English
 
-This release moves CEF to the 156 stable channel (Chromium $CHROMIUM_VERSION)
-and ships the component work that landed after the 154 series:
+This release lands the data directory on the same CEF 156 stable
+(Chromium $CHROMIUM_VERSION): by default nothing is written to ~/.cache
+any more.
 
-- **CEF 154 -> 156**, a new milestone. Measured change: Chromium drag-and-drop
-  no longer offers the \`chromium/x-web-custom-data\` type (a cross-boundary
-  drag now carries two types); the dnd gate is calibrated to the new
-  behaviour, and the full gate battery (protocol, session scripts, focus
-  chain, occlusion throttling, packaging) was re-run green.
-- **View Source**: the context menu's View Source no longer writes a temp
-  file and opens the desktop's editor — it is the component's own read-only
-  window now, with line numbers, syntax highlighting, find, wrap and
-  copy-all; the source streams over the control channel and stays in
-  memory. New \`chromium_session_view_source()\`, \`::view-source\` and the
-  \`auto-source-window\` property. GtkSourceView 5 is a new runtime
-  dependency.
-- **One focus chain**: Tab and Shift+Tab now cross between GTK widgets and
-  page elements in a single chain (the page's edge hands the walk back to
-  GTK; entering the page lands on its first focusable element).
-- **Performance and size**: fully covered windows throttle to ~2 frames per
-  second with a heartbeat to wake them; hidden windows stop producing
-  frames; dmabuf buffers are held until replaced (no more tearing risk);
-  and the CEF runtime ships stripped — installed size drops from ~1.5 GB to
-  ~350 MB.
-- Packaging stays two packages: \`cefnest\` (library + helper + CEF runtime)
-  and \`cefnest-dev\` (headers, \`cefnest.pc\`).
+- **Incognito by default, zero disk**: with no path set the helper runs
+  incognito (HTTP cache in memory) and CEF's install-level files go to a
+  0700 tmpfs directory under \$XDG_RUNTIME_DIR — removed on exit, gone on
+  reboot. The old behaviour, a fresh 3.5-8.7 MB profile per session swept
+  only after two weeks, is gone entirely.
+- **A data-directory API**: set an absolute path before start() with
+  \`chromium_session_set_data_directory()\` and everything the page stores
+  — cookies, localStorage, IndexedDB, the HTTP cache — lives under it and
+  survives restarts; \`chromium_session_clear_data()\` wipes it again and
+  is refused while a session holds it. Exclusivity is a flock on
+  \`<dir>/.cefnest.lock\`, crash-safe, no stale locks.
+- The demo grows a \`--data-dir\` option, \`examples/persistent.c\` shows
+  the lifecycle, and standalone helpers persist the same way through
+  \`CHROMIUM_HELPER_DATA_DIR\`.
+- cefnest-dev now depends on \`libgtksourceview-5-dev\` — the miss that
+  failed the previous pipeline's smoke stage — and the devel rpm on
+  \`gtksourceview5-devel\`.
+- Packaging stays two packages: \`cefnest\` (library + helper + CEF
+  runtime) and \`cefnest-dev\` (headers, \`cefnest.pc\`).
 
 ### Assets
 

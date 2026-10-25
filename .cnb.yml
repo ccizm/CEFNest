@@ -6,7 +6,7 @@
 # cefnest-helper against it, installs and smoke-tests the deb packages, then
 # creates the Release for that tag and uploads the build tarball plus the
 # installable deb/rpm packages (including the helper and its CEF runtime) as
-# Release assets. Push a version tag such as v156.0.14-1 to publish one.
+# Release assets. Push a version tag such as v156.0.14-2 to publish one.
 # Ordinary branch pushes build nothing here — the full gate (test/ci-all.sh)
 # runs locally or on a prepared self-hosted runner — except the site, which
 # deploys to EdgeOne Pages on every push to main (see the main: block at the
@@ -24,11 +24,11 @@ $:
       stages:
         - name: check the release strings
           image: ubuntu:24.04
-          script: CEFNEST_PACKAGE_RELEASE=1 CEFNEST_EXPECTED_TAG=v156.0.14-1 ./scripts/check-release-tag.sh
+          script: CEFNEST_PACKAGE_RELEASE=2 CEFNEST_EXPECTED_TAG=v156.0.14-2 ./scripts/check-release-tag.sh
           timeout: 10m
         - name: build
           image: ubuntu:24.04
-          script: CEFNEST_PACKAGE_RELEASE=1 ./scripts/ci-build.sh
+          script: CEFNEST_PACKAGE_RELEASE=2 ./scripts/ci-build.sh
           timeout: 90m
         - name: install and smoke the packages
           image: ubuntu:24.04
@@ -40,7 +40,7 @@ $:
           # by a postinst renaming over the runner's bind-mounted
           # /etc/localtime — then gcc and binutils
           # for the smoke script's own two checks, then the smoke script.
-          script: CEFNEST_PACKAGE_RELEASE=1 ./scripts/ci-smoke-job.sh
+          script: CEFNEST_PACKAGE_RELEASE=2 ./scripts/ci-smoke-job.sh
           timeout: 30m
         - name: create release
           type: git:release
@@ -53,10 +53,10 @@ $:
           settings:
             attachments:
               - "./dist/cefnest-build.tar.gz"
-              - "./dist/cefnest_156.0.14-1_amd64.deb"
-              - "./dist/cefnest-dev_156.0.14-1_amd64.deb"
-              - "./dist/cefnest-156.0.14-1.x86_64.rpm"
-              - "./dist/cefnest-devel-156.0.14-1.x86_64.rpm"
+              - "./dist/cefnest_156.0.14-2_amd64.deb"
+              - "./dist/cefnest-dev_156.0.14-2_amd64.deb"
+              - "./dist/cefnest-156.0.14-2.x86_64.rpm"
+              - "./dist/cefnest-devel-156.0.14-2.x86_64.rpm"
               - "./dist/SHA256SUMS"
 
 # The documentation site (site/) deploys to Tencent EdgeOne Pages on every
