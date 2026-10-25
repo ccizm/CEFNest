@@ -21,7 +21,7 @@ export const messages = {
       allReleases: '全部发布',
     },
     hero: {
-      eyebrow: 'GTK 4.14+ · 原生 Wayland · CEF 154.0.34',
+      eyebrow: 'GTK 4.14+ · 原生 Wayland · CEF 156.0.14',
       tagline: '在 GTK 4 里嵌入真正的 Chromium',
       lead: '一个 GTK 4 控件：页面由真正的 Chromium 渲染，经同一进程内的 Wayland 合成器直接合成进控件。没有 XWayland，也没有离屏渲染。',
       start: '快速开始',
@@ -66,7 +66,7 @@ export const messages = {
       allReleases: 'All releases',
     },
     hero: {
-      eyebrow: 'GTK 4.14+ · Native Wayland · CEF 154.0.34',
+      eyebrow: 'GTK 4.14+ · Native Wayland · CEF 156.0.14',
       tagline: 'Embed real Chromium in GTK 4',
       lead: 'A GTK 4 widget whose pages are rendered by real Chromium, composited straight into the widget by an in-process Wayland compositor. No XWayland, no offscreen rendering.',
       start: 'Quick start',

@@ -50,7 +50,7 @@ Wayland compositor 直接合成进控件。既不使用 XWayland，也不做离�
 | xkbcommon / json-glib / gbm + libdrm | 任意较新版本 |
 | GtkSourceView | 5.4+（源码窗口） |
 | meson / ninja / cmake | meson 1.3+，cmake 3.16+ |
-| CEF（`cef_binary_*_linux64_minimal`） | 已在 stable 154.0.34 上验证通过 |
+| CEF（`cef_binary_*_linux64_minimal`） | 已在 stable 156.0.14 上验证通过 |
 
 `wayland-scanner` 必须在 `PATH` 上。渲染还需要可用的非特权用户命名空间（Chromium
 的沙箱依赖它）；如果系统限制了这一点，见**常见问题**。

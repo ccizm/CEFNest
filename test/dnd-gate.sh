@@ -183,12 +183,15 @@ EOF
   # data reached it.
   expect 'drop\(dnd-payload\)' "$WORK/loop.log" loop
 
-  expect 'nested: a drag started over surface id [0-9]+ carrying 3 type' "$WORK/loop.log" loop
+  # CEF 156 stopped offering chromium/x-web-custom-data on drags — two
+  # types now, measured 2026-10-25 on 156.0.14 — and the in-page drop
+  # takes text/plain where 154 took the custom-data type.
+  expect 'nested: a drag started over surface id [0-9]+ carrying 2 type' "$WORK/loop.log" loop
   expect 'nested: dragged onto surface id [0-9]+ offering' "$WORK/loop.log" loop
   # What the destination settled on, measured: Chromium offers copy and takes
   # copy, and it accepts its own chromium/x-web-custom-data type.
   expect 'nested: drag settled on action 0x1 of source 0x1 and destination 0x1' "$WORK/loop.log" loop
-  expect 'nested: dropped chromium/x-web-custom-data as action 0x1' "$WORK/loop.log" loop
+  expect 'nested: dropped text/plain as action 0x1' "$WORK/loop.log" loop
   expect 'nested: a drag concluded' "$WORK/loop.log" loop
   no_protocol_error "$WORK/loop.log" loop
 fi
@@ -322,9 +325,9 @@ EOF
 
   # The three lines the handover is made of, in the shape measured off this page:
   # one type picked out of three, the payload the page set, and the host told.
-  expect 'nested: the pointer left the page mid-drag: taking text/plain;charset=utf-8 of 3 types' "$WORK/out.log" out
-  expect 'nested: the drag left the page as text/plain;charset=utf-8 \(11 bytes, 3 types\)' "$WORK/out.log" out
-  expect 'demo: drag out: text/plain;charset=utf-8, 11 bytes, types: text/plain;charset=utf-8\|text/plain\|chromium/x-web-custom-data' "$WORK/out.log" out
+  expect 'nested: the pointer left the page mid-drag: taking text/plain;charset=utf-8 of 2 types' "$WORK/out.log" out
+  expect 'nested: the drag left the page as text/plain;charset=utf-8 \(11 bytes, 2 types\)' "$WORK/out.log" out
+  expect 'demo: drag out: text/plain;charset=utf-8, 11 bytes, types: text/plain;charset=utf-8\|text/plain' "$WORK/out.log" out
   expect 'demo: drag out: taken, not carried' "$WORK/out.log" out
 
   # The page's side, measured: it is told the pointer left and then ends, and the

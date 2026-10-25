@@ -32,20 +32,20 @@ case "${CEF_ARCH:-$(uname -m)}" in
     ;;
 esac
 
-PINNED='154.0.34+g14c5a08+chromium-154.0.8037.98'
+PINNED='156.0.14+g4fa4ab5+chromium-156.0.8078.48'
 
 # What the pinned build's archive has to hash to, per architecture. The .sha256
 # the build service publishes is served from the same host over the same channel
 # as the archive, so it can only ever say "these bytes are what that host is
 # serving today" — a replaced archive and its own digest still agree. Pinning
 # the digest here adds the second question: is it the build this repository
-# approved. The two values were taken from the build service on 2026-10-23 and
-# are checked against the pinned version only; that also means the first
-# collection trusted the same channel (trust-on-first-use), which is the residue
-# this cannot reach.
+# approved. The two values were taken from the build service on 2026-10-25
+# (154's on 2026-10-23) and are checked against the pinned version only; that
+# also means the first collection trusted the same channel (trust-on-first-use),
+# which is the residue this cannot reach.
 case "$ARCH" in
-  linux64)    PINNED_SHA256='e87e2c76304372dd28b899ceb6efa4b353f52700594ddc358a8237ec07ec6492' ;;
-  linuxarm64) PINNED_SHA256='4598b350e5a43519dbb9f1c732e8b184333572da53244ff55cc063003c34c5e4' ;;
+  linux64)    PINNED_SHA256='4191ac920a91a052eba04afb6ed830d47aed46a3e246c434a2f062c23588dc8a' ;;
+  linuxarm64) PINNED_SHA256='cdfcd5cafaa126bb7e103e3b6fbdef94a39bb791395eb21fe665ebecd008d995' ;;
 esac
 
 REQUEST="${CEF_VERSION:-$PINNED}"

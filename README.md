@@ -54,7 +54,7 @@ surface, and the widget paints it like any other content.
 | wayland-protocols | with `cursor-shape`, `fractional-scale`, `text-input` |
 | xkbcommon / json-glib / gbm + libdrm | any recent |
 | meson / ninja / cmake | meson 1.3+, cmake 3.16+ |
-| CEF (`cef_binary_*_linux64_minimal`) | verified with stable 154.0.34 |
+| CEF (`cef_binary_*_linux64_minimal`) | verified with stable 156.0.14 |
 
 `wayland-scanner` must be on `PATH`. Rendering needs working unprivileged user
 namespaces (Chromium's sandbox); see **Troubleshooting** if your host restricts

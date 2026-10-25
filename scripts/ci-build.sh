@@ -108,21 +108,25 @@ CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION)
 
 ## 中文
 
-本版只改发布形态，组件行为与 154.0.34-6 相同：
+本版把 CEF 升到 156 稳定版（Chromium $CHROMIUM_VERSION），并带来 154 系列
+之后落地的组件能力：
 
-- 安装包从四个收敛为两个：\`cefnest\` 是 GTK 4 组件库本身，连同它启动的
-  \`cefnest-helper\`（含完整 CEF 运行时）一起交付；\`cefnest-dev\` 只放头文件、
-  链接用 \`.so\` 与 \`cefnest.pc\`。组件库以系统库 \`libcefnest.so.0\` 安装，
-  原本就精确依赖同版本 helper，拆开只是把 1.5 GB 的下载藏到依赖里；现在它
-  直接成为主包的一部分。
-- \`cefnest-demo\` 与 \`shm-client\` 不再单独发包。它们是开发/测试工具，留在
-  \`cefnest-build.tar.gz\` 的 \`src/\` 与 \`test/\` 里；CI 仍用构建树跑它们。
-- 构建树改为按 \`-Dprefix=/usr\` 编译，解包后的 demo 会直接找到安装包放在
-  \`/usr/libexec/cefnest/<arch>/\` 的 helper，不再需要设置 \`CHROMIUM_HELPER\`。
-- 旧包名可平滑升级：deb 用 \`Replaces\`/\`Breaks\`，rpm 用 \`Obsoletes\`，从 -6
-  升级不需要手工卸载 \`libcefnest0\`、\`cefnest-helper\` 或 \`cefnest-demo\`。
-- 取消 \`cefnest-packages-*.tar.gz\`：两个包已经包含全量，合集只会把同一份
-  deb 与 rpm 再打包一遍。
+- **CEF 154 → 156**：全新里程碑。实测变化：Chromium 拖放不再提供
+  \`chromium/x-web-custom-data\` 类型（跨边界拖放现在携带 2 种类型），
+  dnd 门禁已按新行为校准；其余门禁（协议、会话脚本、焦点链、遮挡节流、
+  打包）全量复跑通过。
+- **查看网页源代码**：右键菜单的“查看网页源代码”不再写临时文件、不再拉起
+  系统编辑器，而是组件自带的只读源码窗口——行号、语法高亮、查找、自动
+  换行、复制全部；源码经控制通道分块流入，仅在内存中流转。
+  新增 \`chromium_session_view_source()\`、\`::view-source\` 信号与
+  \`auto-source-window\` 属性。运行时新增 GtkSourceView 5 依赖。
+- **Tab 焦点链打通**：Tab/Shift+Tab 可以在 GTK 控件与页面元素之间完整穿行
+  （页面边缘出让给 GTK 焦点链，进入页面落在首个可聚焦元素）。
+- **性能与体积**：被完全遮挡的窗口节流到 2 帧/秒（心跳唤醒）；隐藏窗口
+  停止产帧；dmabuf 缓冲推迟到被顶替时释放（消除撕裂风险）；CEF 运行时
+  打包时 strip——安装体积从约 1.5 GB 降到约 350 MB。
+- 安装包形态沿用两包制：\`cefnest\`（库 + helper + CEF 运行时）、
+  \`cefnest-dev\`（头文件与 \`cefnest.pc\`）。
 
 ### 附件说明
 
@@ -139,27 +143,31 @@ CEF $CEF_VERSION (Chromium $CHROMIUM_VERSION)
 
 ## English
 
-This release changes the packaging only; the component's behaviour is unchanged
-from 154.0.34-6.
+This release moves CEF to the 156 stable channel (Chromium $CHROMIUM_VERSION)
+and ships the component work that landed after the 154 series:
 
-- The release now has two packages instead of four: \`cefnest\` is the GTK 4
-  component library itself, shipped with the \`cefnest-helper\` it starts and
-  the complete CEF runtime; \`cefnest-dev\` carries the headers, the unversioned
-  \`.so\` and \`cefnest.pc\`. The library installs system-wide as
-  \`libcefnest.so.0\` and already hard-depended on the exact helper version, so
-  the split only hid a 1.5 GB download behind a dependency; it is now part of
-  the main package.
-- \`cefnest-demo\` and \`shm-client\` are no longer packaged. They are
-  development/test tools and travel in \`cefnest-build.tar.gz\` under \`src/\`
-  and \`test/\`; CI still runs them from there.
-- The build tree is configured with \`-Dprefix=/usr\`, so the unpacked demo
-  finds the installed helper at \`/usr/libexec/cefnest/<arch>/\` without
-  \`CHROMIUM_HELPER\`.
-- Old package names upgrade cleanly: deb uses \`Replaces\`/\`Breaks\`, rpm uses
-  \`Obsoletes\`; upgrading from -6 does not require removing \`libcefnest0\`,
-  \`cefnest-helper\` or \`cefnest-demo\` by hand.
-- \`cefnest-packages-*.tar.gz\` is gone: the two packages already carry
-  everything, and the bundle would only repack the same deb and rpm.
+- **CEF 154 -> 156**, a new milestone. Measured change: Chromium drag-and-drop
+  no longer offers the \`chromium/x-web-custom-data\` type (a cross-boundary
+  drag now carries two types); the dnd gate is calibrated to the new
+  behaviour, and the full gate battery (protocol, session scripts, focus
+  chain, occlusion throttling, packaging) was re-run green.
+- **View Source**: the context menu's View Source no longer writes a temp
+  file and opens the desktop's editor — it is the component's own read-only
+  window now, with line numbers, syntax highlighting, find, wrap and
+  copy-all; the source streams over the control channel and stays in
+  memory. New \`chromium_session_view_source()\`, \`::view-source\` and the
+  \`auto-source-window\` property. GtkSourceView 5 is a new runtime
+  dependency.
+- **One focus chain**: Tab and Shift+Tab now cross between GTK widgets and
+  page elements in a single chain (the page's edge hands the walk back to
+  GTK; entering the page lands on its first focusable element).
+- **Performance and size**: fully covered windows throttle to ~2 frames per
+  second with a heartbeat to wake them; hidden windows stop producing
+  frames; dmabuf buffers are held until replaced (no more tearing risk);
+  and the CEF runtime ships stripped — installed size drops from ~1.5 GB to
+  ~350 MB.
+- Packaging stays two packages: \`cefnest\` (library + helper + CEF runtime)
+  and \`cefnest-dev\` (headers, \`cefnest.pc\`).
 
 ### Assets
 

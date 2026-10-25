@@ -2791,7 +2791,7 @@ chromium_session_stop_finding (ChromiumSession *self, gboolean clear_selection)
  * command itself. What Chromium hands back is the serialized DOM, script
  * changes included, not the network's original bytes.
  *
- * Since: 154.0.34
+ * Since: 156.0.14
  */
 void
 chromium_session_view_source (ChromiumSession *self)
@@ -2875,7 +2875,7 @@ chromium_session_class_init (ChromiumSessionClass *klass)
    * window to the host — which is what a host with windows of its own
    * wants, since the session can only guess the parent from its one view.
    *
-   * Since: 154.0.34
+   * Since: 156.0.14
    */
   g_object_class_install_property
     (object_class, PROP_AUTO_SOURCE_WINDOW,
@@ -2971,7 +2971,7 @@ chromium_session_class_init (ChromiumSessionClass *klass)
    * A View Source request completed. Emitted whether or not the session
    * opens its own window (see #ChromiumSession:auto-source-window).
    *
-   * Since: 154.0.34
+   * Since: 156.0.14
    */
   signals[SIG_VIEW_SOURCE] =
     g_signal_new ("view-source", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
@@ -2984,7 +2984,7 @@ chromium_session_class_init (ChromiumSessionClass *klass)
    * @browser: the browser the request was for
    * @message: why the source never arrived
    *
-   * Since: 154.0.34
+   * Since: 156.0.14
    */
   signals[SIG_VIEW_SOURCE_ERROR] =
     g_signal_new ("view-source-error", G_TYPE_FROM_CLASS (klass),
