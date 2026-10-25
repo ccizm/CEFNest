@@ -30,7 +30,7 @@ export const messages = {
     },
     start: {
       title: '快速开始',
-      note: '第一次会下载约 330 MB，解包后约 1.5 GB。',
+      note: '第一次会下载约 316 MB，解包后约 1.5 GB。',
       runLabel: '构建并运行',
       embedTitle: '嵌入自己的应用',
       embedLabel: 'embed',
@@ -77,7 +77,7 @@ export const messages = {
     },
     start: {
       title: 'Quick start',
-      note: 'The first run downloads ~330 MB, about 1.5 GB unpacked.',
+      note: 'The first run downloads ~316 MB, about 1.5 GB unpacked.',
       runLabel: 'build & run',
       embedTitle: 'Embed it in your app',
       embedLabel: 'embed',

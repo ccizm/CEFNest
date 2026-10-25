@@ -65,7 +65,7 @@ cmake --build helper/build -j
 meson setup builddir && ninja -C builddir                    # 3. 控件、demo、测试
 ```
 
-第 1 步会下载约 330 MB（解包后约 1.5 GB）。跳过它，其余部分照样能构建——此时
+第 1 步会下载约 316 MB（解包后约 1.5 GB）。跳过它，其余部分照样能构建——此时
 demo 会改为驱动一个协议级测试客户端，而不是 Chromium。
 
 ## 安装
@@ -83,7 +83,9 @@ ninja -C builddir install
 发版流水线（`.cnb.yml`，只在版本 tag 上触发）打两个包，每个都有 deb 和 rpm 两种
 格式：`cefnest` 包含库、helper 和 CEF 运行时；`cefnest-dev`（deb）/`cefnest-devel`
 （rpm）额外提供头文件和 `cefnest.pc`。宿主程序用
-`pkg-config --cflags --libs cefnest` 构建。
+`pkg-config --cflags --libs cefnest` 构建。打包出的 CEF 运行时经过
+strip——安装约 356 MB、压缩包约 126 MB；上面那条裸 `meson install`
+复制的是未 strip 的运行时，约 1.5 GB。
 
 库不依赖环境变量也能找到 helper：先看 `CEFNEST_HELPER` 或 `CHROMIUM_HELPER`
 （必须包含 `/`），再看编译时写入的 `prefix + libexecdir + <架构>` 路径，最后

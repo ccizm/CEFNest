@@ -10,7 +10,7 @@
 # The tag pipeline used to build the packages and stop there: nothing proved the
 # Depends strings (hand-written, in scripts/build-packages.sh) name libraries
 # that exist, that the CEF runtime really travels next to the helper, or that
-# the 1.5 GB of files satisfy each other's loader. All three are the kind of
+# the ~350 MB of files satisfy each other's loader. All three are the kind of
 # thing a user finds out by having nothing on screen.
 #
 # The sandbox question this also answers: chrome-sandbox ships 0755 and the
@@ -169,7 +169,7 @@ fi
 
 # Policy §12.5: a binary package's copyright file lives in the data tree, at
 # /usr/share/doc/<package>/copyright. This is checked where it is read from —
-# reading the member out of the archive costs one pass over the 1.5 GB and runs
+# reading the member out of the archive costs one pass over the ~126 MB file and runs
 # without root, so the reduced CI_SMOKE_SKIP_INSTALL=1 pass still checks it.
 MAIN_DEP5=$(dpkg-deb --fsys-tarfile "$MAIN_DEB" 2>/dev/null |
   tar -xO ./usr/share/doc/cefnest/copyright 2>/dev/null || true)

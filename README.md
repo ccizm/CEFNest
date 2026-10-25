@@ -67,7 +67,7 @@ cmake --build helper/build -j
 meson setup builddir && ninja -C builddir                    # 3. widget, demo, tests
 ```
 
-Stage 1 downloads ~330 MB (about 1.5 GB unpacked). Skip it and everything
+Stage 1 downloads ~316 MB (about 1.5 GB unpacked). Skip it and everything
 still builds — the demo then drives a protocol-level test client instead of
 Chromium.
 
@@ -86,7 +86,9 @@ ninja -C builddir install
 The release pipeline (`.cnb.yml`, version tags only) packs two packages, each
 as a deb and an rpm: `cefnest` is the library + helper + CEF runtime,
 `cefnest-dev` (deb) / `cefnest-devel` (rpm) adds headers and `cefnest.pc`. A
-host builds with `pkg-config --cflags --libs cefnest`.
+host builds with `pkg-config --cflags --libs cefnest`. The packaged CEF
+runtime ships stripped — ~356 MB installed, ~126 MB packed; the plain
+`meson install` above copies it unstripped, at ~1.5 GB.
 
 The library finds its helper without requiring any environment variables:
 `CEFNEST_HELPER` or `CHROMIUM_HELPER` (must contain `/`), else the path

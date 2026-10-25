@@ -3,9 +3,10 @@
 #
 # Since 154.0.34-7 the release has two packages, not four: the GTK 4 component
 # library and the helper it starts are one deployment unit, so they travel
-# together in `cefnest`. The helper's CEF runtime is about 1.5 GB, and a
-# library package that hard-depends on it would make every library install
-# download that anyway; splitting the two only hid the cost.
+# together in `cefnest`. The helper's CEF runtime ships stripped — about
+# 350 MB installed, 126 MB packed; the unpacked distribution is ~1.5 GB —
+# and a library package that hard-depends on it would make every library
+# install download it anyway; splitting the two only hid the cost.
 #
 # `cefnest-dev` carries the headers, the unversioned .so link and cefnest.pc.
 # The demo and shm-client are development/test tools, not part of the package:
