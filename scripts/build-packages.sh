@@ -191,8 +191,9 @@ if [ -z "$HELPER_DEPS" ]; then
 fi
 # dpkg-shlibdeps above reads libcef and the helper, not libcefnest. What the
 # library itself adds on top of those is GTK (pinned to the version the tree
-# needs), graphene, the Wayland server library and json-glib; without graphene
-# the package still installs by accident, because GTK happens to pull it in.
+# needs), GtkSourceView, graphene, the Wayland server library and json-glib;
+# without graphene the package still installs by accident, because GTK happens
+# to pull it in.
 LIB_ONLY_DEPS="libgtk-4-1 (>= 4.14), libgtksourceview-5-0, libgraphene-1.0-0, libwayland-server0, libjson-glib-1.0-0 | libjson-glib-1.0-0t64"
 MAIN_DEPS="$HELPER_DEPS, $LIB_ONLY_DEPS"
 
@@ -303,7 +304,7 @@ cp -p "$CEF_LICENSE" "$DEB_MAIN_DIR/usr/share/doc/cefnest/LICENSE.cef.txt"
 } >> "$DEB_MAIN_DIR/usr/share/doc/cefnest/copyright"
 
 deb_control "$DEB_DEV_DIR" cefnest-dev libdevel \
-  "cefnest (= $VERSION-$RELEASE), libgtk-4-dev (>= 4.14), libwayland-dev, libxkbcommon-dev, libjson-glib-dev, libgbm-dev, libdrm-dev" \
+  "cefnest (= $VERSION-$RELEASE), libgtk-4-dev (>= 4.14), libgtksourceview-5-dev, libwayland-dev, libxkbcommon-dev, libjson-glib-dev, libgbm-dev, libdrm-dev" \
   "CEFNest development files" \
   "Headers, the unversioned library link and the pkg-config file needed to
 build a host application against CEFNest." \
@@ -406,6 +407,7 @@ Summary: Development files for CEFNest
 License: LGPL-2.1-only
 Requires: cefnest = %{version}-%{release}
 Requires: gtk4-devel >= 4.14
+Requires: gtksourceview5-devel
 Requires: wayland-devel
 Requires: libxkbcommon-devel
 Requires: json-glib-devel
