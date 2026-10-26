@@ -93,7 +93,7 @@ chmod +x "$WORK/no-fields-helper.py"
 printf 'load http://gate.test/page\nwait 2500\nclose\n' > "$WORK/no-fields.session"
 
 printf '== no-fields\n'
-timeout 90 env G_MESSAGES_DEBUG=all GDK_BACKEND=wayland \
+timeout --kill-after=10s 90 env G_MESSAGES_DEBUG=all GDK_BACKEND=wayland \
   CHROMIUM_HELPER="$WORK/no-fields-helper.py" \
   CHROMIUM_SESSION_SCRIPT="$WORK/no-fields.session" \
   "$DEMO" >"$WORK/no-fields.out" 2>"$WORK/no-fields.log"

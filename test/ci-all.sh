@@ -64,12 +64,21 @@ fi
 # is relative to the repo root, which ci-session.sh inherits as its cwd.
 ALL_RUNS=(
   # Each timeout is the gate's own per-run budget times its number of runs,
-  # plus a margin: menu 8x90, permission 10x90, download 11x90, find/dnd 6x90.
-  # A budget smaller than that loses both the verdict and the transcript of
-  # whichever run hung.
+  # plus a margin: menu 8x90, permission 10x90, download 11x90, find/dnd 6x90,
+  # js-dialog 4x90, file-dialog 3x90. A budget smaller than that loses both the
+  # verdict and the transcript of whichever run hung.
   "proof||240"
   "unit|meson test -C builddir|240"
   "framing|./test/framing-gate.sh|420"
+  "proxy|./test/proxy-gate.sh|240"
+  "accept-language|./test/accept-language-gate.sh|180"
+  "zoom|./test/zoom-gate.sh|180"
+  "auto-resize|./test/auto-resize-gate.sh|180"
+  "cookies|./test/cookies-gate.sh|240"
+  "page-text|./test/page-text-gate.sh|180"
+  "history|./test/history-gate.sh|180"
+  "pdf|./test/pdf-gate.sh|300"
+  "favicon|./test/favicon-gate.sh|180"
   "source|./test/source-gate.sh|240"
   "pixel|./test/pixel-gate.sh|240"
   "find|./test/find-gate.sh|600"
@@ -78,6 +87,14 @@ ALL_RUNS=(
   "dnd|./test/dnd-gate.sh|600"
   "menu|./test/menu-gate.sh|780"
   "devtools|./test/devtools-gate.sh|600"
+  "certificate|./test/certificate-gate.sh|300"
+  "intercept|./test/intercept-gate.sh|300"
+  "cdp|./test/cdp-gate.sh|300"
+  "js-dialog|./test/js-dialog-gate.sh|600"
+  "file-dialog|./test/file-dialog-gate.sh|480"
+  "page-events|./test/page-events-gate.sh|300"
+  "plugin|./test/plugin-gate.sh|600"
+  "surface-pair|./test/surface-pair-gate.sh|600"
   "primary|./test/primary-gate.sh|240"
   "multi|./test/multi-browser-gate.sh|240"
   "datadir|./test/data-dir-gate.sh|420"
@@ -123,7 +140,7 @@ for spec in "${ALL_RUNS[@]}"; do
   log=$LOGS/$label.log
   t0=$(date +%s)
   if [ "$label" = real ]; then
-    timeout "$tmo" "$payload" >"$log" 2>&1
+    timeout --kill-after=10s "$tmo" "$payload" >"$log" 2>&1
   elif [ -z "$payload" ]; then
     PAYLOAD_TIMEOUT=$tmo ./test/ci-session.sh >"$log" 2>&1
   else
@@ -174,6 +191,16 @@ done
 
 if [ "$KEEP_LOGS" != 1 ]; then
   rmdir "$LOGS" 2>/dev/null || echo "  note: a failed run left its transcript in $LOGS"
+fi
+
+# A demo the harness lost (a gate's timeout firing without its kill-after, an
+# orphaned nested session) does not just waste CPU: it keeps answering the
+# very surface-commit paths the pixel gates read, and the next run inherits
+# its numbers as its own. Name it so nobody has to find it in htop.
+leftovers=$(pgrep -f cefnest-demo 2>/dev/null || true)
+if [ -n "$leftovers" ]; then
+  echo "ci all: WARNING: cefnest-demo still running after the battery — this run's pixel/soak numbers are not trustworthy:"
+  echo "$leftovers" | sed 's/^/  pid /'
 fi
 
 echo

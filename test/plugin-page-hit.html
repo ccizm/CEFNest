@@ -1,0 +1,16 @@
+<!doctype html>
+<!-- The content-script hit page. The plugin's document_start script marks
+     window.__pluginDemoCs, and this page's own inline script records whether
+     the mark was already there — script first, page second, the
+     document_start order the P0 run measured. The content script's storage
+     round trip then composes the final title from it. -->
+<html>
+<head><meta charset="utf-8"><title>PLUGIN-PAGE</title></head>
+<body>
+<h1>content script hit page</h1>
+<script>
+window.__csOrdering = window.__pluginDemoCs === 1 ? "ran-first" : "missed";
+document.title = window.__csOrdering + "|page-script";
+</script>
+</body>
+</html>

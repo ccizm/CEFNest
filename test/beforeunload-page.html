@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>BEFOREUNLOAD-PAGE</title>
+<style>
+  html, body { margin: 0; }
+  #out { font: 16px sans-serif; padding: 8px; white-space: pre-wrap; }
+  /* Chromium only shows a beforeunload dialog for a page that has had user
+   * activation, so the arm button is clicked through the nested compositor. */
+  button { position: absolute; left: 40px; top: 120px; width: 240px;
+           height: 80px; font: 20px sans-serif; }
+</style>
+<div id="out">BEFOREUNLOAD-PAGE-START</div>
+<button id="arm" onclick="arm()">arm</button>
+<script>
+function note(text) {
+  document.getElementById('out').textContent += '|' + text;
+}
+
+function arm() {
+  window.arm = true;
+  note('armed');
+}
+
+window.addEventListener('beforeunload', function (event) {
+  if (!window.arm)
+    return;
+  event.preventDefault();
+  event.returnValue = 'unsaved changes';
+});
+</script>

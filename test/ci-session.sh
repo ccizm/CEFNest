@@ -152,7 +152,7 @@ cl_env=(
 if [ "$#" -gt 0 ]; then
   echo "== payload: $*"
   env "${cl_env[@]}" CHROMIUM_HELPER="$HELPER" \
-    timeout "$PAYLOAD_TIMEOUT" "$@" >"$RUN/payload.out" 2>"$RUN/payload.log"
+    timeout --kill-after=10s "$PAYLOAD_TIMEOUT" "$@" >"$RUN/payload.out" 2>"$RUN/payload.log"
   rc=$?
   cat "$RUN/payload.out"
   cat "$RUN/payload.log" >&2
@@ -173,7 +173,7 @@ else
   echo "== proof: a real window and a real page with nobody watching"
   env "${cl_env[@]}" CHROMIUM_HELPER="$HELPER" \
       CHROMIUM_SESSION_SCRIPT="$RUN/session" \
-    timeout 180 "$DEMO" >"$RUN/demo.out" 2>"$RUN/demo.log"
+    timeout --kill-after=10s 180 "$DEMO" >"$RUN/demo.out" 2>"$RUN/demo.log"
   rc=$?
   [ $rc = 0 ] && ok "demo exited 0 against the nested compositor" \
               || bad "demo exited $rc — see the transcript below"
@@ -207,7 +207,7 @@ else
     printf '%b\n' "$script" > "$RUN/$tag"
     env "${cl_env[@]}" CHROMIUM_HELPER="$ROOT/test/fake-helper.py" \
         CHROMIUM_SESSION_SCRIPT="$RUN/$tag" "$@" \
-      timeout 60 "$DEMO" >"$RUN/$tag.out" 2>"$RUN/$tag.log"
+      timeout --kill-after=10s 60 "$DEMO" >"$RUN/$tag.out" 2>"$RUN/$tag.log"
     local rc=$?
     if [ $rc = 1 ] && grep -qE "$want" "$RUN/$tag.out" "$RUN/$tag.log";
     then ok "$tag: exited 1 and the transcript names the cause"

@@ -66,7 +66,7 @@ SESSION
 
 echo "== real site $name $url"
 echo "== session $session"
-timeout 180 env CHROMIUM_SESSION_SCRIPT="$session" "$DEMO" \
+timeout --kill-after=10s 180 env CHROMIUM_SESSION_SCRIPT="$session" "$DEMO" \
   >"$out/$name.out" 2>"$out/$name.err"
 status=$?
 cat "$out/$name.err" >>"$out/$name.out"

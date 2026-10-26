@@ -48,6 +48,19 @@ Rules:
 - Setting the property while a session runs affects the next `start()`, not
   the running helper.
 
+**Plugins live under this tree too.** The data directory holds
+`<data-dir>/cefnest-plugins/` — the plugin **install root**: one subdirectory
+per plugin package (the directory name is the plugin id), and a plugin's
+`chrome.storage` data lands in `<data-dir>/cefnest-plugins/<id>/storage.json`.
+The manager scans it before every `add_search_path()` directory, so the
+user's own install wins a duplicate id over a path the host pointed at; a
+directory that does not exist yet (a fresh profile has installed nothing) is
+not an error — the scan is simply empty. With no data directory there is no
+default plugin location at all: the "no directory means nothing on disk"
+contract holds for plugins too, and plugin directories then come only from
+explicit `add_search_path()` calls. Moving the property moves the root; the
+model refreshes on the next `scan()`.
+
 **Where to put it.** Use `g_get_user_data_dir()` — normally
 `~/.local/share/<app>/…`. Do **not** use `~/.cache`: XDG defines it as
 disposable, so a cleaner such as BleachBit can silently erase logins, and the

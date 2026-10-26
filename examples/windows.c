@@ -313,7 +313,8 @@ open_browser_window (int id)
 
 static void
 session_browser_created (ChromiumSession *session, int id, const char *url,
-                         gboolean windowed, gboolean devtools, gpointer data)
+                         gboolean windowed, gboolean devtools,
+                         gboolean background, gpointer data)
 {
   if (windowed)
     open_browser_window (id);

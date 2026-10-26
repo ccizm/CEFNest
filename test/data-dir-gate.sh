@@ -229,7 +229,7 @@ fi
 # ---------------------------------------------------------------------------
 if want relative; then
   echo "== relative: an absolute path is required"
-  env "${demo_env[@]}" timeout 30 "$DEMO" --data-dir=relative/profile \
+  env "${demo_env[@]}" timeout --kill-after=10s 30 "$DEMO" --data-dir=relative/profile \
     >"$WORK/relative.log" 2>&1
   status=$?
   if [ "$status" = 1 ]; then ok "relative: the demo exited 1"
@@ -253,7 +253,7 @@ if want in-use; then
     bad "in-use: the first helper never created $P/browser"
   fi
 
-  env "${demo_env[@]}" timeout 30 "$DEMO" --data-dir="$P" \
+  env "${demo_env[@]}" timeout --kill-after=10s 30 "$DEMO" --data-dir="$P" \
     >"$WORK/in-use2.log" 2>&1
   status=$?
   if [ "$status" = 1 ]; then ok "in-use: the second host exited 1"
@@ -264,7 +264,7 @@ if want in-use; then
   # The helper is the authority: run it directly, with no host precheck in the
   # way, and it has to refuse on its own flock.
   env "${demo_env[@]}" CHROMIUM_HELPER_DATA_DIR="$P" \
-    timeout 20 "$HELPER" >"$WORK/in-use3.log" 2>&1
+    timeout --kill-after=10s 20 "$HELPER" >"$WORK/in-use3.log" 2>&1
   status=$?
   if [ "$status" = 1 ]; then ok "in-use: the helper exited 1"
   else bad "in-use: the helper exited $status, wanted 1"; fi

@@ -2018,9 +2018,7 @@ fire_pending_frame_callbacks (NestedCompositor *self)
 
   wl_list_for_each (surface, &self->surfaces, nested_link)
     if (!surface_frames_suspended (surface))
-      {
-        surface_fire_frame_callbacks (surface, msec);
-      }
+      surface_fire_frame_callbacks (surface, msec);
 
   nested_flush (self);
 
@@ -2132,6 +2130,7 @@ frame_clock_watchdog (gpointer data)
 
   self->frame_watchdog_id = 0;
   self->clock_alive = FALSE;
+  g_debug ("nested: clock watchdog fired");
 
   nested_start_frame_clock (self);
 
@@ -2191,7 +2190,7 @@ nested_start_frame_clock (NestedCompositor *self)
     }
 
   if (!pending)
-
+    return;
 
   if (self->frame_clock && self->clock_alive)
     {

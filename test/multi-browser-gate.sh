@@ -41,7 +41,7 @@ quit
 SESSION
 
 echo "== one helper: tab + standalone window"
-timeout 90 env GDK_BACKEND=wayland CHROMIUM_HELPER="$HELPER" \
+timeout --kill-after=10s 90 env GDK_BACKEND=wayland CHROMIUM_HELPER="$HELPER" \
   CHROMIUM_SESSION_SCRIPT="$WORK/multi.session" "$DEMO" \
   >"$WORK/out" 2>"$WORK/err"
 rc=$?

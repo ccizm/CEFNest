@@ -30,5 +30,28 @@ helper 的查找方式见仓库根目录 `README.zh-CN.md` 的**安装**一节�
 | `devtools.c` | 开发者工具开关：F12 / 「检查」行，以及为每个开发者工具实例打开的 GTK 窗口 |
 | `useragent.c` | 在运行时切换 User-Agent：重启 session，新的 `CHROMIUM_USER_AGENT` 会随 helper 一起生效 |
 | `persistent.c` | 数据目录：localStorage 跨重启读回，以及用户要求遗忘时的 `clear_data()` |
+| `plugin-adblock/` | Web 前端的插件（不是宿主）：EasyList 形状的外观过滤、按站点开关、Alt+Shift+单击拾取元素、`chrome.storage`、会查 `chrome.tabs` 的弹窗——以及它跨不过去的那条线（没有 `webRequest`） |
 
 每个文件的头注释就是它的完整说明；先读 `minimal.c`，再按需取用。
+
+这个插件不需要单独的构建步骤。把它装进插件的安装根目录
+`<data-dir>/cefnest-plugins/`，再打开演示页；同一个数据目录也是规则和计数
+跨次运行保留的原因：
+
+```bash
+DATA=$(mktemp -d)
+mkdir -p "$DATA/cefnest-plugins"
+cp -r examples/plugin-adblock "$DATA/cefnest-plugins/"
+CHROMIUM_HELPER=$PWD/helper/build/Release/cefnest-helper \
+  ./builddir/src/cefnest-demo --data-dir="$DATA" \
+  file://$PWD/examples/plugin-adblock/demo.html
+```
+
+不带 `--data-dir` 也能运行，但规则只活到进程退出。（`--plugin-dir=$PWD/examples`
+也可以，不过它会把原生示例包一起扫进来——那些包的 `.so` 在 `builddir` 里，
+日志里会出现 `library-open-failed`。）
+
+演示页把内容脚本藏掉了多少写在标题里——`AD-SIFT:<hidden>/<total>:style:custom`，
+后两段表示插件的两个 style 元素是否在页面上——底部状态条也会显示。内置列表在
+`document_start` 生效，早于页面自己的内联脚本；手工拾取的规则要从
+`chrome.storage` 读回，会晚几毫秒才落地。

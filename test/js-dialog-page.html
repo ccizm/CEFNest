@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>JS-DIALOG-PAGE</title>
+<style>
+  body { font: 16px sans-serif; margin: 8px; }
+  #out { white-space: pre-wrap; margin-bottom: 8px; }
+  button { font: 16px sans-serif; margin: 4px 8px 4px 0; }
+</style>
+<div id="out">DIALOG-PAGE-START</div>
+<button id="confirm" onclick="askConfirm()">confirm</button>
+<button id="prompt" onclick="askPrompt()">prompt</button>
+<button id="fullscreen" onclick="askFullscreen()">fullscreen</button>
+<script>
+/* The load-time alert is the measurement this gate was built on: before the
+ * handler existed the page parked here forever and nothing on the host ever
+ * saw the question. Everything else is answered from the script through
+ * window.ask* so no pointer has to land on a button. */
+function note(text) {
+  document.getElementById('out').textContent += '|' + text;
+}
+
+window.addEventListener('load', function () {
+  note('alert=' + alert('page alert'));
+  note('ready');
+});
+
+function askConfirm() {
+  note('confirm=' + confirm('page confirm'));
+}
+
+function askPrompt() {
+  note('prompt=' + prompt('page prompt', 'seed'));
+}
+
+function askFullscreen() {
+  document.documentElement.requestFullscreen().then(
+    function () { note('fullscreen=on'); },
+    function (error) { note('fullscreen=error:' + error.name); });
+}
+</script>

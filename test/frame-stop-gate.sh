@@ -66,7 +66,7 @@ quit
 SESSION
 
 echo "== hidden window stops committing"
-timeout 120 env GDK_BACKEND=wayland \
+timeout --kill-after=10s 120 env GDK_BACKEND=wayland \
   CHROMIUM_HELPER="$HELPER" CHROMIUM_SESSION_SCRIPT="$WORK/frame-stop.session" \
   "$DEMO" >"$WORK/out" 2>"$WORK/err"
 rc=$?

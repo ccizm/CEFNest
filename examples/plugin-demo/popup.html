@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>PLUGIN-POPUP</title>
+<style>body{font:14px sans-serif;background:#101828;color:#e8eef8;margin:24px}</style>
+</head>
+<body>
+<h3>Plugin Demo</h3>
+<p id="out">reading storage…</p>
+<script>
+chrome.storage.local.get("cs").then(function (v) {
+  document.getElementById("out").textContent = "cs = " + JSON.stringify(v.cs === undefined ? null : v.cs);
+}, function (e) {
+  document.getElementById("out").textContent = "storage denied: " + (e && e.message);
+});
+</script>
+</body>
+</html>

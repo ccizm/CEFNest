@@ -12,8 +12,10 @@ surface, and the widget paints it like any other content.
 - Native Wayland only — Chromium's own `ozone/wayland` backend, GPU or shm
 - One helper process serves many tabs and standalone windows
 - Host-answerable APIs: downloads, find, context menu, permission prompts,
-  page ↔ host messages, clipboard and drag & drop across the window edge
-- Zoom, mute, accessibility (ORCA-ready AT-SPI), frame count
+  JavaScript dialogs and file pickers, page ↔ host messages, clipboard and
+  drag & drop across the window edge
+- Zoom, mute, loading progress, page fullscreen, accessibility (ORCA-ready
+  AT-SPI), frame count
 - The context menu's View Source is the component's own read-only window:
   line numbers, syntax highlighting, find, wrap, copy — the source stays in
   memory, no temp file, no external editor
@@ -171,6 +173,19 @@ starts the helper and tracks the page. Full per-call contracts are documented
 inline in `src/chromium-session.h`; the method and signal digest — every call
 group and what each signal carries — is in [docs/api.md](docs/api.md).
 
+Plugins: a directory with a `cefnest-plugin.json` manifest becomes a row in a
+`GListModel` (via `chromium_session_get_plugin_manager()`), and enabling one
+reaches the running helper — its resources are served on `cefnest-extension://`,
+content scripts run at `document_start` on top of a `chrome.*` subset, and a
+native `.so` plugin registers context-menu rows and signal handlers through a
+five-verb registry, with everything it registered undone on disable. The
+manifest is shape-compatible with `manifest_version: 3`; MV3 service workers
+are not. The install root is the data directory's own `cefnest-plugins/` — no
+data directory, no default plugin location (explicit `add_search_path()` still
+works). Content scripts share the page's JS global, so they hold no
+privileges. See [docs/plugins.md](docs/plugins.md) and
+[Plugins in docs/api.md](docs/api.md#plugins).
+
 ## Demo environment variables
 
 | Variable | What it does |
@@ -206,13 +221,19 @@ area, log domains that print nothing, teardown order — is in
 - Only the renderer's death is reported, and only how it died.
 - `complete` on a download is not the moment the file appears.
 - Find walks matches one at a time.
-- The helper extends the context menu; the host cannot add its own rows.
+- Plugin context-menu rows come in one shape: a whole row added and removed,
+  not Chrome's per-page graying; a native `.so` plugin runs in the host
+  process with everything the host can do (see "Plugins" below).
 - A permission can be granted or denied, not narrowed; an unanswered one also
   costs the page its next ask.
 - Page audio bypasses the widget; `set_muted()` is the only switch.
 - The renderer is sandboxed; the helper itself is not, and cannot be.
 - View Source shows the **serialized DOM** — script changes included — not
   the network's original bytes.
+- Content scripts share the page's one JS global (CEF has no isolated
+  world): the page can read and overwrite the bridge a plugin hangs off the
+  global, so content scripts hold no privileges — privileged calls go back to
+  the host, which rules them against the permission table.
 - The API is not stable — link against a build you built yourself.
 
 ## Documentation
@@ -224,6 +245,9 @@ area, log domains that print nothing, teardown order — is in
   `src/chromium-session.h`.
 - `docs/troubleshooting.md` — symptom → fix, from `No usable sandbox!` to log
   domains.
+- `docs/plugins.md` — the plugin contract: the manifest, where plugins live,
+  what each frontend can do, the `chrome.*` subset and its seams, and the
+  isolation facts.
 - `docs/control-channel.md` — the NDJSON protocol between session and helper
   (commands, events, the four interaction shapes). Only needed for custom
   helpers or direct channel work.

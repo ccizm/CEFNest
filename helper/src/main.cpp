@@ -26,12 +26,16 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <map>
+#include <set>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -52,18 +56,24 @@
 #include "include/cef_client.h"
 #include "include/cef_command_line.h"
 #include "include/cef_context_menu_handler.h"
+#include "include/cef_dialog_handler.h"
 #include "include/cef_display_handler.h"
 #include "include/cef_download_handler.h"
+#include "include/cef_jsdialog_handler.h"
 #include "include/cef_download_item.h"
+#include "include/cef_cookie.h"
 #include "include/cef_find_handler.h"
 #include "include/cef_keyboard_handler.h"
 #include "include/cef_life_span_handler.h"
 #include "include/cef_load_handler.h"
 #include "include/cef_parser.h"
 #include "include/cef_permission_handler.h"
+#include "include/cef_print_handler.h"
 #include "include/cef_process_message.h"
 #include "include/cef_render_process_handler.h"
 #include "include/cef_request_handler.h"
+#include "include/cef_scheme.h"
+#include "include/cef_stream.h"
 #include "include/cef_task.h"
 #include "include/cef_v8.h"
 #include "include/cef_values.h"
@@ -73,6 +83,7 @@
 #include "include/views/cef_window.h"
 #include "include/views/cef_window_delegate.h"
 #include "include/wrapper/cef_helpers.h"
+#include "include/wrapper/cef_stream_resource_handler.h"
 
 namespace {
 
@@ -88,6 +99,46 @@ constexpr char kPostMessageFunction[] = "cefnestPostMessage";
 constexpr char kPrimarySelectionFunction[] = "cefnestPrimarySelection";
 constexpr char kPrimarySelectionProcess[] = "cefnest-primary-selection";
 constexpr char kPrimarySelectionEvent[] = "primary-selection";
+
+/* The origin every plugin's resources live on. The option set is fixed here
+ * and in OnRegisterCustomSchemes — two halves of one rule CEF enforces across
+ * every process. */
+constexpr char kExtensionScheme[] = "cefnest-extension";
+constexpr char kExtensionSchemePrefix[] = "cefnest-extension://";
+/* A plugin menu slot maps to one command id, inside CEF's user range and
+ * clear of the rows this helper already uses (26501–26508). */
+constexpr int kPluginMenuBase = 26600;
+constexpr int kPluginMenuMaxSlot = 199;
+constexpr char kPluginMenuCommandEvent[] = "plugin-menu-command";
+
+/* The Web frontend's process messages. The table goes browser → renderer
+ * (pushed on every change and on browser creation, requested again by the
+ * renderer's first context as a safety net for a push that raced a renderer
+ * still connecting); a content script's API call goes renderer → browser and
+ * the host's answer comes back the other way. */
+constexpr char kPluginBridgeFunction[] = "__cefnestPlugin";
+constexpr char kPluginsTableProcess[] = "cefnest-plugins-table";
+constexpr char kPluginsRequestProcess[] = "cefnest-plugins-request";
+constexpr char kPluginMessageProcess[] = "cefnest-plugin-message";
+constexpr char kPluginResponseProcess[] = "cefnest-plugin-response";
+/* The ceiling §六.5 of the plugin plan fixes for the Web frontend: one
+ * payload, either direction. The shim refuses to send past it, and both the
+ * browser process (on receipt) and the respond path (on send) re-check — a
+ * plugin's oversized message must never take the control channel down. */
+constexpr size_t kPluginPayloadMaxBytes = 1u << 20;
+/* One content script file's ceiling, read at plugins-load. A script bigger
+ * than this is dropped with a plugin-error, not served half of. */
+constexpr size_t kPluginScriptMaxBytes = 512u << 10;
+/* The table rides the renderer's command line, base64, because a file:
+ * navigation can land in a renderer process this side never pushed to —
+ * site isolation spawns one per site, and a renderer that meets its first
+ * page with an empty table has no document_start left to offer. One argv
+ * entry is capped by the kernel at 128 KiB, so the encoded table is capped
+ * below that; a table too big for the switch still reaches new renderers
+ * through the first-context request, at the cost of that page's
+ * document_start. */
+constexpr char kPluginsTableSwitch[] = "cefnest-plugins-table";
+constexpr size_t kPluginsTableSwitchMax = 96u << 10;
 
 /* Events are written on the UI thread with a 200 ms send timeout, so a script
  * that returns the whole DOM would stall Chromium and then be dropped anyway.
@@ -111,6 +162,143 @@ constexpr char kDisableSpellcheckScript[] =
  * that the compositor mirrors back. This is the renderer-side half. */
 constexpr char kPrimarySelectionScript[] =
     R"JS((function(){if(window.__cefnestPrimaryHooked)return;window.__cefnestPrimaryHooked=1;var sent=false,last=null;function read(){var a=document.activeElement;if(a&&typeof a.selectionStart==="number"&&typeof a.selectionEnd==="number"&&a.selectionEnd>a.selectionStart){return String(a.value||"").slice(a.selectionStart,a.selectionEnd);}var s=window.getSelection();return s?String(s):"";}function send(){var t=read();if(!sent&&!t)return;if(t===last)return;last=t;sent=true;if(t.length>65536)t=t.slice(0,65536);try{cefnestPrimarySelection(t);}catch(e){}}document.addEventListener("selectionchange",send,true);document.addEventListener("mouseup",send,true);document.addEventListener("keyup",send,true);send();})();)JS";
+
+/* The component-provided chrome.* shim, one instance per plugin (__ID__ is
+ * substituted with the plugin id). It rides into every context that gets
+ * plugin machinery — a page one of the plugin's content scripts matches, or
+ * an extension page of the plugin — and defines window.chrome on top of the
+ * __cefnestPlugin bridge. Multiple plugins on one page each install their own
+ * shim: the first window.chrome wins and stays (there is no isolated world —
+ * see docs/plugins.md), and the page-wide hooks (__cefnestDeliver and
+ * friends) are installed by that first shim alone, then fan out across every
+ * shim's state — a second plugin installing must not deafen the first's
+ * pending calls, listeners and menus.
+ *
+ * Every call goes to the host as one JSON text and comes back through
+ * __cefnestDeliver, which the renderer's process-message handler drives.
+ * Payloads past 1 MiB are refused here, before the channel ever sees them. */
+const char kPluginShimScript[] =
+    R"SHIM((function(){
+  var ID = "__ID__";
+  var all = window.__cefnestChromeFor = window.__cefnestChromeFor || {};
+  if (all[ID]) return;
+  all[ID] = 1;
+  var shims = window.__cefnestShims = window.__cefnestShims || [];
+  var self = {id: ID, seq: 1, pending: {}, menus: {}, listeners: [], action: null};
+  shims.push(self);
+  function call(api, args) {
+    return new Promise(function(resolve, reject) {
+      var payload;
+      try {
+        payload = JSON.stringify({id: ID, reply: self.seq, api: api, args: (args === undefined ? [] : args)});
+      } catch (e) { reject(new Error("plugin-payload-not-serialisable")); return; }
+      if (payload.length > 1048576) { reject(new Error("plugin-payload-too-large")); return; }
+      var reply = self.seq;
+      self.seq = self.seq + 1;
+      self.pending[reply] = {resolve: resolve, reject: reject};
+      try { __cefnestPlugin(payload); }
+      catch (e) { delete self.pending[reply]; reject(e); }
+    });
+  }
+  /* The window hooks below belong to the first shim that ran on this page:
+     a second plugin's shim must not overwrite them, because the first
+     plugin's closures — its pending map, its listeners, its menus — would go
+     deaf the moment the second one installed. Each hook fans out across
+     every shim on the page instead, so whichever plugin owns the state the
+     hook needs is the one it reaches. */
+  if (!window.__cefnestDeliver) {
+    window.__cefnestDeliver = function(reply, ok, value) {
+      for (var s = 0; s < shims.length; s++) {
+        var p = shims[s].pending[reply];
+        if (!p) continue;
+        delete shims[s].pending[reply];
+        if (!ok) { p.reject(new Error(value == null ? "plugin call failed" : String(value))); return; }
+        var v = null;
+        try { v = (value == null) ? null : JSON.parse(value); }
+        catch (e) { p.reject(new Error("plugin-payload-not-serialisable")); return; }
+        p.resolve(v);
+        return;
+      }
+    };
+  }
+  if (!window.__cefnestDispatchMenu) {
+    window.__cefnestDispatchMenu = function(slot, params) {
+      for (var s = 0; s < shims.length; s++) {
+        var fn = shims[s].menus[slot];
+        if (!fn) continue;
+        try {
+          fn({menuItemId: slot, pageUrl: params && params.page_url,
+              linkUrl: params && params.link_url, srcUrl: params && params.source_url,
+              selectionText: params && params.selection_text}, {id: 0, url: params && params.page_url});
+        } catch (e) {}
+        return;
+      }
+    };
+  }
+  if (!window.__cefnestOnMessage) {
+    window.__cefnestOnMessage = function(msg) {
+      // The host delivers one JSON text; listeners see the parsed value, the
+      // shape chrome.runtime.onMessage promises. Anything unparsable goes
+      // through as it arrived.
+      var v = msg;
+      try { v = JSON.parse(msg); } catch (e) {}
+      for (var s = 0; s < shims.length; s++) {
+        var ls = shims[s].listeners;
+        for (var i = 0; i < ls.length; i++) {
+          try { ls[i](v, {id: shims[s].id}, function() {}); } catch (e) {}
+        }
+      }
+    };
+  }
+  if (!window.__cefnestActionClicked) {
+    window.__cefnestActionClicked = function() {
+      for (var s = 0; s < shims.length; s++) {
+        if (shims[s].action) { try { shims[s].action(); } catch (e) {} }
+      }
+    };
+  }
+  function area(name) {
+    return {
+      get: function(keys) { return call("storage." + name + ".get", [keys === undefined ? null : keys]); },
+      set: function(items) { return call("storage." + name + ".set", [items]); },
+      remove: function(keys) { return call("storage." + name + ".remove", [keys]); },
+      clear: function() { return call("storage." + name + ".clear", []); }
+    };
+  }
+  var chrome = {
+    runtime: {
+      id: ID,
+      getURL: function(path) { return "cefnest-extension://" + ID + "/" + String(path).replace(/^\//, ""); },
+      sendMessage: function(msg) { return call("runtime.sendMessage", [msg]); },
+      onMessage: { addListener: function(fn) { self.listeners.push(fn); } }
+    },
+    storage: { local: area("local"), session: area("session"), sync: area("sync") },
+    contextMenus: {
+      create: function(props) {
+        return call("contextMenus.create", [{title: props && props.title}]).then(function(slot) {
+          if (props && typeof props.onclick === "function") self.menus[slot] = props.onclick;
+          return slot;
+        });
+      },
+      remove: function(slot) { delete self.menus[slot]; return call("contextMenus.remove", [slot]); }
+    },
+    tabs: {
+      query: function(q) { return call("tabs.query", [q === undefined ? {} : q]); },
+      update: function(id, props) { return call("tabs.update", [id, props === undefined ? {} : props]); }
+    },
+    action: {
+      onClicked: {
+        addListener: function(fn) {
+          self.action = fn;
+          return call("action.onClicked.listen", []);
+        }
+      }
+    }
+  };
+  try {
+    Object.defineProperty(window, "chrome", {value: chrome, writable: false, configurable: false});
+  } catch (e) { window.chrome = chrome; }
+})();)SHIM";
 
 const char kDefaultUrl[] =
     "data:text/html;charset=utf-8,"
@@ -146,6 +334,10 @@ struct BrowserSlot {
    * a frameless window of ours, so afterwards it looks like any standalone
    * window; it must never become the active browser. */
   bool devtools = false;
+  /* A background page (a plugin manifest's background.service_worker): its
+   * view is attached to no window and never shown, so the nested compositor
+   * never sees a toplevel for it and no FIFO slot is spent on it. */
+  bool background = false;
   std::string title;            /* last OnTitleChange, for event labels */
   CefRefPtr<CefBrowser> browser;
   CefRefPtr<CefBrowserView> view;
@@ -160,7 +352,8 @@ int g_active_browser_id = 0;
 int g_select_slot = 0;
 CefRefPtr<CefWindow> g_tab_window;
 
-int CreateNewBrowser(const std::string& url, bool windowed);
+int CreateNewBrowser(const std::string& url, bool windowed,
+                     bool background = false);
 void SelectBrowserById(int id);
 void ShowDevToolsFor(CefRefPtr<CefBrowser> browser, const CefPoint& point);
 
@@ -789,6 +982,374 @@ EmitFrameSource(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame) {
                                     frame->GetURL().ToString(), title));
 }
 
+/* ------------------------------------------------------------------ *
+ * Cookies, history, page text and PDF                                *
+ * ------------------------------------------------------------------ *
+ *
+ * These four are the "host asks, component answers" batch: no policy and no
+ * UI. Cookies are read from and written to the browser's own request context,
+ * so a persistent data directory makes them persistent and an incognito
+ * profile keeps them for the session. The PDF bytes leave CEF as a file (its
+ * PrintToPDF API has no byte-returning form), so the helper prints into its
+ * own ephemeral root, reads the file back, streams it as base64 and removes
+ * it — the host never sees a path and never inherits a temp file. */
+
+constexpr size_t kTextChunkBytes = 64 * 1024;
+constexpr size_t kPageTextMaxBytes = 4 * 1024 * 1024;
+constexpr size_t kPdfChunkBytes = 48 * 1024;
+constexpr size_t kPdfMaxBytes = 16 * 1024 * 1024;
+int g_next_pdf_id = 1;
+
+/* CEF's wall clock is microseconds since the Windows epoch (1601); cookies
+ * speak Unix seconds on the web and on the channel. */
+constexpr int64_t kWindowsEpochSeconds = 11644473600LL;
+
+class FnTask : public CefTask {
+ public:
+  explicit FnTask(std::function<void()> fn) : fn_(std::move(fn)) {}
+  void Execute() override { fn_(); }
+
+  IMPLEMENT_REFCOUNTING(FnTask);
+
+ private:
+  std::function<void()> fn_;
+};
+
+void PostDelayedUi(std::function<void()> fn, int64_t ms) {
+  CefPostDelayedTask(TID_UI, new FnTask(std::move(fn)), ms);
+}
+
+CefRefPtr<CefDictionaryValue> CookieToEntry(const CefCookie& cookie) {
+  CefRefPtr<CefDictionaryValue> entry = CefDictionaryValue::Create();
+  entry->SetString("name", CefString(&cookie.name));
+  entry->SetString("value", CefString(&cookie.value));
+  entry->SetString("domain", CefString(&cookie.domain));
+  entry->SetString("path", CefString(&cookie.path));
+  entry->SetDouble("expires",
+                   cookie.has_expires
+                       ? static_cast<double>(cookie.expires.val / 1000000 -
+                                             kWindowsEpochSeconds)
+                       : 0.0);
+  entry->SetBool("secure", cookie.secure ? true : false);
+  entry->SetBool("httponly", cookie.httponly ? true : false);
+  return entry;
+}
+
+void EmitCookiesError(int id, const std::string& message) {
+  CefRefPtr<CefDictionaryValue> dict = NewEvent("cookies-result");
+  dict->SetInt("id", id);
+  dict->SetBool("ok", false);
+  dict->SetString("error", message);
+  Emit(dict);
+}
+
+/* Visit has no completion callback in CEF: it is called once per cookie and
+ * never at all when the store holds nothing matching. The delayed answer is
+ * the "no cookies" path, long enough for a real visit to have run and short
+ * enough that a host does not sit on a spinner. A later Visit that finds the
+ * query already answered only stops the walk. */
+class CookieCollector : public CefCookieVisitor {
+ public:
+  explicit CookieCollector(int id)
+      : id_(id), cookies_(CefListValue::Create()) {}
+
+  bool Visit(const CefCookie& cookie,
+             int count,
+             int total,
+             bool& delete_cookie) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (answered_)
+      return false;
+    cookies_->SetDictionary(cookies_->GetSize(), CookieToEntry(cookie));
+    if (total <= 0 || count + 1 >= total)
+      Answer();
+    return !answered_;
+  }
+
+  void AnswerIfSilent() {
+    CEF_REQUIRE_UI_THREAD();
+    if (!answered_)
+      Answer();
+  }
+
+ private:
+  void Answer() {
+    if (answered_)
+      return;
+    answered_ = true;
+    /* Read the size before SetList: a dictionary that takes ownership of a
+     * value invalidates the reference it was handed, so counting afterwards
+     * reads a moved-from list and reports 0. */
+    const int count = static_cast<int>(cookies_->GetSize());
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("cookies-result");
+    dict->SetInt("id", id_);
+    dict->SetBool("ok", true);
+    dict->SetList("cookies", cookies_);
+    dict->SetInt("count", count);
+    Emit(dict);
+  }
+
+  int id_;
+  bool answered_ = false;
+  CefRefPtr<CefListValue> cookies_;
+
+  IMPLEMENT_REFCOUNTING(CookieCollector);
+};
+
+/* One SetCookie callback per cookie, all sharing the tally: the result is one
+ * event after the last answer, the way the command's single id promises. A
+ * rejected call (bad URL, disallowed characters) counts as a failed name and
+ * never produces a callback, so the command loop settles it itself. */
+struct CookieSetState {
+  int id = 0;
+  int total = 0;
+  int done = 0;
+  CefRefPtr<CefListValue> failed = CefListValue::Create();
+};
+
+void EmitCookieSetResult(const std::shared_ptr<CookieSetState>& state) {
+  CefRefPtr<CefDictionaryValue> dict = NewEvent("cookies-result");
+  dict->SetInt("id", state->id);
+  dict->SetInt("count", state->total - static_cast<int>(state->failed->GetSize()));
+  dict->SetBool("ok", state->failed->GetSize() == 0);
+  dict->SetList("failed", state->failed);
+  Emit(dict);
+}
+
+void NoteCookieSetDone(const std::shared_ptr<CookieSetState>& state,
+                       const std::string& name, bool success) {
+  CEF_REQUIRE_UI_THREAD();
+  if (!success)
+    state->failed->SetString(state->failed->GetSize(), name);
+  if (++state->done == state->total)
+    EmitCookieSetResult(state);
+}
+
+class CookieSetCallback : public CefSetCookieCallback {
+ public:
+  CookieSetCallback(std::shared_ptr<CookieSetState> state, std::string name)
+      : state_(std::move(state)), name_(std::move(name)) {}
+
+  void OnComplete(bool success) override {
+    NoteCookieSetDone(state_, name_, success);
+  }
+
+ private:
+  std::shared_ptr<CookieSetState> state_;
+  std::string name_;
+
+  IMPLEMENT_REFCOUNTING(CookieSetCallback);
+};
+
+class CookieDeleteCallback : public CefDeleteCookiesCallback {
+ public:
+  explicit CookieDeleteCallback(int id) : id_(id) {}
+
+  void OnComplete(int num_deleted) override {
+    CEF_REQUIRE_UI_THREAD();
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("cookies-result");
+    dict->SetInt("id", id_);
+    dict->SetBool("ok", true);
+    dict->SetInt("deleted", num_deleted);
+    Emit(dict);
+  }
+
+ private:
+  int id_;
+
+  IMPLEMENT_REFCOUNTING(CookieDeleteCallback);
+};
+
+bool EntryToCookie(CefRefPtr<CefDictionaryValue> entry,
+                   CefCookie* cookie,
+                   std::string* error) {
+  const std::string name =
+      entry->HasKey("name") ? entry->GetString("name").ToString() : std::string();
+  if (name.empty()) {
+    *error = "cookie-needs-name";
+    return false;
+  }
+  CefString(&cookie->name).FromString(name);
+  CefString(&cookie->value).FromString(
+      entry->HasKey("value") ? entry->GetString("value").ToString()
+                             : std::string());
+  if (entry->HasKey("domain"))
+    CefString(&cookie->domain).FromString(entry->GetString("domain").ToString());
+  if (entry->HasKey("path"))
+    CefString(&cookie->path).FromString(entry->GetString("path").ToString());
+  cookie->secure = entry->HasKey("secure") && entry->GetBool("secure");
+  cookie->httponly = entry->HasKey("httponly") && entry->GetBool("httponly");
+  if (entry->HasKey("expires") &&
+      entry->GetType("expires") == VTYPE_DOUBLE) {
+    const double expires = entry->GetDouble("expires");
+    if (expires > 0) {
+      cookie->has_expires = 1;
+      cookie->expires.val = static_cast<int64_t>(expires) * 1000000 +
+                            kWindowsEpochSeconds * 1000000;
+    }
+  }
+  return true;
+}
+
+class HistoryVisitor : public CefNavigationEntryVisitor {
+ public:
+  explicit HistoryVisitor(int id) : id_(id), entries_(CefListValue::Create()) {}
+
+  bool Visit(CefRefPtr<CefNavigationEntry> entry,
+             bool current,
+             int index,
+             int total) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (answered_)
+      return false;
+    if (entry && entry->IsValid()) {
+      CefRefPtr<CefDictionaryValue> one = CefDictionaryValue::Create();
+      one->SetInt("index", index);
+      one->SetString("url", entry->GetURL());
+      one->SetString("title", entry->GetTitle());
+      one->SetBool("current", current);
+      entries_->SetDictionary(entries_->GetSize(), one);
+      if (current)
+        current_index_ = index;
+    }
+    if (total <= 0 || index + 1 >= total)
+      Answer();
+    return !answered_;
+  }
+
+  void AnswerIfSilent() {
+    CEF_REQUIRE_UI_THREAD();
+    if (!answered_)
+      Answer();
+  }
+
+ private:
+  void Answer() {
+    if (answered_)
+      return;
+    answered_ = true;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("history-result");
+    dict->SetInt("id", id_);
+    dict->SetInt("current_index", current_index_);
+    dict->SetList("entries", entries_);
+    Emit(dict);
+  }
+
+  int id_;
+  int current_index_ = -1;
+  bool answered_ = false;
+  CefRefPtr<CefListValue> entries_;
+
+  IMPLEMENT_REFCOUNTING(HistoryVisitor);
+};
+
+class PageTextStream : public CefStringVisitor {
+ public:
+  PageTextStream(int id, int browser_id) : id_(id), browser_id_(browser_id) {}
+
+  void Visit(const CefString& text) override {
+    CEF_REQUIRE_UI_THREAD();
+    const std::string all = text.ToString();
+    const size_t total = std::min(all.size(), kPageTextMaxBytes);
+    const bool truncated = all.size() > kPageTextMaxBytes;
+
+    CefRefPtr<CefDictionaryValue> begin = NewEvent("page-text-begin");
+    begin->SetInt("id", id_);
+    begin->SetInt("browser", browser_id_);
+    begin->SetInt("bytes", static_cast<int>(total));
+    begin->SetBool("truncated", truncated);
+    Emit(begin);
+
+    for (size_t at = 0; at < total;) {
+      size_t take = std::min(kTextChunkBytes, total - at);
+      while (take > 0 && at + take < total &&
+             (static_cast<unsigned char>(all[at + take]) & 0xC0) == 0x80)
+        take--;
+      CefRefPtr<CefDictionaryValue> chunk = NewEvent("page-text-chunk");
+      chunk->SetInt("id", id_);
+      chunk->SetString("data", all.substr(at, take));
+      Emit(chunk);
+      at += take > 0 ? take : 1;
+    }
+
+    CefRefPtr<CefDictionaryValue> end = NewEvent("page-text-end");
+    end->SetInt("id", id_);
+    end->SetBool("truncated", truncated);
+    Emit(end);
+  }
+
+ private:
+  int id_;
+  int browser_id_;
+
+  IMPLEMENT_REFCOUNTING(PageTextStream);
+};
+
+/* PrintToPDF has no byte form: the callback names the file CEF wrote. The
+ * file is this helper's own, under the ephemeral root (tmpfs when the host
+ * has one), read once and removed before the answer goes out. */
+class PdfPrintStream : public CefPdfPrintCallback {
+ public:
+  PdfPrintStream(int id, std::string path, size_t max_bytes)
+      : id_(id), path_(std::move(path)), max_bytes_(max_bytes) {}
+
+  void OnPdfPrintFinished(const CefString& path, bool ok) override {
+    CEF_REQUIRE_UI_THREAD();
+    std::string bytes;
+    if (ok) {
+      std::FILE* file = std::fopen(path_.c_str(), "rb");
+      if (file) {
+        char buffer[64 * 1024];
+        size_t got;
+        while ((got = std::fread(buffer, 1, sizeof buffer, file)) > 0)
+          bytes.append(buffer, got);
+        std::fclose(file);
+      }
+    }
+    std::error_code error;
+    std::filesystem::remove(path_, error);
+
+    CefRefPtr<CefDictionaryValue> end = NewEvent("pdf-end");
+    end->SetInt("id", id_);
+    if (!ok || bytes.empty()) {
+      end->SetInt("bytes", 0);
+      end->SetBool("truncated", false);
+      end->SetString("error", ok ? "empty-pdf" : "print-failed");
+      Emit(end);
+      return;
+    }
+
+    const size_t total = std::min(bytes.size(), max_bytes_);
+    const bool truncated = bytes.size() > max_bytes_;
+
+    CefRefPtr<CefDictionaryValue> begin = NewEvent("pdf-begin");
+    begin->SetInt("id", id_);
+    begin->SetInt("bytes", static_cast<int>(total));
+    begin->SetBool("truncated", truncated);
+    Emit(begin);
+
+    for (size_t at = 0; at < total;) {
+      const size_t take = std::min(kPdfChunkBytes, total - at);
+      CefRefPtr<CefDictionaryValue> chunk = NewEvent("pdf-chunk");
+      chunk->SetInt("id", id_);
+      chunk->SetString("data", CefBase64Encode(bytes.data() + at, take));
+      Emit(chunk);
+      at += take;
+    }
+
+    end->SetInt("bytes", static_cast<int>(total));
+    end->SetBool("truncated", truncated);
+    Emit(end);
+  }
+
+ private:
+  int id_;
+  std::string path_;
+  size_t max_bytes_;
+
+  IMPLEMENT_REFCOUNTING(PdfPrintStream);
+};
+
 void SelectBrowserById(int id) {
   auto it = g_browser_slots.find(id);
   if (it == g_browser_slots.end() || !it->second.browser)
@@ -800,8 +1361,9 @@ void SelectBrowserById(int id) {
   BrowserSlot* slot = &it->second;
   /* A DevTools browser, however it is hosted, must not become the active
    * browser: that would point every command and every state event at the
-   * inspector page, so a focus echo from its window is ignored. */
-  if (slot->devtools)
+   * inspector page, so a focus echo from its window is ignored. The same
+   * holds for a background page, which has no window at all. */
+  if (slot->devtools || slot->background)
     return;
   if (slot->browser == g_browser)
     return;   /* already active: a focus echo must not re-enter through
@@ -1076,6 +1638,591 @@ void ScheduleCaretRestoreAfterSpellcheck() {
   CefPostTask(TID_UI, new RestoreCaretTask(frame, g_menu_generation));
 }
 
+/* ------------------------------------------------------------------ *
+ * Plugins: the scheme, the menu rows, the script tables               *
+ *                                                                     *
+ * Everything here is browser-process state fed by four control        *
+ * commands: plugins-load (the whole truth about one plugin: its root  *
+ * for the extension scheme, its content scripts for later),           *
+ * plugins-unload, and the two menu verbs. The scheme factory reads    *
+ * the table per request from the IO thread while HandleCommand        *
+ * writes it on the UI thread, so the root lookup takes a mutex —      *
+ * the one shared mutable thing on this path.                          *
+ *                                                                     *
+ * Content-script injection itself is not in this build yet: the       *
+ * scripts arrive and are stored, and the renderer half needs its own  *
+ * measured mechanism (browser → renderer table delivery before the    *
+ * first context) before it can claim document_start. The plan puts    *
+ * that with the Web frontend.                                         *
+ * ------------------------------------------------------------------ */
+
+// Chrome match-pattern subset: "<scheme>://<host>/<path>" with "*" wildcards,
+// or "<all_urls>". Enough for a content script's matches and a menu row's
+// "when"; the syntax and its limits are documented in docs/control-channel.md.
+struct MatchPattern {
+  bool all = false;
+  bool any_scheme = false;
+  std::string scheme;
+  bool any_host = false;
+  std::string host_suffix;   // "*.example.com" — matches example.com too
+  std::string host_exact;
+  std::string path;
+
+  static MatchPattern Parse(const std::string& text) {
+    MatchPattern pattern;
+    if (text == "<all_urls>") {
+      pattern.all = true;
+      return pattern;
+    }
+    const std::string::size_type scheme_end = text.find("://");
+    if (scheme_end == std::string::npos)
+      return MatchPattern();
+    std::string scheme = text.substr(0, scheme_end);
+    std::string rest = text.substr(scheme_end + 3);
+    const std::string::size_type path_start = rest.find('/');
+    std::string host =
+        path_start == std::string::npos ? rest : rest.substr(0, path_start);
+    pattern.path = path_start == std::string::npos
+                       ? std::string("/")
+                       : rest.substr(path_start);
+    std::transform(scheme.begin(), scheme.end(), scheme.begin(), ::tolower);
+    if (scheme == "*")
+      pattern.any_scheme = true;
+    else if (!scheme.empty())
+      pattern.scheme = scheme;
+    else
+      return MatchPattern();
+
+    std::transform(host.begin(), host.end(), host.begin(), ::tolower);
+    if (host == "*") {
+      pattern.any_host = true;
+    } else if (host.rfind("*.", 0) == 0) {
+      pattern.host_suffix = host.substr(1);  // ".example.com"
+      if (pattern.host_suffix.size() < 2)
+        return MatchPattern();
+    } else if (!host.empty()) {
+      pattern.host_exact = host;
+    } else {
+      return MatchPattern();
+    }
+    return pattern;
+  }
+
+  bool Usable() const {
+    return all || ((any_scheme || !scheme.empty()) &&
+                   (any_host || !host_exact.empty() || !host_suffix.empty()));
+  }
+
+  bool Matches(const std::string& url) const {
+    if (all)
+      return true;
+
+    const std::string::size_type scheme_end = url.find("://");
+    if (scheme_end == std::string::npos)
+      return false;
+    std::string scheme = url.substr(0, scheme_end);
+    std::string rest = url.substr(scheme_end + 3);
+    const std::string::size_type path_start = rest.find('/');
+    const std::string host =
+        path_start == std::string::npos ? rest : rest.substr(0, path_start);
+    std::string path = path_start == std::string::npos
+                                 ? std::string("/")
+                                 : rest.substr(path_start);
+    if (path.empty())
+      path = "/";
+
+    std::transform(scheme.begin(), scheme.end(), scheme.begin(), ::tolower);
+    if (!any_scheme && scheme != this->scheme)
+      return false;
+
+    std::string host_lower = host;
+    std::transform(host_lower.begin(), host_lower.end(), host_lower.begin(),
+                   ::tolower);
+    if (!any_host) {
+      if (!host_exact.empty()) {
+        if (host_lower != host_exact)
+          return false;
+      } else if (!host_suffix.empty()) {
+        // "*.example.com" matches the domain itself and any subdomain.
+        if (!(host_lower == host_suffix.substr(1) ||
+              (host_lower.size() > host_suffix.size() &&
+               host_lower.compare(host_lower.size() - host_suffix.size(),
+                                  host_suffix.size(), host_suffix) == 0)))
+          return false;
+      } else {
+        return false;
+      }
+    }
+
+    return WildcardMatch(path, this->path);
+  }
+
+  // '*' matches any run of characters, including nothing. Paths are short and
+  // patterns are tiny, so the O(len*pattern) table costs nothing.
+  static bool WildcardMatch(const std::string& text,
+                            const std::string& pattern) {
+    const size_t n = text.size(), m = pattern.size();
+    std::vector<bool> row(m + 1, false), next(m + 1, false);
+    row[0] = true;
+    for (size_t j = 1; j <= m; ++j)
+      row[j] = row[j - 1] && pattern[j - 1] == '*';
+    for (size_t i = 1; i <= n; ++i) {
+      next[0] = false;
+      for (size_t j = 1; j <= m; ++j) {
+        if (pattern[j - 1] == '*')
+          next[j] = next[j - 1] || row[j];
+        else
+          next[j] = row[j - 1] && pattern[j - 1] == text[i - 1];
+      }
+      std::swap(row, next);
+    }
+    return row[m];
+  }
+};
+
+struct PluginScript {
+  std::vector<MatchPattern> matches;
+  std::vector<std::string> js;       // file paths, as the manifest wrote them
+  std::vector<std::string> js_text;  // contents, read at plugins-load for the
+                                     // browser-side document_idle injection;
+                                     // the renderer fetches its own copies
+                                     // through the extension scheme, so the
+                                     // table that travels stays path-sized
+  std::string run_at;
+};
+
+struct PluginEntry {
+  std::string root;
+  std::vector<PluginScript> scripts;
+  /* The manifest's background.service_worker path, relative to the root. The
+   * background page itself is this factory's synthesized wrapper around it. */
+  std::string background;
+};
+
+struct UserMenuItem {
+  std::string label;
+  bool has_when = false;
+  MatchPattern when;
+};
+
+/* Both maps are written on the UI thread (HandleCommand) and the roots are
+ * read per request from the factory's thread. */
+std::mutex g_plugin_mutex;
+std::map<std::string, PluginEntry> g_plugin_table;
+std::map<int, UserMenuItem> g_user_menu_items;
+
+std::string PluginRootFor(const std::string& id) {
+  std::lock_guard<std::mutex> lock(g_plugin_mutex);
+  auto it = g_plugin_table.find(id);
+  return it == g_plugin_table.end() ? std::string() : it->second.root;
+}
+
+std::string PluginBackgroundFor(const std::string& id) {
+  std::lock_guard<std::mutex> lock(g_plugin_mutex);
+  auto it = g_plugin_table.find(id);
+  return it == g_plugin_table.end() ? std::string() : it->second.background;
+}
+
+// §2.8's plugin-error event: a script file this side could not read. The row
+// itself stays loaded — its pages still serve, its other scripts still run.
+void EmitPluginError(const std::string& id, const std::string& message) {
+  CefRefPtr<CefDictionaryValue> dict = NewEvent("plugin-error");
+  dict->SetString("id", id);
+  dict->SetString("message", message);
+  Emit(dict);
+}
+
+// The same inside-the-root rule the extension scheme enforces per request,
+// applied once at load to the files a manifest names. A URL layer is not to
+// be trusted on its way in; a manifest path is, but both ends of the rule
+// live here so neither depends on the other.
+bool PluginPathInside(const std::string& root, const std::string& relative,
+                      std::string* out) {
+  std::error_code error;
+  const std::filesystem::path wanted =
+      std::filesystem::weakly_canonical(root + "/" + relative, error);
+  const std::filesystem::path base =
+      std::filesystem::weakly_canonical(root, error);
+  if (error)
+    return false;
+  const std::string wanted_text = wanted.string();
+  const std::string base_text = base.string() + "/";
+  if (wanted_text.compare(0, base_text.size(), base_text) != 0)
+    return false;
+  *out = wanted_text;
+  return true;
+}
+
+// Reads one content script. Returns false with a reason when the file is
+// missing, escapes the root, or is past the per-file ceiling — the script is
+// dropped and the reason goes to the host as a plugin-error.
+bool ReadScriptFile(const std::string& id, const std::string& root,
+                    const std::string& relative, std::string* out) {
+  std::string path;
+  if (!PluginPathInside(root, relative, &path)) {
+    EmitPluginError(id, "script-path-escape:" + relative);
+    return false;
+  }
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(path, error)) {
+    EmitPluginError(id, "script-missing:" + relative);
+    return false;
+  }
+  const uintmax_t bytes = std::filesystem::file_size(path, error);
+  if (error || bytes > kPluginScriptMaxBytes) {
+    EmitPluginError(id, "script-too-large:" + relative);
+    return false;
+  }
+  FILE* f = fopen(path.c_str(), "rb");
+  if (!f) {
+    EmitPluginError(id, "script-read-failed:" + relative);
+    return false;
+  }
+  out->resize(static_cast<size_t>(bytes));
+  const size_t got = fread(out->data(), 1, out->size(), f);
+  fclose(f);
+  if (got != out->size()) {
+    out->clear();
+    EmitPluginError(id, "script-read-failed:" + relative);
+    return false;
+  }
+  return true;
+}
+
+// The renderer's copy of the table: no roots (the scheme is browser-side
+// only), script texts instead of paths.
+CefRefPtr<CefValue> BuildRendererTable() {
+  CefRefPtr<CefListValue> plugins = CefListValue::Create();
+  size_t n = 0;
+  std::lock_guard<std::mutex> lock(g_plugin_mutex);
+  for (const auto& entry : g_plugin_table) {
+    CefRefPtr<CefDictionaryValue> plugin = CefDictionaryValue::Create();
+    plugin->SetString("id", entry.first);
+    CefRefPtr<CefListValue> scripts = CefListValue::Create();
+    size_t m = 0;
+    for (const auto& script : entry.second.scripts) {
+      CefRefPtr<CefDictionaryValue> one = CefDictionaryValue::Create();
+      CefRefPtr<CefListValue> matches = CefListValue::Create();
+      // Patterns travel as text and the renderer re-parses them, so the two
+      // ends cannot drift apart on what "*" meant.
+      size_t k = 0;
+      for (const auto& pattern : script.matches) {
+        std::string text = pattern.all ? "<all_urls>" : "";
+        if (!pattern.all) {
+          text = (pattern.any_scheme ? "*" : pattern.scheme) + std::string("://") +
+                 (pattern.any_host ? "*"
+                                   : !pattern.host_suffix.empty()
+                                       ? "*" + pattern.host_suffix
+                                       : pattern.host_exact) +
+                 pattern.path;
+        }
+        matches->SetString(k++, text);
+      }
+      one->SetList("matches", matches);
+      CefRefPtr<CefListValue> files = CefListValue::Create();
+      size_t j = 0;
+      for (const auto& path : script.js)
+        files->SetString(j++, path);
+      one->SetList("js", files);
+      one->SetString("run_at", script.run_at);
+      scripts->SetDictionary(m++, one);
+    }
+    plugin->SetList("scripts", scripts);
+    plugins->SetDictionary(n++, plugin);
+  }
+  CefRefPtr<CefDictionaryValue> root = CefDictionaryValue::Create();
+  root->SetList("plugins", plugins);
+  CefRefPtr<CefValue> value = CefValue::Create();
+  value->SetDictionary(root);
+  return value;
+}
+
+// One table push to one renderer. Called on the UI thread: browser creation,
+// plugins-load, and the renderer's own request all land there.
+void PushPluginsTable(CefRefPtr<CefBrowser> browser) {
+  if (!browser || !browser->GetHost())
+    return;
+  CefRefPtr<CefFrame> frame = browser->GetMainFrame();
+  if (!frame)
+    return;
+  CefRefPtr<CefValue> table = BuildRendererTable();
+  CefRefPtr<CefProcessMessage> message =
+      CefProcessMessage::Create(kPluginsTableProcess);
+  const std::string json =
+      CefWriteJSON(table, JSON_WRITER_DEFAULT).ToString();
+  message->GetArgumentList()->SetString(0, json);
+  // Frame-scoped on purpose (CEF 156 moved SendProcessMessage to CefFrame):
+  // the table is process-wide state on the renderer side, and the main frame
+  // is the one this process reliably has.
+  frame->SendProcessMessage(PID_RENDERER, message);
+}
+
+void PushPluginsTableToAll() {
+  for (auto& entry : g_browser_slots)
+    PushPluginsTable(entry.second.browser);
+}
+
+// The renderer's own request: answer through the frame that asked.
+void PushPluginsTableToBrowserFrame(CefRefPtr<CefBrowser> browser,
+                                    CefRefPtr<CefFrame> frame) {
+  if (!browser || !frame || !frame->IsValid())
+    return;
+  CefRefPtr<CefValue> table = BuildRendererTable();
+  CefRefPtr<CefProcessMessage> message =
+      CefProcessMessage::Create(kPluginsTableProcess);
+  message->GetArgumentList()->SetString(
+      0, CefWriteJSON(table, JSON_WRITER_DEFAULT).ToString());
+  frame->SendProcessMessage(PID_RENDERER, message);
+}
+
+// A refusal has to answer with a status the page can read, so it is its own
+// handler: CefStreamResourceHandler over a zero-length CefStreamReader crashes
+// the browser process (measured — the 404 for a missing <img> took the helper
+// out with SIGSEGV, with the socket closing under it and no core to read).
+class ExtensionErrorResponse : public CefResourceHandler {
+ public:
+  ExtensionErrorResponse(int status, std::string reason)
+      : status_(status), reason_(std::move(reason)),
+        body_(reason_) {}
+
+  bool Open(CefRefPtr<CefRequest> request,
+            bool& handle_request,
+            CefRefPtr<CefCallback> callback) override {
+    handle_request = true;
+    return true;
+  }
+
+  void GetResponseHeaders(CefRefPtr<CefResponse> response,
+                          int64_t& response_length,
+                          CefString& redirectUrl) override {
+    response->SetStatus(status_);
+    response->SetStatusText(reason_);
+    response->SetMimeType("text/plain");
+    CefResponse::HeaderMap headers;
+    headers.emplace("Access-Control-Allow-Origin", "*");
+    headers.emplace("Cache-Control", "no-store");
+    response->SetHeaderMap(headers);
+    response_length = static_cast<int64_t>(body_.size());
+  }
+
+  bool Read(void* data, int bytes_to_read, int& bytes_read,
+            CefRefPtr<CefResourceReadCallback> callback) override {
+    bytes_read = 0;
+    if (offset_ < body_.size()) {
+      const size_t wanted =
+          std::min(static_cast<size_t>(bytes_to_read), body_.size() - offset_);
+      memcpy(data, body_.data() + offset_, wanted);
+      offset_ += wanted;
+      bytes_read = static_cast<int>(wanted);
+    }
+    return bytes_read > 0;
+  }
+
+  void Cancel() override {}
+
+ private:
+  const int status_;
+  const std::string reason_;
+  const std::string body_;
+  size_t offset_ = 0;
+
+  IMPLEMENT_REFCOUNTING(ExtensionErrorResponse);
+};
+
+// The synthesized background page: status 200 with a body built in memory.
+// The bytes live in the handler itself, so nothing handed to the resource
+// loader outlives its owner.
+class ExtensionDataResponse : public CefResourceHandler {
+ public:
+  ExtensionDataResponse(std::string mime, std::string body)
+      : mime_(std::move(mime)), body_(std::move(body)) {}
+
+  bool Open(CefRefPtr<CefRequest> request,
+            bool& handle_request,
+            CefRefPtr<CefCallback> callback) override {
+    handle_request = true;
+    return true;
+  }
+
+  void GetResponseHeaders(CefRefPtr<CefResponse> response,
+                          int64_t& response_length,
+                          CefString& redirectUrl) override {
+    response->SetStatus(200);
+    response->SetStatusText("OK");
+    response->SetMimeType(mime_);
+    CefResponse::HeaderMap headers;
+    headers.emplace("Access-Control-Allow-Origin", "*");
+    headers.emplace("Cache-Control", "no-store");
+    response->SetHeaderMap(headers);
+    response_length = static_cast<int64_t>(body_.size());
+  }
+
+  bool Read(void* data, int bytes_to_read, int& bytes_read,
+            CefRefPtr<CefResourceReadCallback> callback) override {
+    bytes_read = 0;
+    if (offset_ < body_.size()) {
+      const size_t wanted =
+          std::min(static_cast<size_t>(bytes_to_read), body_.size() - offset_);
+      memcpy(data, body_.data() + offset_, wanted);
+      offset_ += wanted;
+      bytes_read = static_cast<int>(wanted);
+    }
+    return bytes_read > 0;
+  }
+
+  void Cancel() override {}
+
+ private:
+  const std::string mime_;
+  const std::string body_;
+  size_t offset_ = 0;
+
+  IMPLEMENT_REFCOUNTING(ExtensionDataResponse);
+};
+
+// Serves cefnest-extension://<id>/<path> out of the root plugins-load
+// reported for <id>, and nothing else. The prefix check runs on every
+// request, because the URL layer cannot be trusted to have done it: a literal
+// ../ is normalised away before anything here sees it, while ..%2F arrives
+// still holding the dots and has to be rejected by this side. Both failures
+// answer with a real body — see ExtensionErrorResponse.
+class ExtensionFactory : public CefSchemeHandlerFactory {
+ public:
+  CefRefPtr<CefResourceHandler> Create(CefRefPtr<CefBrowser> browser,
+                                       CefRefPtr<CefFrame> frame,
+                                       const CefString& scheme_name,
+                                       CefRefPtr<CefRequest> request) override {
+    const std::string url = request->GetURL().ToString();
+    if (url.rfind(kExtensionSchemePrefix, 0) != 0) {
+      fprintf(stderr, "helper: extension bad-url url=%s\n", url.c_str());
+      return Refuse(400, "bad-url");
+    }
+
+    std::string rest = url.substr(sizeof(kExtensionSchemePrefix) - 1);
+    const std::string::size_type slash = rest.find('/');
+    std::string id = slash == std::string::npos ? rest : rest.substr(0, slash);
+    std::string leaf =
+        slash == std::string::npos ? std::string() : rest.substr(slash + 1);
+    // The query is the page's cache buster, never part of the file name.
+    const std::string::size_type cut = leaf.find_first_of("?#");
+    if (cut != std::string::npos)
+      leaf = leaf.substr(0, cut);
+    // Decoded with path separators unescaped on purpose — %2f%2e%2e%2f is the
+    // form that survives URL normalisation and still reaches "../", so this
+    // is the case the canonical-prefix check below exists for.
+    const cef_uri_unescape_rule_t rule =
+        static_cast<cef_uri_unescape_rule_t>(UU_NORMAL | UU_PATH_SEPARATORS);
+    leaf = CefURIDecode(leaf, false, rule).ToString();
+    id = CefURIDecode(id, false, rule).ToString();
+
+    const std::string root = PluginRootFor(id);
+    if (root.empty()) {
+      fprintf(stderr, "helper: extension unknown-plugin status=404 url=%s\n",
+              url.c_str());
+      return Refuse(404, "no-such-plugin");
+    }
+
+    /* The background page is synthesized, not a file: a manifest's
+     * background.service_worker names a script, and a script alone would
+     * render as text. The wrapper loads it as a page script, and everything
+     * else about it (the shim, the runtime message route) is the ordinary
+     * extension-page machinery. The name is reserved: a plugin shipping a
+     * real file of this name would lose to the wrapper. */
+    if (leaf == "__cefnest_background__.html") {
+      const std::string background = PluginBackgroundFor(id);
+      if (background.empty()) {
+        fprintf(stderr,
+                "helper: extension no-background status=404 url=%s\n",
+                url.c_str());
+        return Refuse(404, "no-background-page");
+      }
+      // The path came from the manifest and passed the inside-the-root check
+      // at load, but it travels here inside an attribute, so quotes in it
+      // still get escaped rather than trusted.
+      std::string escaped;
+      escaped.reserve(background.size());
+      for (char c : background) {
+        switch (c) {
+          case '"': escaped += "&quot;"; break;
+          case '<': escaped += "&lt;"; break;
+          case '&': escaped += "&amp;"; break;
+          default: escaped += c;
+        }
+      }
+      const std::string body =
+          "<!doctype html><html><head><meta charset=\"utf-8\">"
+          "<title>cefnest background</title></head><body>"
+          "<script src=\"" + escaped + "\"></script>"
+          "</body></html>";
+      fprintf(stderr,
+              "helper: extension served background status=200 url=%s\n",
+              url.c_str());
+      return new ExtensionDataResponse("text/html", body);
+    }
+
+    std::error_code error;
+    // The root plugins-load reports is the plugin's own directory, so the
+    // leaf hangs directly under it. (The spike's root was the parent of all
+    // plugins; the real one is per plugin, and the id only picks the root.)
+    const std::filesystem::path wanted =
+        std::filesystem::weakly_canonical(root + "/" + leaf, error);
+    const std::filesystem::path base =
+        std::filesystem::weakly_canonical(root, error);
+    if (error) {
+      fprintf(stderr, "helper: extension canonical-failed url=%s: %s\n",
+              url.c_str(), error.message().c_str());
+      return Refuse(500, "canonical-failed");
+    }
+    const std::string wanted_text = wanted.string();
+    const std::string base_text = base.string() + "/";
+    if (wanted_text.compare(0, base_text.size(), base_text) != 0) {
+      fprintf(stderr,
+              "helper: extension-path-escape status=403 url=%s path=%s\n",
+              url.c_str(), wanted_text.c_str());
+      EmitStatus("extension-path-escape");
+      return Refuse(403, "outside-root");
+    }
+
+    if (!std::filesystem::is_regular_file(wanted, error)) {
+      fprintf(stderr, "helper: extension missing status=404 url=%s path=%s\n",
+              url.c_str(), wanted_text.c_str());
+      return Refuse(404, "no-such-file");
+    }
+
+    CefRefPtr<CefStreamReader> stream =
+        CefStreamReader::CreateForFile(wanted_text);
+    if (!stream) {
+      fprintf(stderr, "helper: extension open-failed status=500 url=%s\n",
+              url.c_str());
+      return Refuse(500, "open-failed");
+    }
+    fprintf(stderr, "helper: extension served status=200 url=%s\n", url.c_str());
+    CefResponse::HeaderMap headers;
+    headers.emplace("Access-Control-Allow-Origin", "*");
+    headers.emplace("Cache-Control", "no-store");
+    return new CefStreamResourceHandler(200, "OK",
+                                        ExtensionMimeType(wanted_text),
+                                        headers, stream);
+  }
+
+ private:
+  static CefRefPtr<CefResourceHandler> Refuse(int status, const char* reason) {
+    return new ExtensionErrorResponse(status, reason);
+  }
+
+  static const char* ExtensionMimeType(const std::string& path) {
+    if (path.ends_with(".png")) return "image/png";
+    if (path.ends_with(".svg")) return "image/svg+xml";
+    if (path.ends_with(".js")) return "application/javascript";
+    if (path.ends_with(".html")) return "text/html";
+    if (path.ends_with(".css")) return "text/css";
+    if (path.ends_with(".json")) return "application/json";
+    return "text/plain";
+  }
+
+  IMPLEMENT_REFCOUNTING(ExtensionFactory);
+};
+
 const char* MenuItemTypeName(cef_menu_item_type_t type) {
   switch (type) {
     case MENUITEMTYPE_COMMAND:
@@ -1175,6 +2322,25 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
       }
     }
 
+    /* Plugin rows come after everything else, which is where the plan puts
+     * them ("插进末尾"). A row whose "when" pattern does not match this
+     * frame's URL stays hidden; the frame URL, not the request's params, is
+     * what a pattern is about — the menu is for the page. */
+    if (!g_user_menu_items.empty()) {
+      const std::string page_url =
+          frame ? frame->GetURL().ToString() : std::string();
+      bool added = false;
+      for (const auto& entry : g_user_menu_items) {
+        if (entry.second.has_when && !entry.second.when.Matches(page_url))
+          continue;
+        if (!added) {
+          model->AddSeparator();
+          added = true;
+        }
+        model->AddItem(kPluginMenuBase + entry.first, entry.second.label);
+      }
+    }
+
     CefRefPtr<CefListValue> items = CefListValue::Create();
     int written = 0;
     bool skip_separator = false;
@@ -1244,10 +2410,34 @@ class HelperContextMenuHandler : public CefContextMenuHandler {
 
     /* The inspector's default menu is CEF's; the ids are CEF's too, and the
      * stock ones (View source, Save image) must not be read as this helper's
-     * page commands. */
+     * page commands. A background page has no surface to right-click, so the
+     * guard is only defensive there. */
     if (BrowserSlot* slot = FindSlotForBrowser(browser))
-      if (slot->devtools)
+      if (slot->devtools || slot->background)
         return false;
+
+    // Plugin rows are their own id space and their own route: the host
+    // decides what the pick means, and the params describe the node the menu
+    // was opened on — the same facts a copy-text row would act on.
+    if (command_id >= kPluginMenuBase &&
+        command_id <= kPluginMenuBase + kPluginMenuMaxSlot) {
+      CefRefPtr<CefDictionaryValue> payload = CefDictionaryValue::Create();
+      auto set_non_empty = [&](const char* key, const CefString& value) {
+        const std::string text = value.ToString();
+        if (!text.empty())
+          payload->SetString(key, text);
+      };
+      set_non_empty("page_url", frame ? frame->GetURL() : CefString());
+      set_non_empty("link_url", params->GetLinkUrl());
+      set_non_empty("source_url", params->GetSourceUrl());
+      set_non_empty("selection_text", params->GetSelectionText());
+
+      CefRefPtr<CefDictionaryValue> dict = NewEvent(kPluginMenuCommandEvent);
+      dict->SetInt("slot", command_id - kPluginMenuBase);
+      dict->SetDictionary("params", payload);
+      Emit(dict);
+      return true;
+    }
 
     CefString url;
     const char* event = nullptr;
@@ -1561,6 +2751,691 @@ class HelperPermissionHandler : public CefPermissionHandler {
   IMPLEMENT_REFCOUNTING(HelperPermissionHandler);
 };
 
+/* ------------------------------------------------------------------ *
+ * JavaScript and file dialogs: questions the page blocks on          *
+ *                                                                    *
+ * A js dialog stops the page's script where it stands: nothing after  *
+ * alert() runs until the callback is executed. Alloy has no dialog UI *
+ * of its own that can survive in this process (the Chrome-style views *
+ * path is the one measured to crash on Wayland), and a dialog the     *
+ * host never hears about leaves the page parked forever — measured:   *
+ * an alert() on load keeps the title from ever changing. So both      *
+ * kinds are parked here and answered by the host, the same shape as   *
+ * downloads and permission requests.                                  *
+ *                                                                    *
+ * The session is what answers a dialog no host took, with Chrome's    *
+ * defaults (alert: ok, confirm: cancel, prompt: cancel with an empty  *
+ * value, beforeunload: leave). That rule lives on the host side       *
+ * because a helper that answered on its own would never give a host   *
+ * the chance to draw the question.                                    *
+ *                                                                    *
+ * One js dialog is held per browser, which is Chromium's own rule: a  *
+ * second request while one is open is suppressed outright, exactly    *
+ * as the default CEF handler documents. File dialogs are keyed only   *
+ * by their wire id; Chromium queues them per browser itself.          *
+ * ------------------------------------------------------------------ */
+struct JsDialog {
+  int browser_id = 0;
+  std::string kind;
+  CefRefPtr<CefJSDialogCallback> callback;
+};
+
+std::map<uint32_t, JsDialog> g_js_dialogs;              // wire id
+std::map<int, uint32_t> g_js_dialog_by_browser;         // browser id -> wire id
+struct FileDialog {
+  int browser_id = 0;
+  CefRefPtr<CefFileDialogCallback> callback;
+};
+std::map<uint32_t, FileDialog> g_file_dialogs;
+uint32_t g_dialog_seq = 0;
+
+/* A certificate error the host has not answered yet, keyed by wire id, plus
+ * the fingerprints the host has authorized for this helper's lifetime. The
+ * table is memory only — persistence across restarts is the host's own
+ * policy store, by the same rule as the data directory. */
+struct CertDialog {
+  int browser_id = 0;
+  CefRefPtr<CefCallback> callback;
+};
+std::map<uint32_t, CertDialog> g_cert_dialogs;
+std::set<std::string> g_cert_authorized;
+
+/* 资源拦截一期, the helper half. Rules live only here: no registration is
+ * the zero-overhead pass-through, and every matched request parks one
+ * question on the channel unless the mode is passive. The id space is this
+ * feature's own — request_id — so answers stay unambiguous no matter what
+ * else is parked at the same time. */
+struct InterceptRule {
+  uint32_t id = 0;
+  std::vector<MatchPattern> patterns;
+  std::set<std::string> resource_types;   // empty means every type
+};
+std::vector<InterceptRule> g_intercept_rules;
+bool g_intercept_passive = false;
+
+struct InterceptPending {
+  int browser_id = 0;
+  CefRefPtr<CefRequest> request;
+  CefRefPtr<CefCallback> callback;
+};
+std::map<uint32_t, InterceptPending> g_intercept_pending;
+uint32_t g_intercept_seq = 0;
+/* GetResourceRequestHandler and OnBeforeResourceLoad run on the IO thread;
+ * the intercept-* commands and request-respond run on the UI thread. Both
+ * sides take this one lock. The emission itself needs no thread hop: the
+ * control channel's writer already serializes sends. */
+std::mutex g_intercept_mutex;
+
+const char* ResourceTypeText(cef_resource_type_t type) {
+  switch (type) {
+    case RT_MAIN_FRAME: return "main_frame";
+    case RT_SUB_FRAME: return "sub_frame";
+    case RT_STYLESHEET: return "stylesheet";
+    case RT_SCRIPT: return "script";
+    case RT_IMAGE: return "image";
+    case RT_FONT_RESOURCE: return "font";
+    case RT_MEDIA: return "media";
+    case RT_WORKER: return "worker";
+    case RT_SHARED_WORKER: return "shared_worker";
+    case RT_PREFETCH: return "prefetch";
+    case RT_FAVICON: return "favicon";
+    case RT_XHR: return "xhr";
+    case RT_PING: return "ping";
+    case RT_NAVIGATION_PRELOAD_MAIN_FRAME: return "navigation_preload";
+    case RT_NAVIGATION_PRELOAD_SUB_FRAME: return "navigation_preload";
+    default: return "other";
+  }
+}
+
+const InterceptRule* MatchInterceptRule(const std::string& url,
+                                        const std::string& type) {
+  // Callers hold g_intercept_mutex.
+  for (const auto& rule : g_intercept_rules) {
+    if (!rule.resource_types.empty() && !rule.resource_types.count(type))
+      continue;
+    for (const auto& pattern : rule.patterns)
+      if (pattern.Usable() && pattern.Matches(url))
+        return &rule;
+  }
+  return nullptr;
+}
+
+/* The DevTools protocol pipe. Off until cdp-enable: registering the observer
+ * is the switch, because a page's full protocol — script, storage, network,
+ * everything — is exactly what it hands the host. Method results map back to
+ * the host's own id through g_cdp_pending; events pass through as they
+ * arrive. Results past the channel's 4 MiB line are refused by name here,
+ * before a line nobody can read goes out. */
+constexpr size_t kCdpMaxBytes = 4 * 1024 * 1024;
+
+std::map<int, int> g_cdp_pending;   // CEF message id -> the host's id
+std::map<int, CefRefPtr<CefRegistration>> g_cdp_registrations;
+
+class DevToolsObserver : public CefDevToolsMessageObserver {
+ public:
+  void OnDevToolsMethodResult(CefRefPtr<CefBrowser> browser,
+                              int message_id, bool success,
+                              const void* result, size_t result_size)
+      override {
+    auto pending = g_cdp_pending.find(message_id);
+    if (pending == g_cdp_pending.end())
+      return;   // a call this side did not make: not ours to report
+    const int host_id = pending->second;
+    g_cdp_pending.erase(pending);
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("cdp-result");
+    dict->SetInt("id", host_id);
+    dict->SetBool("ok", success);
+    if (result_size > kCdpMaxBytes) {
+      dict->SetString("json", "");
+      dict->SetString("message", "cdp-too-large");
+    } else {
+      dict->SetString("json", std::string(
+          static_cast<const char*>(result), result_size));
+    }
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    Emit(dict);
+  }
+
+  void OnDevToolsEvent(CefRefPtr<CefBrowser> browser,
+                       const CefString& method,
+                       const void* params, size_t params_size) override {
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("cdp-event");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetString("method", method);
+    if (params_size > kCdpMaxBytes) {
+      dict->SetString("params", "");
+      dict->SetString("message", "cdp-too-large");
+    } else {
+      dict->SetString("params", std::string(
+          static_cast<const char*>(params), params_size));
+    }
+    Emit(dict);
+  }
+
+  IMPLEMENT_REFCOUNTING(DevToolsObserver);
+};
+
+CefRefPtr<DevToolsObserver> g_cdp_observer{new DevToolsObserver};
+
+/* The per-request handler CEF asks for when a rule matches. It exists only
+ * for the moment OnBeforeResourceLoad runs: either the event goes out and
+ * the request continues (passive), or the decision parks here and the
+ * answer comes back as request-respond. */
+class RequestGate : public CefResourceRequestHandler {
+ public:
+  RequestGate(uint32_t request_id, int browser_id, std::string url,
+              std::string method, std::string resource_type,
+              bool is_main_frame, std::string headers_json)
+      : request_id_(request_id), browser_id_(browser_id),
+        url_(std::move(url)), method_(std::move(method)),
+        resource_type_(std::move(resource_type)),
+        is_main_frame_(is_main_frame), headers_json_(std::move(headers_json)) {}
+
+  cef_return_value_t OnBeforeResourceLoad(
+      CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+      CefRefPtr<CefRequest> request, CefRefPtr<CefCallback> callback)
+      override {
+    bool passive;
+    {
+      std::lock_guard<std::mutex> lock(g_intercept_mutex);
+      passive = g_intercept_passive;
+      if (!passive) {
+        InterceptPending& pending = g_intercept_pending[request_id_];
+        pending.browser_id = browser_id_;
+        pending.request = request;
+        pending.callback = callback;
+      }
+    }
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("request-intercept");
+    dict->SetInt("request_id", static_cast<int>(request_id_));
+    if (browser_id_)
+      dict->SetInt("browser", browser_id_);
+    dict->SetString("url", url_);
+    dict->SetString("method", method_);
+    dict->SetString("resource_type", resource_type_);
+    dict->SetBool("is_main_frame", is_main_frame_);
+    if (!headers_json_.empty())
+      dict->SetString("headers", headers_json_);
+    Emit(dict);
+    fprintf(stderr,
+            "helper: request-intercept %u browser=%d type=%s url=%s\n",
+            request_id_, browser_id_, resource_type_.c_str(), url_.c_str());
+
+    if (passive) {
+      // Observed, not obstructed: the event is the product here.
+      return RV_CONTINUE;
+    }
+    return RV_CONTINUE_ASYNC;
+  }
+
+ private:
+  uint32_t request_id_;
+  int browser_id_;
+  std::string url_;
+  std::string method_;
+  std::string resource_type_;
+  bool is_main_frame_;
+  std::string headers_json_;
+
+  IMPLEMENT_REFCOUNTING(RequestGate);
+};
+
+/* The certificate decision names, in the net-error vocabulary the host
+ * already sees in load-error. */
+const char* CertErrorName(cef_errorcode_t error) {
+  switch (error) {
+    case ERR_CERT_COMMON_NAME_INVALID: return "ERR_CERT_COMMON_NAME_INVALID";
+    case ERR_CERT_DATE_INVALID: return "ERR_CERT_DATE_INVALID";
+    case ERR_CERT_AUTHORITY_INVALID: return "ERR_CERT_AUTHORITY_INVALID";
+    case ERR_CERT_CONTAINS_ERRORS: return "ERR_CERT_CONTAINS_ERRORS";
+    case ERR_CERT_NO_REVOCATION_MECHANISM:
+      return "ERR_CERT_NO_REVOCATION_MECHANISM";
+    case ERR_CERT_UNABLE_TO_CHECK_REVOCATION:
+      return "ERR_CERT_UNABLE_TO_CHECK_REVOCATION";
+    case ERR_CERT_REVOKED: return "ERR_CERT_REVOKED";
+    case ERR_CERT_INVALID: return "ERR_CERT_INVALID";
+    case ERR_CERT_WEAK_SIGNATURE_ALGORITHM:
+      return "ERR_CERT_WEAK_SIGNATURE_ALGORITHM";
+    case ERR_CERT_NON_UNIQUE_NAME: return "ERR_CERT_NON_UNIQUE_NAME";
+    case ERR_CERT_VALIDITY_TOO_LONG: return "ERR_CERT_VALIDITY_TOO_LONG";
+    case ERR_CERT_NAME_CONSTRAINT_VIOLATION:
+      return "ERR_CERT_NAME_CONSTRAINT_VIOLATION";
+    case ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN:
+      return "ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN";
+    case ERR_CERTIFICATE_TRANSPARENCY_REQUIRED:
+      return "ERR_CERTIFICATE_TRANSPARENCY_REQUIRED";
+    default: return "ERR_CERT_UNKNOWN";
+  }
+}
+
+/* SHA-256, one screen of the standard: the DER of the leaf becomes the
+ * fingerprint the host compares and authorizes. The helper links no crypto
+ * library of its own, and the input is 32 bytes of output over whatever the
+ * certificate carries — a compact, well-known table implementation is the
+ * honest shape for that here. */
+class Sha256 {
+ public:
+  Sha256() { Reset(); }
+  void Reset() {
+    length_ = 0;
+    h_[0] = 0x6a09e667; h_[1] = 0xbb67ae85; h_[2] = 0x3c6ef372;
+    h_[3] = 0xa54ff53a; h_[4] = 0x510e527f; h_[5] = 0x9b05688c;
+    h_[6] = 0x1f83d9ab; h_[7] = 0x5be0cd19;
+    buffer_used_ = 0;
+  }
+  void Update(const unsigned char* data, size_t size) {
+    length_ += size;
+    while (size > 0) {
+      const size_t take = std::min(size, sizeof(buffer_) - buffer_used_);
+      memcpy(buffer_ + buffer_used_, data, take);
+      buffer_used_ += take;
+      data += take;
+      size -= take;
+      if (buffer_used_ == sizeof(buffer_)) {
+        Transform(buffer_);
+        buffer_used_ = 0;
+      }
+    }
+  }
+  std::string Hex() {
+    uint64_t bits = length_ * 8;
+    const unsigned char one = 0x80;
+    Update(&one, 1);
+    const unsigned char zero = 0;
+    while (buffer_used_ != 56)
+      Update(&zero, 1);
+    unsigned char tail[8];
+    for (int i = 0; i < 8; ++i)
+      tail[i] = static_cast<unsigned char>(bits >> (56 - i * 8));
+    Update(tail, 8);
+    std::string out;
+    out.reserve(64);
+    for (int i = 0; i < 8; ++i)
+      for (int b = 3; b >= 0; --b) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02x",
+                 (h_[i] >> (b * 8)) & 0xff);
+        out += buf;
+      }
+    return out;
+  }
+
+ private:
+  static uint32_t Rotr(uint32_t v, int n) { return (v >> n) | (v << (32 - n)); }
+  void Transform(const unsigned char* chunk) {
+    static const uint32_t k[64] = {
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b,
+      0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
+      0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7,
+      0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+      0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152,
+      0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+      0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+      0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819,
+      0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08,
+      0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
+      0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+      0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    uint32_t w[64];
+    for (int i = 0; i < 16; ++i)
+      w[i] = (uint32_t)chunk[i * 4] << 24 | (uint32_t)chunk[i * 4 + 1] << 16 |
+             (uint32_t)chunk[i * 4 + 2] << 8 | (uint32_t)chunk[i * 4 + 3];
+    for (int i = 16; i < 64; ++i) {
+      const uint32_t s0 = Rotr(w[i - 15], 7) ^ Rotr(w[i - 15], 18) ^
+                          (w[i - 15] >> 3);
+      const uint32_t s1 = Rotr(w[i - 2], 17) ^ Rotr(w[i - 2], 19) ^
+                          (w[i - 2] >> 10);
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = h_[0], b = h_[1], c = h_[2], d = h_[3];
+    uint32_t e = h_[4], f = h_[5], g = h_[6], hh = h_[7];
+    for (int i = 0; i < 64; ++i) {
+      const uint32_t s1 = Rotr(e, 6) ^ Rotr(e, 11) ^ Rotr(e, 25);
+      const uint32_t ch = (e & f) ^ (~e & g);
+      const uint32_t t1 = hh + s1 + ch + k[i] + w[i];
+      const uint32_t s0 = Rotr(a, 2) ^ Rotr(a, 13) ^ Rotr(a, 22);
+      const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+      const uint32_t t2 = s0 + maj;
+      hh = g; g = f; f = e; e = d + t1;
+      d = c; c = b; b = a; a = t1 + t2;
+    }
+    h_[0] += a; h_[1] += b; h_[2] += c; h_[3] += d;
+    h_[4] += e; h_[5] += f; h_[6] += g; h_[7] += hh;
+    memset(w, 0, sizeof(w));
+  }
+
+  uint32_t h_[8];
+  uint64_t length_ = 0;
+  unsigned char buffer_[64];
+  size_t buffer_used_ = 0;
+};
+
+const char* JsDialogKindName(cef_jsdialog_type_t type) {
+  switch (type) {
+    case JSDIALOGTYPE_ALERT:
+      return "alert";
+    case JSDIALOGTYPE_CONFIRM:
+      return "confirm";
+    case JSDIALOGTYPE_PROMPT:
+      return "prompt";
+    default:
+      return "unknown";
+  }
+}
+
+const char* FileDialogModeName(cef_file_dialog_mode_t mode) {
+  switch (mode) {
+    case FILE_DIALOG_OPEN:
+      return "open";
+    case FILE_DIALOG_OPEN_MULTIPLE:
+      return "open-multiple";
+    case FILE_DIALOG_OPEN_FOLDER:
+      return "open-folder";
+    case FILE_DIALOG_SAVE:
+      return "save";
+    default:
+      return "unknown";
+  }
+}
+
+void EmitJsDialogClosed(int id, int browser_id, const char* why) {
+  auto held = g_js_dialogs.find(static_cast<uint32_t>(id));
+  if (held == g_js_dialogs.end())
+    return;
+  g_js_dialogs.erase(held);
+  auto by_browser = g_js_dialog_by_browser.find(browser_id);
+  if (by_browser != g_js_dialog_by_browser.end() &&
+      by_browser->second == static_cast<uint32_t>(id))
+    g_js_dialog_by_browser.erase(by_browser);
+
+  CefRefPtr<CefDictionaryValue> dict = NewEvent("js-dialog-closed");
+  dict->SetInt("browser", browser_id);
+  dict->SetInt("id", id);
+  Emit(dict);
+  fprintf(stderr, "helper: js-dialog %d closed (%s)\n", id, why);
+}
+
+/* The callback is dropped, not executed: the dialog is already gone on CEF's
+ * side when these arrive, and a Continue() into a dismissed request is at best
+ * a no-op. The event is what tells the host to take its own UI down. */
+void CloseJsDialogForBrowser(CefRefPtr<CefBrowser> browser, const char* why) {
+  if (!browser)
+    return;
+  const int browser_id = browser->GetIdentifier();
+  auto held = g_js_dialog_by_browser.find(browser_id);
+  if (held == g_js_dialog_by_browser.end())
+    return;
+  EmitJsDialogClosed(static_cast<int>(held->second), browser_id, why);
+}
+
+/* A closing browser takes its dialog with it. The host has to hear that before
+ * the browser-closed event, or its panel would keep waiting for an answer the
+ * channel can no longer carry. */
+void DropDialogsForBrowser(int browser_id) {
+  auto held = g_js_dialog_by_browser.find(browser_id);
+  if (held != g_js_dialog_by_browser.end())
+    EmitJsDialogClosed(static_cast<int>(held->second), browser_id,
+                       "browser closed");
+
+  for (auto it = g_file_dialogs.begin(); it != g_file_dialogs.end();) {
+    if (it->second.browser_id != browser_id) {
+      ++it;
+      continue;
+    }
+    const int id = static_cast<int>(it->first);
+    it = g_file_dialogs.erase(it);
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("file-dialog-closed");
+    dict->SetInt("browser", browser_id);
+    dict->SetInt("id", id);
+    Emit(dict);
+    fprintf(stderr, "helper: file-dialog %d closed (browser closed)\n", id);
+  }
+
+  for (auto it = g_cert_dialogs.begin(); it != g_cert_dialogs.end();) {
+    if (it->second.browser_id != browser_id) {
+      ++it;
+      continue;
+    }
+    const int id = static_cast<int>(it->first);
+    it = g_cert_dialogs.erase(it);
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("certificate-error-closed");
+    dict->SetInt("browser", browser_id);
+    dict->SetInt("id", id);
+    Emit(dict);
+    fprintf(stderr, "helper: certificate-error %d closed (browser closed)\n",
+            id);
+  }
+
+  std::lock_guard<std::mutex> intercept_lock(g_intercept_mutex);
+  for (auto it = g_intercept_pending.begin(); it != g_intercept_pending.end();) {
+    if (it->second.browser_id != browser_id) {
+      ++it;
+      continue;
+    }
+    const uint32_t request_id = it->first;
+    if (it->second.callback)
+      it->second.callback->Cancel();
+    it = g_intercept_pending.erase(it);
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("request-intercept-closed");
+    dict->SetInt("browser", browser_id);
+    dict->SetInt("request_id", static_cast<int>(request_id));
+    Emit(dict);
+    fprintf(stderr,
+            "helper: request-intercept %u closed (browser closed)\n",
+            request_id);
+  }
+}
+
+class HelperJSDialogHandler : public CefJSDialogHandler {
+ public:
+  bool OnJSDialog(CefRefPtr<CefBrowser> browser,
+                  const CefString& origin_url,
+                  JSDialogType dialog_type,
+                  const CefString& message_text,
+                  const CefString& default_prompt_text,
+                  CefRefPtr<CefJSDialogCallback> callback,
+                  bool& suppress_message) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    /* The inspector is not the page. Its own frontend keeps its dialogs
+     * internal; a question from it has no host UI worth waking up for, and
+     * answering with the cancel default keeps the inspector's script moving.
+     * A background page gets the same: its alert() must not park a question
+     * on the channel, and cancel keeps its script running. */
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background) {
+        if (callback)
+          callback->Continue(false, CefString());
+        return true;
+      }
+
+    if (!browser || !callback)
+      return false;
+
+    /* Chromium serialises js dialogs per browser. A second one while this side
+     * still holds the first is a page spamming alert(); the default handler's
+     * answer is to suppress it, and suppressing is better than executing the
+     * callback the page is not waiting to hear from. */
+    if (g_js_dialog_by_browser.count(browser->GetIdentifier())) {
+      suppress_message = true;
+      fprintf(stderr, "helper: js-dialog suppressed for browser %d\n",
+              browser->GetIdentifier());
+      return false;
+    }
+
+    const uint32_t id = ++g_dialog_seq;
+    JsDialog& entry = g_js_dialogs[id];
+    entry.browser_id = browser->GetIdentifier();
+    entry.kind = JsDialogKindName(dialog_type);
+    entry.callback = callback;
+    g_js_dialog_by_browser[entry.browser_id] = id;
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("js-dialog");
+    dict->SetInt("browser", entry.browser_id);
+    dict->SetInt("id", static_cast<int>(id));
+    dict->SetString("kind", entry.kind);
+    dict->SetString("origin", origin_url.ToString());
+    dict->SetString("message", message_text.ToString());
+    dict->SetString("default_value", default_prompt_text.ToString());
+    Emit(dict);
+
+    fprintf(stderr,
+            "helper: js-dialog %u kind=%s browser=%d origin=%s\n", id,
+            entry.kind.c_str(), entry.browser_id, origin_url.ToString().c_str());
+    return true;
+  }
+
+  bool OnBeforeUnloadDialog(CefRefPtr<CefBrowser> browser,
+                            const CefString& message_text,
+                            bool is_reload,
+                            CefRefPtr<CefJSDialogCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    if (!browser || !callback)
+      return false;
+
+    if (g_js_dialog_by_browser.count(browser->GetIdentifier())) {
+      /* Returning true without executing the callback would leave the unload
+       * parked with no id the host could ever answer. Answer "stay", which is
+       * what a page with a dialog still on screen means anyway. */
+      fprintf(stderr, "helper: beforeunload suppressed by a held dialog for browser %d\n",
+              browser->GetIdentifier());
+      callback->Continue(false, CefString());
+      return true;
+    }
+
+    const uint32_t id = ++g_dialog_seq;
+    JsDialog& entry = g_js_dialogs[id];
+    entry.browser_id = browser->GetIdentifier();
+    entry.kind = "beforeunload";
+    entry.callback = callback;
+    g_js_dialog_by_browser[entry.browser_id] = id;
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("js-dialog");
+    dict->SetInt("browser", entry.browser_id);
+    dict->SetInt("id", static_cast<int>(id));
+    dict->SetString("kind", entry.kind);
+    dict->SetString("origin", "");
+    dict->SetString("message", message_text.ToString());
+    dict->SetString("default_value", "");
+    Emit(dict);
+
+    fprintf(stderr,
+            "helper: js-dialog %u kind=beforeunload browser=%d reload=%d\n", id,
+            entry.browser_id, is_reload ? 1 : 0);
+    return true;
+  }
+
+  /* Navigation cancels whatever was parked, and OnDialogClosed fires when the
+   * request is gone whichever way it went. Both only report a dialog this side
+   * still holds: answering is what removes the entry, and a request already
+   * answered has no host UI left to take down. */
+  void OnResetDialogState(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    CloseJsDialogForBrowser(browser, "reset by navigation");
+  }
+
+  void OnDialogClosed(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    CloseJsDialogForBrowser(browser, "closed by the browser");
+  }
+
+  IMPLEMENT_REFCOUNTING(HelperJSDialogHandler);
+};
+
+class HelperDialogHandler : public CefDialogHandler {
+ public:
+  bool OnFileDialog(CefRefPtr<CefBrowser> browser,
+                    FileDialogMode mode,
+                    const CefString& title,
+                    const CefString& default_file_path,
+                    const std::vector<CefString>& accept_filters,
+                    const std::vector<CefString>& accept_extensions,
+                    const std::vector<CefString>& accept_descriptions,
+                    CefRefPtr<CefFileDialogCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    if (!browser || !callback)
+      return false;
+
+    /* The inspector's file chooser is the frontend's own business; refusing it
+     * is better than parking a question no host panel is meant to answer. A
+     * background page's chooser gets the same refusal. */
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background) {
+        callback->Cancel();
+        return true;
+      }
+
+    const uint32_t id = ++g_dialog_seq;
+    FileDialog& entry = g_file_dialogs[id];
+    entry.browser_id = browser->GetIdentifier();
+    entry.callback = callback;
+
+    std::vector<std::string> accept;
+    for (const auto& filter : accept_filters)
+      accept.push_back(filter.ToString());
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("file-dialog");
+    dict->SetInt("browser", entry.browser_id);
+    dict->SetInt("id", static_cast<int>(id));
+    dict->SetString("mode", FileDialogModeName(mode));
+    dict->SetString("title", title.ToString());
+    dict->SetString("default_path", default_file_path.ToString());
+    dict->SetList("accept", NameList(accept));
+    Emit(dict);
+
+    fprintf(stderr, "helper: file-dialog %u mode=%s browser=%d accept=%s\n", id,
+            FileDialogModeName(mode), entry.browser_id,
+            JoinNames(accept).c_str());
+    return true;
+  }
+
+  IMPLEMENT_REFCOUNTING(HelperDialogHandler);
+};
+
+/* PrintToPDF on Linux asks the client for a paper size before the page is laid
+ * out; without a handler CEF refuses the job. Only GetPdfPaperSize is load-
+ * bearing here: the helper has no printer UI, and window.print() from a page
+ * cancels because OnPrintDialog says no rather than parking a question the
+ * control channel has no event for. */
+class HelperPrintHandler : public CefPrintHandler {
+ public:
+  void OnPrintStart(CefRefPtr<CefBrowser> browser) override {}
+
+  void OnPrintSettings(CefRefPtr<CefBrowser> browser,
+                       CefRefPtr<CefPrintSettings> settings,
+                       bool get_defaults) override {}
+
+  bool OnPrintDialog(CefRefPtr<CefBrowser> browser,
+                     bool has_selection,
+                     CefRefPtr<CefPrintDialogCallback> callback) override {
+    return false;
+  }
+
+  bool OnPrintJob(CefRefPtr<CefBrowser> browser,
+                  const CefString& document_name,
+                  const CefString& pdf_file_path,
+                  CefRefPtr<CefPrintJobCallback> callback) override {
+    return false;
+  }
+
+  void OnPrintReset(CefRefPtr<CefBrowser> browser) override {}
+
+  CefSize GetPdfPaperSize(CefRefPtr<CefBrowser> browser,
+                          int device_units_per_inch) override {
+    // A4, the size the CEF sample uses: 8.27 x 11.69 inches.
+    return CefSize(device_units_per_inch * 827 / 100,
+                   device_units_per_inch * 1169 / 100);
+  }
+
+  IMPLEMENT_REFCOUNTING(HelperPrintHandler);
+};
 
 // ExecuteJavaScript has no return value, so the code is wrapped: the page
 // evaluates it, turns the result into JSON itself, and hands that one text to
@@ -1630,6 +3505,11 @@ void EmitJsResult(const CefString& payload) {
   if (value)
     value_json = CefWriteJSON(value, JSON_WRITER_DEFAULT).ToString();
   if (value_json.size() > kMaxResultBytes) {
+    // ok once meant "the script ran", which made a dropped result look like a
+    // script that returned null — a host checking ok=1 would believe it. ok
+    // now means "the script ran and its result was delivered": a dropped
+    // result is a failed call, value null, and the message says why.
+    event->SetBool("ok", false);
     event->SetString("message", "result exceeded 64 KiB and was dropped");
     event->SetBool("truncated", true);
     value = nullptr;
@@ -1681,10 +3561,12 @@ void HandleCommand(const std::string& line) {
 
   if (name == "new-browser") {
     const std::string url = command->GetString("url").ToString();
-    const bool windowed =
-        command->HasKey("mode") &&
-        command->GetString("mode").ToString() == "window";
-    CreateNewBrowser(url, windowed);
+    const std::string mode = command->HasKey("mode")
+                                 ? command->GetString("mode").ToString()
+                                 : "";
+    const bool windowed = mode == "window";
+    const bool background = mode == "background";
+    CreateNewBrowser(url, windowed, background);
     return;
   }
 
@@ -1720,6 +3602,205 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
+  // Plugin commands answer before the no-browser guard: a plugin's tables
+  // belong to the helper as a whole, not to whichever browser is active, and
+  // a plugin can be loaded before any browser exists to show its pages.
+  if (name == "plugins-load") {
+    CefRefPtr<CefListValue> plugins =
+        command->HasKey("plugins") ? command->GetList("plugins") : nullptr;
+    if (!plugins) {
+      EmitStatus("plugins-load-needs-plugins");
+      return;
+    }
+    {
+    std::lock_guard<std::mutex> lock(g_plugin_mutex);
+    for (size_t i = 0; i < plugins->GetSize(); ++i) {
+      CefRefPtr<CefDictionaryValue> entry = plugins->GetDictionary(i);
+      if (!entry)
+        continue;
+      const std::string id = entry->GetString("id").ToString();
+      const std::string root = entry->GetString("root").ToString();
+      if (id.empty() || root.empty()) {
+        EmitStatus("plugins-load-needs-id-and-root");
+        return;
+      }
+      PluginEntry& slot = g_plugin_table[id];  // replace: the whole truth
+      slot.root = root;
+      slot.scripts.clear();
+      slot.background.clear();
+      if (entry->HasKey("background")) {
+        // The same inside-the-root rule the content scripts get, applied at
+        // load: a bad background path is refused by name before any page
+        // could ask for it.
+        std::string background_path;
+        const std::string background_relative =
+            entry->GetString("background").ToString();
+        if (background_relative.empty())
+          EmitPluginError(id, "background-empty");
+        else if (!PluginPathInside(root, background_relative,
+                                   &background_path))
+          EmitPluginError(id, "background-path-escape:" + background_relative);
+        else
+          slot.background = background_relative;
+      }
+      if (entry->HasKey("scripts")) {
+        CefRefPtr<CefListValue> scripts = entry->GetList("scripts");
+        for (size_t s = 0; s < scripts->GetSize(); ++s) {
+          CefRefPtr<CefDictionaryValue> script = scripts->GetDictionary(s);
+          if (!script)
+            continue;
+          PluginScript parsed;
+          if (script->HasKey("matches")) {
+            CefRefPtr<CefListValue> matches = script->GetList("matches");
+            for (size_t m = 0; m < matches->GetSize(); ++m) {
+              MatchPattern pattern = MatchPattern::Parse(
+                  matches->GetString(m).ToString());
+              if (pattern.Usable())
+                parsed.matches.push_back(pattern);
+            }
+          }
+          if (script->HasKey("js")) {
+            CefRefPtr<CefListValue> files = script->GetList("js");
+            for (size_t j = 0; j < files->GetSize(); ++j)
+              parsed.js.push_back(files->GetString(j).ToString());
+          }
+          parsed.run_at = script->HasKey("run_at")
+                              ? script->GetString("run_at").ToString()
+                              : "document_idle";
+          // Read the files now: the renderer gets texts (its sandbox cannot
+          // read the disk), and document_idle injection from this process
+          // does not want to touch the file system per navigation either.
+          for (const auto& file : parsed.js) {
+            std::string text;
+            if (ReadScriptFile(id, root, file, &text))
+              parsed.js_text.push_back(text);
+          }
+          if (!parsed.js_text.empty())
+            slot.scripts.push_back(parsed);
+        }
+      }
+      fprintf(stderr, "helper: plugins load id=%s root=%s scripts=%zu\n",
+              id.c_str(), root.c_str(), slot.scripts.size());
+    }
+    }
+    // The push takes the same mutex inside BuildRendererTable — it runs
+    // here, after the load's own lock has lifted. Inside the scope above it
+    // would deadlock the UI thread against itself, and the whole helper
+    // would go quiet mid-ready (measured 2026-10-26: every later command,
+    // the page load included, never reached the message loop).
+    PushPluginsTableToAll();
+    return;
+  }
+
+  if (name == "plugins-unload") {
+    const std::string id = command->GetString("id").ToString();
+    {
+      std::lock_guard<std::mutex> lock(g_plugin_mutex);
+      g_plugin_table.erase(id);
+      fprintf(stderr, "helper: plugins unload id=%s\n", id.c_str());
+    }
+    PushPluginsTableToAll();
+    return;
+  }
+
+  if (name == "menu-add-user-item") {
+    const int slot = command->GetInt("slot");
+    const std::string label = command->GetString("label").ToString();
+    if (slot < 0 || slot > kPluginMenuMaxSlot) {
+      EmitStatus("plugin-menu-slot-out-of-range");
+      return;
+    }
+    UserMenuItem& item = g_user_menu_items[slot];  // replace by slot
+    item.label = label;
+    item.has_when = false;
+    if (command->HasKey("when")) {
+      MatchPattern when = MatchPattern::Parse(
+          command->GetString("when").ToString());
+      if (when.Usable()) {
+        item.when = when;
+        item.has_when = true;
+      } else {
+        fprintf(stderr, "helper: plugin menu slot=%d has an unusable when=%s\n",
+                slot, command->GetString("when").ToString().c_str());
+      }
+    }
+    fprintf(stderr, "helper: plugin menu row slot=%d label=%s%s\n", slot,
+            label.c_str(), item.has_when ? " (when)" : "");
+    return;
+  }
+
+  if (name == "menu-remove-user-item") {
+    const int slot = command->GetInt("slot");
+    g_user_menu_items.erase(slot);
+    fprintf(stderr, "helper: plugin menu row removed slot=%d\n", slot);
+    return;
+  }
+
+  if (name == "plugin-respond") {
+    // The host's answer to one plugin-message. Routed to the browser the
+    // call came from; the renderer delivers it to every shim in that
+    // browser, and the one holding the reply id resolves.
+    const int browser_id = command->GetInt("browser");
+    auto it = g_browser_slots.find(browser_id);
+    if (it == g_browser_slots.end() || !it->second.browser) {
+      EmitStatus("no-such-browser");
+      return;
+    }
+    std::string value = command->HasKey("value")
+                            ? command->GetString("value").ToString()
+                            : std::string("null");
+    if (value.empty())
+      value = "null";
+    if (value.size() > kPluginPayloadMaxBytes) {
+      EmitStatus("plugin-payload-too-large");
+      return;
+    }
+    CefRefPtr<CefProcessMessage> message =
+        CefProcessMessage::Create(kPluginResponseProcess);
+    message->GetArgumentList()->SetInt(0, command->GetInt("reply_id"));
+    message->GetArgumentList()->SetBool(1, command->GetBool("ok"));
+    message->GetArgumentList()->SetString(2, value);
+    it->second.browser->GetMainFrame()->SendProcessMessage(PID_RENDERER,
+                                                           message);
+    return;
+  }
+
+  if (name == "browsers-list") {
+    const int request_id = command->GetInt("id");
+    CefRefPtr<CefListValue> list = CefListValue::Create();
+    size_t n = 0;
+    for (const auto& entry : g_browser_slots) {
+      if (entry.second.devtools || entry.second.background)
+        continue;  // the inspector is not a tab a plugin should see, and
+                   // neither is a background page
+      CefRefPtr<CefDictionaryValue> one = CefDictionaryValue::Create();
+      one->SetInt("id", entry.first);
+      one->SetString("url", entry.second.browser &&
+                                    entry.second.browser->GetMainFrame()
+                                        ? entry.second.browser->GetMainFrame()
+                                              ->GetURL()
+                                              .ToString()
+                                        : entry.second.start_url);
+      one->SetString("title", entry.second.title);
+      one->SetBool("active", entry.first == g_active_browser_id);
+      one->SetBool("windowed", entry.second.windowed);
+      // Read from the host, not from a cache: mute and zoom are facts about
+      // the browser as Chromium holds them right now.
+      if (entry.second.browser && entry.second.browser->GetHost()) {
+        one->SetBool("muted",
+                     entry.second.browser->GetHost()->IsAudioMuted());
+        one->SetDouble("zoom",
+                       entry.second.browser->GetHost()->GetZoomLevel());
+      }
+      list->SetDictionary(n++, one);
+    }
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("browsers");
+    dict->SetInt("id", request_id);
+    dict->SetList("browsers", list);
+    Emit(dict);
+    return;
+  }
+
   if (!g_browser) {
     EmitStatus("no-browser");
     return;
@@ -1731,7 +3812,18 @@ void HandleCommand(const std::string& line) {
       EmitStatus("load-needs-url");
       return;
     }
-    CefRefPtr<CefFrame> frame = g_browser->GetMainFrame();
+    // tabs.update names the browser it wants; absent, the active one. Same
+    // shape the close-browser command uses.
+    CefRefPtr<CefBrowser> target = g_browser;
+    if (command->HasKey("browser")) {
+      auto it = g_browser_slots.find(command->GetInt("browser"));
+      if (it == g_browser_slots.end() || !it->second.browser) {
+        EmitStatus("no-such-browser");
+        return;
+      }
+      target = it->second.browser;
+    }
+    CefRefPtr<CefFrame> frame = target->GetMainFrame();
     if (!frame) {
       EmitStatus("no-main-frame");
       return;
@@ -1748,6 +3840,160 @@ void HandleCommand(const std::string& line) {
       return;
     }
     EmitFrameSource(g_browser, g_browser->GetMainFrame());
+    return;
+  }
+
+  if (name == "cookies-get" || name == "cookies-set" ||
+      name == "cookies-delete") {
+    const int id = command->HasKey("id") ? command->GetInt("id") : 0;
+    CefRefPtr<CefRequestContext> context =
+        g_browser->GetHost() ? g_browser->GetHost()->GetRequestContext()
+                             : nullptr;
+    CefRefPtr<CefCookieManager> manager =
+        context ? context->GetCookieManager(nullptr) : nullptr;
+    if (!manager) {
+      EmitCookiesError(id, "no-cookie-manager");
+      return;
+    }
+
+    if (name == "cookies-get") {
+      const std::string url = command->GetString("url").ToString();
+      if (url.empty()) {
+        EmitCookiesError(id, "cookies-get-needs-url");
+        return;
+      }
+      CefRefPtr<CookieCollector> collector(new CookieCollector(id));
+      if (!manager->VisitUrlCookies(url, true, collector)) {
+        EmitCookiesError(id, "cookie-store-unavailable");
+        return;
+      }
+      PostDelayedUi([collector]() { collector->AnswerIfSilent(); }, 1500);
+      return;
+    }
+
+    if (name == "cookies-delete") {
+      const std::string url = command->GetString("url").ToString();
+      const std::string cookie_name =
+          command->HasKey("name") ? command->GetString("name").ToString()
+                                  : std::string();
+      if (url.empty() && cookie_name.empty()) {
+        EmitCookiesError(id, "cookies-delete-needs-url-or-name");
+        return;
+      }
+      if (!manager->DeleteCookies(url, cookie_name,
+                                  new CookieDeleteCallback(id))) {
+        EmitCookiesError(id, "cookie-store-unavailable");
+        return;
+      }
+      return;
+    }
+
+    CefRefPtr<CefListValue> cookies =
+        command->HasKey("cookies") && command->GetType("cookies") == VTYPE_LIST
+            ? command->GetList("cookies")
+            : nullptr;
+    if (!cookies || cookies->GetSize() == 0) {
+      EmitCookiesError(id, "cookies-set-needs-cookies");
+      return;
+    }
+    const std::string url =
+        command->HasKey("url") ? command->GetString("url").ToString()
+                               : std::string();
+    auto state = std::make_shared<CookieSetState>();
+    state->id = id;
+    state->total = static_cast<int>(cookies->GetSize());
+    for (size_t i = 0; i < cookies->GetSize(); ++i) {
+      CefCookie cookie;
+      std::string error;
+      CefRefPtr<CefDictionaryValue> entry = cookies->GetDictionary(i);
+      if (!entry || !EntryToCookie(entry, &cookie, &error)) {
+        NoteCookieSetDone(state, entry ? entry->GetString("name").ToString()
+                                       : std::string(),
+                          false);
+        continue;
+      }
+      if (!manager->SetCookie(url, cookie,
+                              new CookieSetCallback(
+                                  state, CefString(&cookie.name).ToString()))) {
+        NoteCookieSetDone(state, CefString(&cookie.name).ToString(), false);
+      }
+    }
+    return;
+  }
+
+  if (name == "history") {
+    const int id = command->HasKey("id") ? command->GetInt("id") : 0;
+    CefRefPtr<CefBrowser> target = g_browser;
+    if (command->HasKey("browser")) {
+      auto it = g_browser_slots.find(command->GetInt("browser"));
+      if (it == g_browser_slots.end() || !it->second.browser) {
+        EmitStatus("no-such-browser");
+        return;
+      }
+      target = it->second.browser;
+    }
+    CefRefPtr<HistoryVisitor> visitor(new HistoryVisitor(id));
+    target->GetHost()->GetNavigationEntries(visitor, false);
+    PostDelayedUi([visitor]() { visitor->AnswerIfSilent(); }, 1500);
+    return;
+  }
+
+  if (name == "page-text") {
+    const int id = command->HasKey("id") ? command->GetInt("id") : 0;
+    CefRefPtr<CefBrowser> target = g_browser;
+    if (command->HasKey("browser")) {
+      auto it = g_browser_slots.find(command->GetInt("browser"));
+      if (it == g_browser_slots.end() || !it->second.browser) {
+        EmitStatus("no-such-browser");
+        return;
+      }
+      target = it->second.browser;
+    }
+    CefRefPtr<CefFrame> frame = target->GetMainFrame();
+    if (!frame) {
+      EmitStatus("no-main-frame");
+      return;
+    }
+    frame->GetText(new PageTextStream(id, target->GetIdentifier()));
+    return;
+  }
+
+  if (name == "print-pdf") {
+    const int id = command->HasKey("id") ? command->GetInt("id") : 0;
+    CefRefPtr<CefBrowser> target = g_browser;
+    if (command->HasKey("browser")) {
+      auto it = g_browser_slots.find(command->GetInt("browser"));
+      if (it == g_browser_slots.end() || !it->second.browser) {
+        EmitStatus("no-such-browser");
+        return;
+      }
+      target = it->second.browser;
+    }
+
+    CefPdfPrintSettings settings;
+    settings.landscape =
+        command->HasKey("landscape") && command->GetBool("landscape");
+    settings.print_background = command->HasKey("print_background") &&
+                                command->GetBool("print_background");
+    if (command->HasKey("scale") && command->GetDouble("scale") > 0)
+      settings.scale = command->GetDouble("scale");
+    if (command->HasKey("page_ranges"))
+      CefString(&settings.page_ranges)
+          .FromString(command->GetString("page_ranges").ToString());
+
+    /* The caller names a ceiling only to be able to prove the truncation
+     * path; the channel's own 16 MiB is the default and the hard maximum. */
+    size_t max_bytes = kPdfMaxBytes;
+    if (command->HasKey("max_bytes") && command->GetInt("max_bytes") > 0)
+      max_bytes = static_cast<size_t>(
+          std::min(command->GetInt("max_bytes"), static_cast<int>(kPdfMaxBytes)));
+
+    const std::string path =
+        RuntimeBaseDir() + "/cefnest-pdf-" + std::to_string(getpid()) + "-" +
+        std::to_string(g_next_pdf_id++) + ".pdf";
+    target->GetHost()->PrintToPDF(
+        path, settings, new PdfPrintStream(id, path, max_bytes));
+    fprintf(stderr, "helper: print-pdf id=%d -> %s\n", id, path.c_str());
     return;
   }
 
@@ -1769,7 +4015,8 @@ void HandleCommand(const std::string& line) {
   // Page zoom: the host drives, the level is a CEF zoom level (0 = 100 %,
   // each +0.5 is one Chrome UI step ±). Chromium persists zoom per origin,
   // which is the browser-like behavior an embedded component wants.
-  if (name == "zoom-in" || name == "zoom-out" || name == "zoom-reset") {
+  if (name == "zoom-in" || name == "zoom-out" || name == "zoom-reset" ||
+      name == "zoom-set") {
     CefRefPtr<CefBrowserHost> host = g_browser->GetHost();
     if (!host) {
       EmitStatus("no-host");
@@ -1781,13 +4028,46 @@ void HandleCommand(const std::string& line) {
       level += 0.5;
     else if (name == "zoom-out")
       level -= 0.5;
-    else
+    else if (name == "zoom-reset")
       level = 0.0;
+    else
+      level = command->HasKey("level") ? command->GetDouble("level") : 0.0;
     host->SetZoomLevel(level);
 
     CefRefPtr<CefDictionaryValue> dict = NewEvent("zoom");
     dict->SetDouble("level", host->GetZoomLevel());
     Emit(dict);
+    return;
+  }
+
+  if (name == "auto-resize") {
+    CefRefPtr<CefBrowser> target = g_browser;
+    if (command->HasKey("browser")) {
+      auto it = g_browser_slots.find(command->GetInt("browser"));
+      if (it == g_browser_slots.end() || !it->second.browser) {
+        EmitStatus("no-such-browser");
+        return;
+      }
+      target = it->second.browser;
+    }
+    CefRefPtr<CefBrowserHost> host = target->GetHost();
+    if (!host) {
+      EmitStatus("no-host");
+      return;
+    }
+    const bool enabled =
+        command->HasKey("enabled") && command->GetBool("enabled");
+    const CefSize min_size(
+        command->HasKey("min_width") ? command->GetInt("min_width") : 0,
+        command->HasKey("min_height") ? command->GetInt("min_height") : 0);
+    const CefSize max_size(
+        command->HasKey("max_width") ? command->GetInt("max_width") : 0,
+        command->HasKey("max_height") ? command->GetInt("max_height") : 0);
+    host->SetAutoResizeEnabled(enabled, min_size, max_size);
+    fprintf(stderr,
+            "helper: auto-resize %s min=%dx%d max=%dx%d (browser %d)\n",
+            enabled ? "on" : "off", min_size.width, min_size.height,
+            max_size.width, max_size.height, target->GetIdentifier());
     return;
   }
 
@@ -1797,7 +4077,18 @@ void HandleCommand(const std::string& line) {
   }
 
   if (name == "mute") {
-    CefRefPtr<CefBrowserHost> host = g_browser->GetHost();
+    // tabs.update names the browser it wants muted; absent, the active one.
+    // Same shape the load command uses.
+    CefRefPtr<CefBrowser> target = g_browser;
+    if (command->HasKey("browser")) {
+      auto it = g_browser_slots.find(command->GetInt("browser"));
+      if (it == g_browser_slots.end() || !it->second.browser) {
+        EmitStatus("no-such-browser");
+        return;
+      }
+      target = it->second.browser;
+    }
+    CefRefPtr<CefBrowserHost> host = target ? target->GetHost() : nullptr;
     if (!host) {
       EmitStatus("no-host");
       return;
@@ -1807,8 +4098,11 @@ void HandleCommand(const std::string& line) {
     host->SetAudioMuted(mute);
     // Reported back rather than assumed: the page's sound leaves this process
     // through an unsandboxed audio service, and whether it
-    // is silenced is a fact about that service, not about this call.
+    // is silenced is a fact about that service, not about this call. The
+    // browser field names the browser actually muted — muting a background
+    // tab must not read as if the active one changed.
     CefRefPtr<CefDictionaryValue> dict = NewEvent("muted");
+    dict->SetInt("browser", target->GetIdentifier());
     dict->SetBool("muted", host->IsAudioMuted());
     Emit(dict);
     return;
@@ -1992,6 +4286,289 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
+  if (name == "js-dialog-respond") {
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    auto it = g_js_dialogs.find(id);
+    if (it == g_js_dialogs.end()) {
+      /* The browser navigated or closed under the host's panel. Nothing left to
+       * continue, and saying so is the whole reply. */
+      EmitStatus("no-js-dialog");
+      return;
+    }
+
+    JsDialog entry = std::move(it->second);
+    g_js_dialogs.erase(it);
+    auto by_browser = g_js_dialog_by_browser.find(entry.browser_id);
+    if (by_browser != g_js_dialog_by_browser.end() && by_browser->second == id)
+      g_js_dialog_by_browser.erase(by_browser);
+
+    const bool ok = command->HasKey("ok") && command->GetBool("ok");
+    const std::string value =
+        command->HasKey("value") ? command->GetString("value").ToString()
+                                 : std::string();
+    if (entry.callback)
+      entry.callback->Continue(ok, value);
+    fprintf(stderr, "helper: js-dialog %u answered ok=%d value_bytes=%zu\n", id,
+            ok ? 1 : 0, value.size());
+    return;
+  }
+
+  if (name == "cdp-enable") {
+    CefRefPtr<CefBrowser> target = g_browser;
+    if (command->HasKey("browser")) {
+      auto it = g_browser_slots.find(command->GetInt("browser"));
+      if (it == g_browser_slots.end() || !it->second.browser) {
+        EmitStatus("no-such-browser");
+        return;
+      }
+      target = it->second.browser;
+    }
+    if (!target || !target->GetHost()) {
+      EmitStatus("no-browser");
+      return;
+    }
+    const int id = target->GetIdentifier();
+    if (!g_cdp_registrations.count(id)) {
+      g_cdp_registrations[id] =
+          target->GetHost()->AddDevToolsMessageObserver(g_cdp_observer);
+      fprintf(stderr, "helper: cdp-enable browser=%d\n", id);
+    }
+    return;
+  }
+
+  if (name == "cdp-disable") {
+    CefRefPtr<CefBrowser> target = g_browser;
+    if (command->HasKey("browser")) {
+      auto it = g_browser_slots.find(command->GetInt("browser"));
+      if (it == g_browser_slots.end() || !it->second.browser) {
+        EmitStatus("no-such-browser");
+        return;
+      }
+      target = it->second.browser;
+    }
+    if (target) {
+      const int id = target->GetIdentifier();
+      // Destroying the registration is the unregister; answers still owed
+      // by this browser's backend simply never match a pending entry again.
+      g_cdp_registrations.erase(id);
+      fprintf(stderr, "helper: cdp-disable browser=%d\n", id);
+    }
+    return;
+  }
+
+  if (name == "cdp-execute") {
+    CefRefPtr<CefBrowser> target = g_browser;
+    if (command->HasKey("browser")) {
+      auto it = g_browser_slots.find(command->GetInt("browser"));
+      if (it == g_browser_slots.end() || !it->second.browser) {
+        EmitStatus("no-such-browser");
+        return;
+      }
+      target = it->second.browser;
+    }
+    if (!target || !target->GetHost()) {
+      EmitStatus("no-browser");
+      return;
+    }
+    if (!g_cdp_registrations.count(target->GetIdentifier())) {
+      // The switch is the observer: without it a host could talk the whole
+      // protocol by accident. Enabling is one explicit command.
+      EmitStatus("cdp-not-enabled");
+      return;
+    }
+    const std::string method = command->GetString("method").ToString();
+    if (method.empty()) {
+      EmitStatus("cdp-needs-method");
+      return;
+    }
+    CefRefPtr<CefDictionaryValue> params;
+    if (command->HasKey("params")) {
+      if (command->GetType("params") == VTYPE_STRING) {
+        CefString parse_error;
+        CefRefPtr<CefValue> parsed = CefParseJSONAndReturnError(
+            command->GetString("params"), JSON_PARSER_RFC, parse_error);
+        if (!parsed || parsed->GetType() != VTYPE_DICTIONARY) {
+          EmitStatus("cdp-params-unreadable");
+          return;
+        }
+        params = parsed->GetDictionary();
+      } else if (command->GetType("params") == VTYPE_DICTIONARY) {
+        params = command->GetDictionary("params");
+      }
+    }
+    const int host_id = command->HasKey("id") ? command->GetInt("id") : 0;
+    const int message_id =
+        target->GetHost()->ExecuteDevToolsMethod(0, method, params);
+    if (message_id == 0) {
+      EmitStatus("cdp-submit-failed");
+      return;
+    }
+    g_cdp_pending[message_id] = host_id;
+    fprintf(stderr, "helper: cdp-execute %s host_id=%d message_id=%d\n",
+            method.c_str(), host_id, message_id);
+    return;
+  }
+
+  if (name == "certificate-respond") {
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    auto it = g_cert_dialogs.find(id);
+    if (it == g_cert_dialogs.end()) {
+      EmitStatus("no-certificate-error");
+      return;
+    }
+
+    CertDialog entry = std::move(it->second);
+    g_cert_dialogs.erase(it);
+    const bool allow = command->HasKey("allow") && command->GetBool("allow");
+    if (entry.callback) {
+      // Continue() is the allow answer, Cancel() the deny: this CEF shape
+      // carries the decision in which method runs, not in an argument.
+      if (allow)
+        entry.callback->Continue();
+      else
+        entry.callback->Cancel();
+    }
+    fprintf(stderr, "helper: certificate-error %u answered allow=%d\n", id,
+            allow ? 1 : 0);
+    return;
+  }
+
+  if (name == "certificate-authorize") {
+    /* The host's policy store in one line: this fingerprint may continue for
+     * as long as this helper lives. Nothing here outlives the process. */
+    const std::string fingerprint = command->GetString("fingerprint").ToString();
+    if (fingerprint.empty()) {
+      EmitStatus("certificate-authorize-needs-fingerprint");
+      return;
+    }
+    g_cert_authorized.insert(fingerprint);
+    fprintf(stderr, "helper: certificate-authorize %s\n", fingerprint.c_str());
+    return;
+  }
+
+  if (name == "intercept-add") {
+    std::lock_guard<std::mutex> intercept_lock(g_intercept_mutex);
+    // One rule replaces whatever the same id held: the host's list is the
+    // whole truth per id, the way plugins-load is per plugin.
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    InterceptRule rule;
+    rule.id = id;
+    if (command->GetType("patterns") == VTYPE_LIST) {
+      CefRefPtr<CefListValue> patterns = command->GetList("patterns");
+      for (size_t i = 0; i < patterns->GetSize(); ++i)
+        rule.patterns.push_back(
+            MatchPattern::Parse(patterns->GetString(i).ToString()));
+    }
+    if (command->GetType("resource_types") == VTYPE_LIST) {
+      CefRefPtr<CefListValue> types = command->GetList("resource_types");
+      for (size_t i = 0; i < types->GetSize(); ++i)
+        rule.resource_types.insert(types->GetString(i).ToString());
+    }
+    if (rule.patterns.empty()) {
+      EmitStatus("intercept-add-needs-patterns");
+      return;
+    }
+    g_intercept_rules.erase(
+        std::remove_if(g_intercept_rules.begin(), g_intercept_rules.end(),
+                       [id](const InterceptRule& existing) {
+                         return existing.id == id;
+                       }),
+        g_intercept_rules.end());
+    g_intercept_rules.push_back(std::move(rule));
+    fprintf(stderr, "helper: intercept-add %u rules=%zu\n", id,
+            g_intercept_rules.size());
+    return;
+  }
+
+  if (name == "intercept-remove") {
+    std::lock_guard<std::mutex> intercept_lock(g_intercept_mutex);
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    g_intercept_rules.erase(
+        std::remove_if(g_intercept_rules.begin(), g_intercept_rules.end(),
+                       [id](const InterceptRule& existing) {
+                         return existing.id == id;
+                       }),
+        g_intercept_rules.end());
+    fprintf(stderr, "helper: intercept-remove %u rules=%zu\n", id,
+            g_intercept_rules.size());
+    return;
+  }
+
+  if (name == "intercept-mode") {
+    std::lock_guard<std::mutex> intercept_lock(g_intercept_mutex);
+    g_intercept_passive =
+        command->HasKey("passive") && command->GetBool("passive");
+    fprintf(stderr, "helper: intercept-mode %s\n",
+            g_intercept_passive ? "passive" : "blocking");
+    return;
+  }
+
+  if (name == "request-respond") {
+    std::lock_guard<std::mutex> intercept_lock(g_intercept_mutex);
+    const uint32_t request_id =
+        static_cast<uint32_t>(command->GetInt("request_id"));
+    auto it = g_intercept_pending.find(request_id);
+    if (it == g_intercept_pending.end()) {
+      EmitStatus("no-such-request");
+      return;
+    }
+
+    InterceptPending entry = std::move(it->second);
+    g_intercept_pending.erase(it);
+    const std::string action = command->HasKey("action")
+                                   ? command->GetString("action").ToString()
+                                   : "allow";
+    if (action == "cancel") {
+      if (entry.callback)
+        entry.callback->Cancel();
+    } else if (action == "redirect") {
+      if (command->HasKey("url"))
+        entry.request->SetURL(command->GetString("url"));
+      if (entry.callback)
+        entry.callback->Continue();
+    } else {
+      if (entry.callback)
+        entry.callback->Continue();
+    }
+    fprintf(stderr, "helper: request-intercept %u answered %s\n", request_id,
+            action.c_str());
+    return;
+  }
+
+  if (name == "file-dialog-respond") {
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    auto it = g_file_dialogs.find(id);
+    if (it == g_file_dialogs.end()) {
+      EmitStatus("no-file-dialog");
+      return;
+    }
+
+    FileDialog entry = std::move(it->second);
+    g_file_dialogs.erase(it);
+
+    std::vector<CefString> paths;
+    if (command->HasKey("paths") &&
+        command->GetType("paths") == VTYPE_LIST) {
+      CefRefPtr<CefListValue> list = command->GetList("paths");
+      for (size_t i = 0; i < list->GetSize(); ++i) {
+        if (list->GetType(i) == VTYPE_STRING)
+          paths.push_back(list->GetString(i));
+      }
+    }
+
+    /* An empty selection is the cancel answer, which is the one CEF's own
+     * documentation gives it. */
+    if (entry.callback) {
+      if (paths.empty())
+        entry.callback->Cancel();
+      else
+        entry.callback->Continue(paths);
+    }
+    fprintf(stderr, "helper: file-dialog %u answered %zu path(s)\n", id,
+            paths.size());
+    return;
+  }
+
   if (name == "a11y") {
     const bool enabled = command->HasKey("enabled") && command->GetBool("enabled");
     if (g_browser && g_browser->GetHost()) {
@@ -2017,7 +4594,16 @@ void HandleCommand(const std::string& line) {
       EmitStatus("js-needs-code");
       return;
     }
-    CefRefPtr<CefFrame> frame = g_browser->GetMainFrame();
+    CefRefPtr<CefBrowser> target = g_browser;
+    if (command->HasKey("browser")) {
+      auto it = g_browser_slots.find(command->GetInt("browser"));
+      if (it == g_browser_slots.end() || !it->second.browser) {
+        EmitStatus("no-such-browser");
+        return;
+      }
+      target = it->second.browser;
+    }
+    CefRefPtr<CefFrame> frame = target->GetMainFrame();
     if (!frame) {
       EmitStatus("no-main-frame");
       return;
@@ -2130,8 +4716,265 @@ class PrimarySelectionHandler : public CefV8Handler {
   IMPLEMENT_REFCOUNTING(PrimarySelectionHandler);
 };
 
+int64_t NowUs() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+// ---------------------------------------------------------------- render --
+// The renderer's copy of the plugin table. One renderer process, one main
+// thread: the table arrives on it, contexts are created on it, and nothing
+// here is touched from anywhere else.
+struct RendererScript {
+  std::vector<MatchPattern> matches;
+  std::vector<std::string> js;  // file paths; the text is fetched on demand
+  std::string run_at;
+};
+struct RendererPlugin {
+  std::string id;
+  std::vector<RendererScript> scripts;
+};
+std::vector<RendererPlugin> g_renderer_plugins;
+bool g_table_requested = false;  // per renderer process
+
+void LoadRendererTable(const std::string& json) {
+  g_renderer_plugins.clear();
+  g_table_requested = true;  // whatever asked is answered
+  CefString parse_error;
+  CefRefPtr<CefValue> value =
+      CefParseJSONAndReturnError(json, JSON_PARSER_RFC, parse_error);
+  if (!value || value->GetType() != VTYPE_DICTIONARY) {
+    fprintf(stderr, "helper: plugin table unreadable: %s\n",
+            parse_error.ToString().c_str());
+    return;
+  }
+  CefRefPtr<CefListValue> plugins =
+      value->GetDictionary()->GetList("plugins");
+  for (size_t i = 0; i < plugins->GetSize(); ++i) {
+    CefRefPtr<CefDictionaryValue> plugin = plugins->GetDictionary(i);
+    if (!plugin)
+      continue;
+    RendererPlugin parsed;
+    parsed.id = plugin->GetString("id").ToString();
+    CefRefPtr<CefListValue> scripts = plugin->GetList("scripts");
+    for (size_t j = 0; j < scripts->GetSize(); ++j) {
+      CefRefPtr<CefDictionaryValue> script = scripts->GetDictionary(j);
+      if (!script)
+        continue;
+      RendererScript one;
+      CefRefPtr<CefListValue> matches = script->GetList("matches");
+      for (size_t k = 0; k < matches->GetSize(); ++k) {
+        MatchPattern pattern =
+            MatchPattern::Parse(matches->GetString(k).ToString());
+        if (pattern.Usable())
+          one.matches.push_back(pattern);
+      }
+      CefRefPtr<CefListValue> files = script->GetList("js");
+      for (size_t k = 0; k < files->GetSize(); ++k)
+        one.js.push_back(files->GetString(k).ToString());
+      one.run_at = script->GetString("run_at").ToString();
+      if (!one.js.empty())
+        parsed.scripts.push_back(one);
+    }
+    g_renderer_plugins.push_back(parsed);
+  }
+}
+
+// The shim, one instance per plugin. The id rides in the text: it is what
+// chrome.runtime.id answers and what every bridge call carries back.
+std::string MakePluginShim(const std::string& id) {
+  std::string text = kPluginShimScript;
+  const std::string marker = "__ID__";
+  const std::string::size_type at = text.find(marker);
+  if (at != std::string::npos)
+    text.replace(at, marker.size(), id);
+  return text;
+}
+
+// The bridge: one host function on the global, taking one JSON text. What is
+// inside — which plugin asks, what for — is the shim's business; this side
+// only carries it to the browser process, which re-checks the size before
+// the host ever sees it.
+class PluginBridgeHandler : public CefV8Handler {
+ public:
+  bool Execute(const CefString& name, CefRefPtr<CefV8Value> object,
+               const CefV8ValueList& arguments, CefRefPtr<CefV8Value>& retval,
+               CefString& exception) override {
+    if (arguments.size() < 1 || !arguments[0]->IsString()) {
+      exception = "__cefnestPlugin takes one JSON string";
+      return false;
+    }
+    // One handler serves every context that installed the bridge, so the
+    // message leaves through whichever frame is executing right now — the
+    // handler runs inside the caller's context.
+    CefRefPtr<CefV8Context> context = CefV8Context::GetCurrentContext();
+    if (!context || !context->GetFrame()) {
+      exception = "__cefnestPlugin has no frame to send from";
+      return false;
+    }
+    CefRefPtr<CefProcessMessage> message =
+        CefProcessMessage::Create(kPluginMessageProcess);
+    message->GetArgumentList()->SetString(0, arguments[0]->GetStringValue());
+    context->GetFrame()->SendProcessMessage(PID_BROWSER, message);
+    retval = CefV8Value::CreateBool(true);
+    return true;
+  }
+
+  IMPLEMENT_REFCOUNTING(PluginBridgeHandler);
+};
+
+CefRefPtr<PluginBridgeHandler> g_plugin_bridge{new PluginBridgeHandler};
+
+// What this context gets, and why: an extension page of a plugin gets the
+// shim (chrome.* exists there the way Chrome puts it in extension contexts);
+// a page one of a plugin's content scripts matches gets the shim plus that
+// plugin's document_start scripts. A page nothing matches gets nothing — no
+// bridge, no chrome global, no machinery a page could poke at. The timing is
+// the P0-measured one: everything here lands before the page's first inline
+// script, because OnContextCreated runs before any of it.
+void InjectPlugins(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                   CefRefPtr<CefV8Context> context) {
+  if (g_renderer_plugins.empty()) {
+    // The backstop: a renderer this side never pushed to asks for the table
+    // itself. The answer cannot land in time for THIS context's
+    // document_start — it arms the process for every page after — and it is
+    // the reason a table too big for the command line degrades rather than
+    // disappears.
+    if (!g_table_requested && browser) {
+      g_table_requested = true;
+      CefRefPtr<CefProcessMessage> request =
+          CefProcessMessage::Create(kPluginsRequestProcess);
+      browser->GetMainFrame()->SendProcessMessage(PID_BROWSER, request);
+    }
+    return;
+  }
+  const int64_t start = NowUs();
+  const std::string url = frame->GetURL().ToString();
+  const bool extension_page = url.rfind(kExtensionSchemePrefix, 0) == 0;
+  std::string page_plugin_id;
+  if (extension_page) {
+    std::string rest = url.substr(sizeof(kExtensionSchemePrefix) - 1);
+    const std::string::size_type slash = rest.find('/');
+    page_plugin_id = slash == std::string::npos ? rest : rest.substr(0, slash);
+  }
+
+  context->GetGlobal()->SetValue(
+      kPluginBridgeFunction,
+      CefV8Value::CreateFunction(kPluginBridgeFunction, g_plugin_bridge),
+      static_cast<cef_v8_propertyattribute_t>(
+          V8_PROPERTY_ATTRIBUTE_READONLY | V8_PROPERTY_ATTRIBUTE_DONTENUM |
+          V8_PROPERTY_ATTRIBUTE_DONTDELETE));
+  int count = 0;
+  for (const auto& plugin : g_renderer_plugins) {
+    std::vector<const RendererScript*> hits;
+    if (!extension_page) {
+      for (const auto& script : plugin.scripts) {
+        bool hit = false;
+        for (const auto& pattern : script.matches)
+          if (pattern.Matches(url)) { hit = true; break; }
+        if (hit)
+          hits.push_back(&script);
+      }
+      if (hits.empty())
+        continue;
+    }
+    {
+      // Eval, not ExecuteJavaScript: the queued form races the page's own
+      // parser and can lose. Eval runs the text synchronously inside the
+      // context OnContextCreated just handed us — the same timing the
+      // P0-measured bridge installs used. An exception in a plugin's script
+      // is that plugin's problem, not the page's — logged, never thrown on.
+      CefRefPtr<CefV8Value> retval;
+      CefRefPtr<CefV8Exception> exception;
+      if (!context->Eval(MakePluginShim(plugin.id), "cefnest-plugin-shim", 0,
+                         retval, exception)) {
+        fprintf(stderr, "helper: plugin shim failed: %s\n",
+                exception ? exception->GetMessage().ToString().c_str()
+                          : "unknown");
+      }
+      count++;
+    }
+    if (extension_page)
+      continue;
+    for (const RendererScript* script : hits) {
+      if (script->run_at != "document_start")
+        continue;  // document_idle and document_end ride OnLoadEnd
+      for (const auto& path : script->js) {
+        // The script's bytes come from the scheme handler, synchronously:
+        // the renderer's sandbox cannot read the disk, the table that
+        // reaches this process stays path-sized (a 50 KiB switch once
+        // SIGTRAP'd the zygote's fork — measured), and a fetch from the
+        // context being created is the one shape that keeps document_start
+        // honest at any script size. The scheme's CORS flags and the
+        // factory's Access-Control-Allow-Origin are what make this reachable
+        // from a page origin (P0 metric 1).
+        const std::string url = std::string(kExtensionSchemePrefix) +
+                                plugin.id + "/" + path;
+        CefRefPtr<CefV8Value> fetched;
+        {
+          const std::string loader =
+              std::string("(function(){var x=new XMLHttpRequest();") +
+              "x.open(\"GET\",\""
+                  "cefnest-extension://" + plugin.id + "/" + path +
+              "\",false);x.send();return x.responseText;})()";
+          CefRefPtr<CefV8Exception> exception;
+          if (!context->Eval(loader, "cefnest-plugin-fetch", 0, fetched,
+                             exception)) {
+            fprintf(stderr,
+                    "helper: cs fetch failed (%s): %s\n", plugin.id.c_str(),
+                    exception ? exception->GetMessage().ToString().c_str()
+                              : "unknown");
+            continue;
+          }
+        }
+        if (!fetched || !fetched->IsString() ||
+            fetched->GetStringValue().empty()) {
+          fprintf(stderr, "helper: cs fetch empty (%s): %s\n",
+                  plugin.id.c_str(), url.c_str());
+          continue;
+        }
+        CefRefPtr<CefV8Value> script_retval;
+        CefRefPtr<CefV8Exception> exception;
+        if (!context->Eval(fetched->GetStringValue(), url, 0, script_retval,
+                           exception))
+          fprintf(stderr, "helper: cs eval failed (%s): %s\n",
+                  plugin.id.c_str(),
+                  exception ? exception->GetMessage().ToString().c_str()
+                            : "unknown");
+        count++;
+      }
+    }
+  }
+  if (count > 0)
+    fprintf(stderr,
+            "helper: cs inject browser=%d frame=%s scripts=%d us=%lld\n",
+            browser ? browser->GetIdentifier() : 0,
+            frame->GetIdentifier().ToString().c_str(), count,
+            static_cast<long long>(NowUs() - start));
+}
+
 class HelperRenderProcessHandler : public CefRenderProcessHandler {
  public:
+  void OnWebKitInitialized() override {
+    /* A zygote-forked renderer never re-runs main() or the command-line
+       hooks — but its fork command line does carry what the browser
+       attached at OnBeforeChildProcessLaunch, and WebKit initializes here,
+       per process, before any page context exists. This is where
+       document_start is won or lost. */
+    CefRefPtr<CefCommandLine> command_line =
+        CefCommandLine::GetGlobalCommandLine();
+    if (command_line->HasSwitch(kPluginsTableSwitch)) {
+      CefRefPtr<CefBinaryValue> decoded =
+          CefBase64Decode(command_line->GetSwitchValue(kPluginsTableSwitch));
+      if (decoded) {
+        std::vector<char> bytes(decoded->GetSize());
+        decoded->GetData(bytes.data(), bytes.size(), 0);
+        LoadRendererTable(std::string(bytes.data(), bytes.size()));
+      }
+    }
+  }
+
   void OnContextCreated(CefRefPtr<CefBrowser> browser,
                         CefRefPtr<CefFrame> frame,
                         CefRefPtr<CefV8Context> context) override {
@@ -2158,6 +5001,43 @@ class HelperRenderProcessHandler : public CefRenderProcessHandler {
         static_cast<cef_v8_propertyattribute_t>(
             V8_PROPERTY_ATTRIBUTE_READONLY | V8_PROPERTY_ATTRIBUTE_DONTENUM |
             V8_PROPERTY_ATTRIBUTE_DONTDELETE));
+
+    InjectPlugins(browser, frame, context);
+  }
+
+  bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefFrame> frame,
+                                CefProcessId source_process,
+                                CefRefPtr<CefProcessMessage> message) override {
+    if (source_process == PID_BROWSER &&
+        message->GetName() == kPluginsTableProcess) {
+      LoadRendererTable(message->GetArgumentList()->GetString(0).ToString());
+      return true;
+    }
+
+    if (source_process == PID_BROWSER &&
+        message->GetName() == kPluginResponseProcess) {
+      // The host answered one call. Delivered to the main frame: the shim
+      // holding the reply id is usually there. A shim inside a subframe
+      // waits forever for its reply — CEF 156 has no GetFrame(id) to reach
+      // one, and docs/plugins.md records that as the known limit it is.
+      const auto& args = message->GetArgumentList();
+      CefRefPtr<CefValue> value = CefValue::Create();
+      value->SetString(args->GetString(2));
+      const std::string js =
+          std::string("window.__cefnestDeliver&&__cefnestDeliver(") +
+          std::to_string(args->GetInt(0)) + "," +
+          (args->GetBool(1) ? "true" : "false") + "," +
+          CefWriteJSON(value, JSON_WRITER_DEFAULT).ToString() + ");";
+      browser->GetMainFrame()->ExecuteJavaScript(js, "cefnest-plugin", 0);
+      return true;
+    }
+
+    if (source_process == PID_BROWSER &&
+        message->GetName() == kPluginsRequestProcess)
+      return false;  // never sent renderer-ward; nothing to do
+
+    return false;
   }
 
  private:
@@ -2168,12 +5048,61 @@ class HelperRenderProcessHandler : public CefRenderProcessHandler {
   IMPLEMENT_REFCOUNTING(HelperRenderProcessHandler);
 };
 
-class HelperApp : public CefApp {
+class HelperApp : public CefApp,
+                  public CefBrowserProcessHandler {
  public:
   CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override {
     return render_handler_;
   }
 
+  CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override {
+    return this;
+  }
+
+  /* Runs in every process — browser, renderer, everything CefExecuteProcess
+   * hands back a code for — and the registration set has to match across
+   * them, which is CEF's own hard rule: a renderer that registers a
+   * different set than the browser process shows the failure as "scripts
+   * inject fine but every extension resource 404s". The option set is the
+   * one the plugin plan measured (docs/plans/plugin-plan-2026-10-25.md §〇):
+   * XHR needs CORS_ENABLED or the request never reaches the handler at all,
+   * fetch() needs FETCH_ENABLED or it throws before that, and
+   * STANDARD|SECURE is what gives extension pages a normal origin.
+   * CSP_BYPASSING is deliberately absent — reaching its own resources is
+   * reachability, not a licence to ignore a page's CSP. */
+  void OnRegisterCustomSchemes(
+      CefRawPtr<CefSchemeRegistrar> registrar) override {
+    const int options = CEF_SCHEME_OPTION_STANDARD | CEF_SCHEME_OPTION_SECURE |
+                        CEF_SCHEME_OPTION_CORS_ENABLED |
+                        CEF_SCHEME_OPTION_FETCH_ENABLED;
+    if (!registrar->AddCustomScheme(kExtensionScheme, options))
+      fprintf(stderr, "helper: extension scheme registration failed\n");
+  }
+
+  /* Browser side, at child spawn: every renderer starts knowing the table.
+   * The gpu and utility children get nothing — the switch is only for
+   * renderers, and zygote-forked renderers carry it the same way their other
+   * switches travel. */
+  void OnBeforeChildProcessLaunch(
+      CefRefPtr<CefCommandLine> command_line) override {
+    if (command_line->GetSwitchValue("type").ToString() != "renderer")
+      return;
+    CefRefPtr<CefValue> table = BuildRendererTable();
+    const std::string json =
+        CefWriteJSON(table, JSON_WRITER_DEFAULT).ToString();
+    const CefString encoded = CefBase64Encode(json.data(), json.size());
+    if (encoded.ToString().size() > kPluginsTableSwitchMax) {
+      fprintf(stderr,
+              "helper: plugin table of %zu bytes too big for the renderer "
+              "command line; new renderers ride the first-context request\n",
+              json.size());
+      return;
+    }
+    command_line->AppendSwitchWithValue(kPluginsTableSwitch, encoded);
+  }
+
+  /* Renderer side, at process start — before any context exists, which is
+   * exactly what document_start needs. */
   void OnBeforeCommandLineProcessing(
       const CefString& process_type,
       CefRefPtr<CefCommandLine> command_line) override {
@@ -2205,6 +5134,20 @@ class HelperApp : public CefApp {
       fprintf(stderr, "helper: --disable-gpu\n");
     }
 
+    // CEF has no runtime proxy API: the switch has to be in place before
+    // CefInitialize, and this callback is the one hook with the command line
+    // in hand. The host unsets both variables when it has no proxy to name.
+    const std::string proxy = EnvOrEmpty("CHROMIUM_HELPER_PROXY");
+    if (!proxy.empty()) {
+      command_line->AppendSwitchWithValue("proxy-server", proxy);
+      fprintf(stderr, "helper: --proxy-server=%s\n", proxy.c_str());
+    }
+    const std::string proxy_bypass = EnvOrEmpty("CHROMIUM_HELPER_PROXY_BYPASS");
+    if (!proxy_bypass.empty()) {
+      command_line->AppendSwitchWithValue("proxy-bypass-list", proxy_bypass);
+      fprintf(stderr, "helper: --proxy-bypass-list=%s\n", proxy_bypass.c_str());
+    }
+
     if (EnvOrEmpty("CHROMIUM_SPELLCHECK") != "1") {
       command_line->AppendSwitch("disable-spell-checking");
       fprintf(stderr, "helper: spellcheck disabled (CHROMIUM_SPELLCHECK=1 enables)\n");
@@ -2217,6 +5160,30 @@ class HelperApp : public CefApp {
 
   IMPLEMENT_REFCOUNTING(HelperApp);
 };
+
+// document_idle and document_end content scripts run from here: the load has
+// committed, the DOM is there, and the browser process is the side that knows
+// OnLoadEnd. Extension pages get nothing — a plugin does not inject into its
+// own pages.
+void InjectIdleScripts(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame) {
+  const std::string url = frame->GetURL().ToString();
+  if (url.rfind(kExtensionSchemePrefix, 0) == 0)
+    return;
+  std::lock_guard<std::mutex> lock(g_plugin_mutex);
+  for (const auto& entry : g_plugin_table) {
+    for (const auto& script : entry.second.scripts) {
+      if (script.run_at == "document_start")
+        continue;  // rode OnContextCreated in the renderer
+      bool hit = false;
+      for (const auto& pattern : script.matches)
+        if (pattern.Matches(url)) { hit = true; break; }
+      if (!hit)
+        continue;
+      for (const auto& text : script.js_text)
+        frame->ExecuteJavaScript(text, entry.first.c_str(), 0);
+    }
+  }
+}
 
 class HelperClient : public CefClient,
                      public CefLifeSpanHandler,
@@ -2245,6 +5212,15 @@ class HelperClient : public CefClient,
   }
   CefRefPtr<CefPermissionHandler> GetPermissionHandler() override {
     return permission_handler_;
+  }
+  CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override {
+    return jsdialog_handler_;
+  }
+  CefRefPtr<CefDialogHandler> GetDialogHandler() override {
+    return dialog_handler_;
+  }
+  CefRefPtr<CefPrintHandler> GetPrintHandler() override {
+    return print_handler_;
   }
 
   void OnGotFocus(CefRefPtr<CefBrowser> browser) override {
@@ -2296,6 +5272,49 @@ class HelperClient : public CefClient,
         return true;
       }
 
+    if (source_process == PID_RENDERER &&
+        message->GetName() == kPluginsRequestProcess) {
+      // The safety net: this renderer's first context just arrived and it
+      // wants the table in case the push raced its channel. Answer with the
+      // whole table — the same bytes a change would push.
+      if (frame)
+        PushPluginsTableToBrowserFrame(browser, frame);
+      return true;
+    }
+
+    if (source_process == PID_RENDERER &&
+        message->GetName() == kPluginMessageProcess) {
+      const std::string payload =
+          message->GetArgumentList()->GetString(0).ToString();
+      if (payload.size() > kPluginPayloadMaxBytes) {
+        fprintf(stderr,
+                "helper: plugin message of %zu bytes refused (payload ceiling)\n",
+                payload.size());
+        return true;
+      }
+      CefString parse_error;
+      CefRefPtr<CefValue> parsed =
+          CefParseJSONAndReturnError(payload, JSON_PARSER_RFC, parse_error);
+      if (!parsed || parsed->GetType() != VTYPE_DICTIONARY) {
+        fprintf(stderr, "helper: plugin message not an object: %s\n",
+                parse_error.ToString().c_str());
+        return true;
+      }
+      CefRefPtr<CefDictionaryValue> call = parsed->GetDictionary();
+      CefRefPtr<CefDictionaryValue> dict = NewEvent("plugin-message");
+      if (browser)
+        dict->SetInt("browser", browser->GetIdentifier());
+      dict->SetInt("reply_id", call->GetInt("reply"));
+      dict->SetString("id", call->GetString("id"));
+      dict->SetString("api", call->GetString("api"));
+      CefRefPtr<CefValue> args =
+          call->HasKey("args") ? call->GetValue("args") : nullptr;
+      dict->SetString("args", args ? CefWriteJSON(args, JSON_WRITER_DEFAULT).ToString()
+                                   : "null");
+      Emit(dict);
+      return true;
+    }
+
     if (source_process != PID_RENDERER || message->GetName() != kJsResultMessage)
       return false;
 
@@ -2341,8 +5360,10 @@ class HelperClient : public CefClient,
      * the entry is re-keyed: after the re-key, `slot->slot` is a CEF browser
      * id, and the two counters only stay equal until the first creation
      * failure. Reading it afterwards leaves every later browser unselected.
-     * A DevTools browser is never what a host asked to select. */
-    bool select_this = slot && !slot->devtools && slot->slot == g_select_slot;
+     * A DevTools browser is never what a host asked to select, and neither is
+     * a background page. */
+    bool select_this = slot && !slot->devtools && !slot->background &&
+                       slot->slot == g_select_slot;
     if (slot) {
       /* The map starts under the request slot so commands can find the view
        * before CEF has finished creating the browser. Copy before erasing:
@@ -2373,7 +5394,16 @@ class HelperClient : public CefClient,
                                   : browser->GetMainFrame()->GetURL().ToString());
     created->SetBool("windowed", slot ? slot->windowed : false);
     created->SetBool("devtools", slot ? slot->devtools : false);
+    created->SetBool("background", slot ? slot->background : false);
     Emit(created);
+
+    if (slot && slot->background && browser->GetHost()) {
+      /* Chromium's own hidden-page bit: timers and network keep running,
+       * rendering settles to the hidden-tab schedule. This is the "existing
+       * mechanism, no new one" shape the plan asked the background page to
+       * take on this side. */
+      browser->GetHost()->WasHidden(true);
+    }
 
     /* The first browser still carries the original ready handshake; later
      * browser-created events are enough for a host that already knows the
@@ -2396,6 +5426,11 @@ class HelperClient : public CefClient,
         browser->GetHost()->SetAccessibilityState(STATE_ENABLED);
         fprintf(stderr, "helper: browser accessibility = enabled\n");
       }
+
+    // The new renderer gets the table now, before its first navigation can
+    // commit: OnContextCreated may fire in a renderer this push has not
+    // reached, which is what the renderer's own request is the net for.
+    PushPluginsTable(browser);
 
     if (g_auto_quit_ms > 0) {
       fprintf(stderr, "helper: auto-quit in %ld ms\n", g_auto_quit_ms);
@@ -2447,10 +5482,140 @@ class HelperClient : public CefClient,
     return true;
   }
 
+  /* The default answer is "no", Chrome's own: a certificate the platform does
+   * not trust is the user's call, and nobody's automation. The host hears one
+   * parked event per error — browser, id, the net-error name, the URL, and
+   * the leaf's SHA-256 fingerprint — and answers with certificate-respond.
+   * A fingerprint the host has authorized (certificate-authorize) continues
+   * without asking, for this helper's lifetime only. */
+  bool OnCertificateError(CefRefPtr<CefBrowser> browser,
+                          ErrorCode cert_error,
+                          const CefString& request_url,
+                          CefRefPtr<CefSSLInfo> ssl_info,
+                          CefRefPtr<CefCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+
+    if (!callback)
+      return false;
+
+    std::string fingerprint;
+    std::string subject;
+    std::string issuer;
+    if (ssl_info && ssl_info->GetX509Certificate()) {
+      CefRefPtr<CefX509Certificate> cert = ssl_info->GetX509Certificate();
+      CefRefPtr<CefBinaryValue> der = cert->GetDEREncoded();
+      if (der) {
+        const size_t size = der->GetSize();
+        std::vector<unsigned char> bytes(size);
+        if (size > 0 && der->GetData(bytes.data(), size, 0) == size) {
+          Sha256 hash;
+          hash.Update(bytes.data(), bytes.size());
+          fingerprint = hash.Hex();
+        }
+      }
+      if (cert->GetSubject())
+        subject = cert->GetSubject()->GetDisplayName().ToString();
+      if (cert->GetIssuer())
+        issuer = cert->GetIssuer()->GetDisplayName().ToString();
+    }
+
+    if (!fingerprint.empty() && g_cert_authorized.count(fingerprint)) {
+      fprintf(stderr,
+              "helper: certificate-error %s authorized (%s) for %s\n",
+              fingerprint.c_str(), CertErrorName(cert_error),
+              request_url.ToString().c_str());
+      callback->Continue();
+      return true;
+    }
+
+    const uint32_t id = ++g_dialog_seq;
+    CertDialog& entry = g_cert_dialogs[id];
+    entry.browser_id = browser ? browser->GetIdentifier() : 0;
+    entry.callback = callback;
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("certificate-error");
+    if (entry.browser_id)
+      dict->SetInt("browser", entry.browser_id);
+    dict->SetInt("id", static_cast<int>(id));
+    dict->SetString("error", CertErrorName(cert_error));
+    dict->SetString("url", request_url.ToString());
+    dict->SetString("subject", subject);
+    dict->SetString("issuer", issuer);
+    dict->SetString("fingerprint", fingerprint);
+    Emit(dict);
+
+    fprintf(stderr,
+            "helper: certificate-error %u %s browser=%d url=%s subject=%s "
+            "fingerprint=%s\n",
+            id, CertErrorName(cert_error), entry.browser_id,
+            request_url.ToString().c_str(), subject.c_str(),
+            fingerprint.c_str());
+    return true;
+  }
+
+  /* No rule registered is the zero-cost answer: no handler object, no
+   * callback, the request flows as if the feature did not exist. A match
+   * creates one RequestGate for exactly this request. */
+  CefRefPtr<CefResourceRequestHandler> GetResourceRequestHandler(
+      CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+      CefRefPtr<CefRequest> request, bool is_navigation, bool is_download,
+      const CefString& request_initiator,
+      bool& disable_default_handling) override {
+    const std::string url = request->GetURL().ToString();
+    const std::string type = ResourceTypeText(request->GetResourceType());
+    std::lock_guard<std::mutex> lock(g_intercept_mutex);
+    fprintf(stderr, "helper: get-resource-handler url=%s type=%s rules=%zu\n",
+            url.c_str(), type.c_str(), g_intercept_rules.size());
+    if (g_intercept_rules.empty())
+      return nullptr;
+
+    const InterceptRule* rule = MatchInterceptRule(url, type);
+    if (!rule)
+      return nullptr;
+
+    CefRequest::HeaderMap headers;
+    request->GetHeaderMap(headers);
+    std::string headers_json = "{";
+    bool first = true;
+    for (const auto& header : headers) {
+      // One flat JSON object text, built here because the header map is the
+      // one structure the event carries that is not a plain string field.
+      std::string name = header.first.ToString();
+      std::string value = header.second.ToString();
+      std::string quoted;
+      for (char c : value) {
+        if (c == '"' || c == '\\')
+          quoted += '\\';
+        quoted += c;
+      }
+      if (!first)
+        headers_json += ",";
+      first = false;
+      headers_json += "\"" + name + "\":\"" + quoted + "\"";
+    }
+    headers_json += "}";
+
+    const uint32_t request_id = ++g_intercept_seq;
+    return new RequestGate(request_id,
+                           browser ? browser->GetIdentifier() : 0, url,
+                           request->GetMethod().ToString(), type,
+                           request->GetResourceType() == RT_MAIN_FRAME,
+                           headers_json);
+  }
+
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     const int id = browser->GetIdentifier();
     fprintf(stderr, "helper: browser %d closing\n", id);
+
+    // The observer registration dies with its CefRegistration, and answers
+    // this side still owed go with the browser: nothing can route them.
+    g_cdp_registrations.erase(id);
+    g_cdp_pending.clear();
+
+    /* Before the slot goes: a parked dialog belonged to this browser, and its
+     * panel has to hear that there is nothing left to answer. */
+    DropDialogsForBrowser(id);
 
     auto it = g_browser_slots.find(id);
     if (it != g_browser_slots.end())
@@ -2472,9 +5637,11 @@ class HelperClient : public CefClient,
     if (g_active_browser_id == id) {
       g_browser = nullptr;
       /* A DevTools entry can never become active, so the next live page
-       * browser takes over instead. */
+       * browser takes over instead. A background page is not a candidate:
+       * handing the active slot to a hidden page would point every
+       * host-facing state event at it. */
       for (const auto& other : g_browser_slots)
-        if (!other.second.devtools) {
+        if (!other.second.devtools && !other.second.background) {
           SelectBrowserById(other.first);
           break;
         }
@@ -2486,9 +5653,10 @@ class HelperClient : public CefClient,
                             bool can_go_back,
                             bool can_go_forward) override {
     /* Same rule as the title and address: the host's navigation state is the
-     * page's, and the inspector's own loads are not navigation the user made. */
+     * page's, and the inspector's own loads are not navigation the user made.
+     * A background page's loads belong to nobody visible, either. */
     if (BrowserSlot* slot = FindSlotForBrowser(browser))
-      if (slot->devtools)
+      if (slot->devtools || slot->background)
         return;
     CefRefPtr<CefDictionaryValue> dict = NewEvent("loading");
     dict->SetBool("loading", is_loading);
@@ -2497,12 +5665,76 @@ class HelperClient : public CefClient,
     Emit(dict);
   }
 
+  /* A number between 0 and 1 for a host that draws a progress bar. It is
+   * fire-and-forget: the value is advisory and the next one supersedes it, so
+   * nothing here waits for an answer. */
+  void OnLoadingProgressChange(CefRefPtr<CefBrowser> browser,
+                               double progress) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("loading-progress");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetDouble("progress", progress);
+    Emit(dict);
+    fprintf(stderr, "helper: loading progress %.3f\n", progress);
+  }
+
+  /* The page's icons, in the order it declared them. Fire-and-forget: which
+   * one to download and where to show it is the host's call. */
+  void OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
+                          const std::vector<CefString>& icon_urls) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("favicon");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    CefRefPtr<CefListValue> urls = CefListValue::Create();
+    for (size_t i = 0; i < icon_urls.size(); ++i)
+      urls->SetString(static_cast<int>(i), icon_urls[i]);
+    dict->SetList("urls", urls);
+    Emit(dict);
+    fprintf(stderr, "helper: favicon %zu url(s)\n", icon_urls.size());
+  }
+
+  // The page's preferred size, once auto-resize is on. Reporting it here and
+  // returning true keeps CEF from applying a default it does not have for a
+  // views-hosted browser; the host owns the toplevel those pixels land in.
+  bool OnAutoResize(CefRefPtr<CefBrowser> browser,
+                    const CefSize& new_size) override {
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("auto-resize");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetInt("width", new_size.width);
+    dict->SetInt("height", new_size.height);
+    Emit(dict);
+    fprintf(stderr, "helper: auto-resize %dx%d (browser %d)\n", new_size.width,
+            new_size.height, browser ? browser->GetIdentifier() : 0);
+    return true;
+  }
+
   // Alloy leaves the platform fullscreen transition to the client: the page
   // says what it wants, and the window does it. This is the pairing the
   // CefDisplayHandler documents for windowed Alloy.
   void OnFullscreenModeChange(CefRefPtr<CefBrowser> browser,
                               bool fullscreen) override {
+    /* A background page cannot offer its document fullscreen (no user
+       gesture, no window), and the event carries no per-browser reading the
+       host could sort out itself — so it never reaches the channel. */
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->background)
+        return;
     fprintf(stderr, "helper: page fullscreen mode = %d\n", fullscreen);
+    /* Reported before the window moves: the host may own the toplevel (the
+     * CEF window is a child surface in the nested compositor), and it has to
+     * hear about the page's request whichever way it decides to honour it. */
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("fullscreen");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetBool("fullscreen", fullscreen);
+    Emit(dict);
     /* The browser that asked owns the window to move. Using the globally
      * active browser here would fullscreen another tab's window when a
      * background browser receives the request. */
@@ -2516,8 +5748,9 @@ class HelperClient : public CefClient,
     if (BrowserSlot* slot = FindSlotForBrowser(browser)) {
       slot->title = title.ToString();
       /* The host's title/address state belongs to the page it shows. A DevTools
-       * title must not replace it; nothing on the host renders it. */
-      if (slot->devtools)
+       * title must not replace it; nothing on the host renders it. A
+       * background page's title likewise names nothing the host shows. */
+      if (slot->devtools || slot->background)
         return;
     }
     CefRefPtr<CefDictionaryValue> dict = NewEvent("title");
@@ -2531,7 +5764,7 @@ class HelperClient : public CefClient,
     if (!frame->IsMain())
       return;
     if (BrowserSlot* slot = FindSlotForBrowser(browser))
-      if (slot->devtools)
+      if (slot->devtools || slot->background)
         return;
     CefRefPtr<CefDictionaryValue> dict = NewEvent("address");
     dict->SetString("url", url.ToString());
@@ -2544,7 +5777,7 @@ class HelperClient : public CefClient,
     if (!frame->IsMain())
       return;
     if (BrowserSlot* slot = FindSlotForBrowser(browser))
-      if (slot->devtools)
+      if (slot->devtools || slot->background)
         return;
     CefRefPtr<CefDictionaryValue> dict = NewEvent("load-end");
     dict->SetString("url", frame->GetURL().ToString());
@@ -2566,6 +5799,8 @@ class HelperClient : public CefClient,
     }
 
     frame->ExecuteJavaScript(kPrimarySelectionScript, "cefnest-helper", 0);
+
+    InjectIdleScripts(browser, frame);
   }
 
   void OnLoadError(CefRefPtr<CefBrowser> browser,
@@ -2576,7 +5811,7 @@ class HelperClient : public CefClient,
     if (!frame->IsMain())
       return;
     if (BrowserSlot* slot = FindSlotForBrowser(browser))
-      if (slot->devtools)
+      if (slot->devtools || slot->background)
         return;
     fprintf(stderr, "helper: load error %d for %s\n", static_cast<int>(errorCode),
             failedUrl.ToString().c_str());
@@ -2596,9 +5831,10 @@ class HelperClient : public CefClient,
                                  int error_code,
                                  const CefString& error_string) override {
     /* An inspector crash is not the page's crash: the surface on the host still
-     * shows the page, and ::renderer-exited would say it is gone. */
+     * shows the page, and ::renderer-exited would say it is gone. Neither is a
+     * background page's crash a view crash. */
     if (BrowserSlot* slot = FindSlotForBrowser(browser))
-      if (slot->devtools)
+      if (slot->devtools || slot->background)
         return;
     fprintf(stderr, "helper: render process terminated (status=%d error=%d)\n",
             static_cast<int>(status), error_code);
@@ -2676,6 +5912,10 @@ class HelperClient : public CefClient,
       new HelperContextMenuHandler};
   CefRefPtr<CefPermissionHandler> permission_handler_{
       new HelperPermissionHandler};
+  CefRefPtr<CefJSDialogHandler> jsdialog_handler_{
+      new HelperJSDialogHandler};
+  CefRefPtr<CefPrintHandler> print_handler_{new HelperPrintHandler};
+  CefRefPtr<CefDialogHandler> dialog_handler_{new HelperDialogHandler};
 };
 
 /* ShowDevTools opens an associated browser CEF windows itself; because every
@@ -2852,7 +6092,7 @@ class HelperBrowserViewDelegate : public CefBrowserViewDelegate {
   bool chrome_ = false;
 };
 
-int CreateNewBrowser(const std::string& url, bool windowed) {
+int CreateNewBrowser(const std::string& url, bool windowed, bool background) {
   const int slot = g_next_browser_slot++;
   CefRefPtr<HelperClient> client(new HelperClient(slot));
   CefRefPtr<HelperBrowserViewDelegate> view_delegate(
@@ -2863,12 +6103,15 @@ int CreateNewBrowser(const std::string& url, bool windowed) {
   BrowserSlot entry;
   entry.slot = slot;
   entry.windowed = windowed;
+  entry.background = background;
   entry.start_url = url;
   g_browser_slots[slot] = entry;
   g_slot_to_browser[slot] = slot;
   /* Set before CreateBrowserView: OnAfterCreated can run synchronously and then
-   * it is this flag that makes the new tab active. */
-  g_select_slot = slot;
+   * it is this flag that makes the new tab active. A background page never
+   * raises the flag: it must not take the active slot even when it is the
+   * first browser this helper creates. */
+  g_select_slot = background ? 0 : slot;
 
   CefBrowserSettings browser_settings;
   browser_settings.background_color = 0xff101828;
@@ -2882,6 +6125,28 @@ int CreateNewBrowser(const std::string& url, bool windowed) {
     return 0;
   }
   g_browser_slots[slot].view = view;
+
+  if (background) {
+    /* Attached to the existing tab window as an invisible child — never its
+     * own CefWindow. Measured 2026-10-26: a browser view attached to no
+     * window is a browser that never comes into existence (OnAfterCreated
+     * waits for the view to be hosted), while a hidden child of the already
+     * shown tab window creates the browser without adding a toplevel, which
+     * is what keeps the host's FIFO pairing untouched. WasHidden in
+     * OnAfterCreated then puts the page on Chromium's hidden-tab schedule. */
+    if (g_tab_window) {
+      g_browser_slots[slot].window = g_tab_window;
+      g_tab_window->AddChildView(view);
+      view->SetVisible(false);
+      fprintf(stderr, "helper: new background page slot %d\n", slot);
+    } else {
+      fprintf(stderr,
+              "helper: background page slot %d idle — no tab window to hide "
+              "in yet\n",
+              slot);
+    }
+    return slot;
+  }
 
   if (!windowed && g_tab_window) {
     g_browser_slots[slot].window = g_tab_window;
@@ -3049,6 +6314,17 @@ int main(int argc, char** argv) {
     if (!ua.empty())
       CefString(&settings.user_agent).FromString(ua);
   }
+  // Accept-Language is fixed for the context's lifetime, so this is the one
+  // place to set it: the renderer's navigator.language and the HTTP header
+  // both read it back from here.
+  {
+    const std::string accept_lang =
+        EnvOrEmpty("CHROMIUM_HELPER_ACCEPT_LANG");
+    if (!accept_lang.empty()) {
+      CefString(&settings.accept_language_list).FromString(accept_lang);
+      fprintf(stderr, "helper: accept-language=%s\n", accept_lang.c_str());
+    }
+  }
   // root_cache_path is never empty: that is the structural half of "no data
   // directory means no disk", because a CEF with nothing here falls back to
   // ~/.config/cef_user_data. cache_path stays empty in ephemeral mode, which
@@ -3076,6 +6352,15 @@ int main(int argc, char** argv) {
   // about 2 ms after an install made before it). A handler installed before it
   // is simply gone by the time there is a message loop to leave.
   signals.Start();
+
+  // The factory serves only the roots plugins-load has reported, one prefix
+  // check per request — a URL is not to be trusted on its way in (a literal
+  // ../ is normalised away, ..%2F is not), so this side re-runs the rule the
+  // host-side builder already applied.
+  if (!CefRegisterSchemeHandlerFactory(kExtensionScheme, "",
+                                       new ExtensionFactory)) {
+    fprintf(stderr, "helper: extension scheme factory registration failed\n");
+  }
 
   // Removing a dead helper's tmpfs root is unbounded filesystem work (entries
   // to stat, whole trees to remove), so it runs on its own thread: the reader

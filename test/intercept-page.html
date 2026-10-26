@@ -1,0 +1,23 @@
+<!doctype html>
+<!-- The resource-interception probe for test/intercept-gate.sh. The image
+     source comes in through the query string so one page serves every
+     scenario, and the title carries the verdict the gate reads back: the
+     image loaded (with its natural width) or it did not. -->
+<html>
+<head><meta charset="utf-8"><title>INTERCEPT-PAGE</title></head>
+<body>
+<h1>intercept probe page</h1>
+<img id="probe" alt="">
+<script>
+var img = document.getElementById("probe");
+img.onload = function () {
+  document.title = "IMG-LOADED:" + img.naturalWidth;
+};
+img.onerror = function () {
+  document.title = "IMG-ERROR";
+};
+var wanted = new URLSearchParams(location.search).get("src");
+img.src = wanted || "/blocked/red.png";
+</script>
+</body>
+</html>

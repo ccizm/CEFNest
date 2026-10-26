@@ -41,6 +41,16 @@ chromium_session_start (session, "https://example.com", &error);
   （`persist_session_cookies` 为 false）。
 - session 运行期间设置该属性只对下一次 `start()` 生效，不影响当前 helper。
 
+**插件也住在这棵树下。** 数据目录里有一个 `<数据目录>/cefnest-plugins/`——
+插件的**安装根**：它的每个子目录是一个插件包（目录名即插件 id），插件的
+`chrome.storage` 数据落在 `<数据目录>/cefnest-plugins/<id>/storage.json`。
+管理器扫描时把它放在所有 `add_search_path()` 目录之前，所以用户自己装的
+插件在同 id 冲突时赢过宿主额外指的目录；目录还不存在（fresh profile 什么
+都没装过）不算错误，扫描结果就是空列表。不设数据目录就没有任何默认插件
+位置——"不指定目录就不向磁盘写任何东西"的契约对插件同样成立，这时插件
+目录只能由宿主用 `add_search_path()` 显式给出。改动该属性会移动安装根，
+模型在下一次 `scan()` 时刷新。
+
 **放在哪里。** 用 `g_get_user_data_dir()`——通常是
 `~/.local/share/<应用>/…`。**不要放 `~/.cache`**：XDG 把那个目录定义为可随时
 清理的，BleachBit 之类的工具会静默删掉登录态，用户看到的是“随机掉登录”。

@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Ad Sift",
+  "version": "1.0",
+  "description": "A cosmetic ad blocker in the WebExtension shape: EasyList-style hiding rules, a per-site switch, an element picker and a popup that counts what it hid. It hides ads; it cannot stop their downloads, because this runtime has no webRequest.",
+  "permissions": ["storage", "tabs"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["filters.js", "ad-sift.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_title": "Ad Sift",
+    "default_popup": "popup.html"
+  },
+  "cefnest": {
+    "type": "web",
+    "popup": { "width": 360, "height": 460 }
+  }
+}

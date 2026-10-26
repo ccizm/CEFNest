@@ -105,7 +105,7 @@ printf 'load %s\nwait 1500\njs Array.from(document.querySelectorAll(".q")).map(e
   "$PAGE" "$WORK/pixel.png" >"$WORK/pixel.session"
 
 echo "== one run: a page of four flat fills, dumped once"
-timeout 90 env GDK_BACKEND=wayland CHROMIUM_SESSION_SCRIPT="$WORK/pixel.session" \
+timeout --kill-after=10s 90 env GDK_BACKEND=wayland CHROMIUM_SESSION_SCRIPT="$WORK/pixel.session" \
   "$DEMO" >"$WORK/pixel.out" 2>"$WORK/pixel.err"
 status=$?
 cat "$WORK/pixel.err" >>"$WORK/pixel.out"

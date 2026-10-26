@@ -43,3 +43,17 @@ foreach file : examples_files
     install: false,
   )
 endforeach
+
+# The plugin gate's own plugin: manifest, module and the gate's expectations
+# live together in examples/plugin-demo/.
+subdir('plugin-demo')
+
+# The management page: rows from the model, the grant as policy, the action
+# as a window.
+executable(
+  'cefnest-plugins',
+  'plugins.c',
+  include_directories: src_inc,
+  dependencies: [libcefnest_dep],
+  install: false,
+)

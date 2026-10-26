@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FILE-DIALOG-PAGE</title>
+<style>
+  html, body { margin: 0; }
+  #out { font: 16px sans-serif; padding: 8px; white-space: pre-wrap; }
+  /* Big enough to hit with an injected pointer, which is the only way to open
+   * the chooser: measured, HTMLInputElement.click() from page script carries no
+   * user activation and Chromium ignores it. */
+  input[type=file] { position: absolute; left: 40px; width: 240px; height: 80px; }
+  #single { top: 120px; }
+  #many { top: 220px; }
+</style>
+<div id="out">FILE-DIALOG-PAGE-START</div>
+<input id="single" type="file" accept=".txt,image/png">
+<input id="many" type="file" multiple>
+<script>
+function note(text) {
+  document.getElementById('out').textContent += '|' + text;
+}
+
+function record() {
+  const names = Array.from(this.files).map(function (file) { return file.name; });
+  note(this.id + '=' + names.join(','));
+}
+
+document.getElementById('single').addEventListener('change', record);
+document.getElementById('many').addEventListener('change', record);
+
+document.getElementById('single').addEventListener('cancel', function () {
+  note('single-cancel');
+});
+document.getElementById('many').addEventListener('cancel', function () {
+  note('many-cancel');
+});
+</script>

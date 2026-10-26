@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PAGE-EVENTS-PAGE</title>
+<style>
+  html, body { margin: 0; }
+  #out { font: 16px sans-serif; padding: 8px; white-space: pre-wrap; }
+  /* A target an injected pointer cannot miss: the fullscreen request needs
+   * transient user activation, which a script call from the host does not
+   * carry, so the gate clicks this button through the nested compositor. */
+  button { position: absolute; left: 40px; top: 120px; width: 240px;
+           height: 80px; font: 20px sans-serif; }
+</style>
+<div id="out">PAGE-EVENTS-START</div>
+<button id="fullscreen" onclick="askFullscreen()">fullscreen</button>
+<script>
+function note(text) {
+  document.getElementById('out').textContent += '|' + text;
+}
+
+function askFullscreen() {
+  document.documentElement.requestFullscreen().then(
+    function () { note('request=ok'); },
+    function (error) { note('request=' + error.name); });
+}
+
+document.addEventListener('fullscreenchange', function () {
+  note('fullscreen=' + (document.fullscreenElement ? 'on' : 'off'));
+});
+</script>

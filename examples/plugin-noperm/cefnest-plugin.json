@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "No Permissions",
+  "version": "1.0",
+  "description": "Declares nothing. Its content script calls chrome.storage anyway, which is exactly what the permission table exists to refuse.",
+  "content_scripts": [
+    { "matches": ["file://*/*plugin-noperm-page.html"],
+      "js": ["cs-noperm.js"],
+      "run_at": "document_start" }
+  ],
+  "cefnest": { "type": "web" }
+}

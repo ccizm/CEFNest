@@ -5,6 +5,7 @@
 
 #include <glib/gstdio.h>
 #include <glib-unix.h>
+#include <json-glib/json-glib.h>
 
 #include "chromium-session.h"
 #include "chromium-view.h"
@@ -21,6 +22,10 @@ typedef struct {
   /* --devtools: turn the inspector switch on before start(), the same call a
    * host makes from its own preferences UI. */
   gboolean devtools;
+  /* --plugin-dir=<absolute path>: scan that directory, enable everything that
+   * parses, and grant what enable() asks for. The demo's policy, not the
+   * component's: a real host shows the person a prompt. */
+  char *plugin_directory;
   /* What the process hands back once the run is over. Only a scripted run that
    * was cut short gives it anything but 0; see script_helper_gone(). */
   int exit_status;
@@ -35,11 +40,17 @@ typedef struct {
    * moment the display can go without killing that shutdown. */
   gboolean helper_exited;
   gboolean quit_when_helper_exits;
+  /* The `restart` step asked for the helper to stop; the ::closed that follows
+   * is the step working, not the run failing. Cleared when start() lands. */
+  gboolean restart_pending;
+  GtkWidget *header;
+  GHashTable *plugin_buttons;  /* plugin id -> GtkButton* */
   GtkWidget *address;
   GtkWidget *back;
   GtkWidget *forward;
   GtkWidget *downloads;
   GtkWidget *permissions;
+  GtkWidget *dialogs;
   GtkWidget *find_bar;
   GtkWidget *find_entry;
   GtkWidget *find_case;
@@ -56,6 +67,17 @@ typedef struct {
   GList *pending_window_ids;    /* windowed browsers waiting for a surface */
   NestedSurface *tab_surface;   /* the tab CefWindow's toplevel */
   int active_browser;
+
+  /* 搭法二, the popover form: a plugin popup hosted under its action button
+   * instead of in a standalone window. One at a time; the browser behind a
+   * closed popover goes away with it. */
+  gboolean popup_in_popover;    /* the "popup-mode popover" script step set */
+  GtkWidget *popup_popover;
+  char *popup_pending_plugin;   /* plugin id whose popup is on its way */
+  char *popup_pending_uri;
+  int popup_browser;
+  int popup_width, popup_height;
+  NestedSurface *popup_surface;
 } Demo;
 
 static Demo demo;
@@ -72,15 +94,23 @@ static uint64_t demo_frame_count (void);
 
 static void session_ready (ChromiumSession *session, gpointer data);
 static void open_browser_window (int id, gboolean devtools, const char *title);
+static void open_popup_popover (int id);
 static void assign_browser_surfaces (void);
 static void session_browser_created (ChromiumSession *session, int id,
                                      const char *url, gboolean windowed,
-                                     gboolean devtools, gpointer data);
+                                     gboolean devtools, gboolean background,
+                                     gpointer data);
 static void session_browser_selected (ChromiumSession *session, int id,
                                       gpointer data);
 static void session_browser_closed (ChromiumSession *session, int id,
                                     gpointer data);
 static void script_note_helper_gone (const char *reason);
+static void demo_setup_plugins (void);
+static gboolean demo_restart_start (gpointer data);
+static gboolean demo_clear_data_try (gpointer data);
+static void session_plugin_action (ChromiumPluginManager *manager,
+                                   const char *id, gpointer data);
+static void plugin_action_clicked (GtkButton *button, gpointer data);
 
 static void
 update_title (void)
@@ -196,13 +226,21 @@ tab_clicked (GtkButton *button, gpointer data)
 
 static void
 session_browser_created (ChromiumSession *session, int id, const char *url,
-                         gboolean windowed, gboolean devtools, gpointer data)
+                         gboolean windowed, gboolean devtools,
+                         gboolean background, gpointer data)
 {
   GtkWidget *button;
   const char *shown = url && *url ? url : (windowed ? "window" : "blank");
 
   if (!demo.tabs)
     return;
+  if (background)
+    {
+      /* A background page has no surface and no tab: it runs, and the log is
+       * the only place it shows. */
+      g_printerr ("demo: browser %d created [background] %s\n", id, shown);
+      return;
+    }
   if (devtools)
     {
       /* The inspector lives in its own window like any standalone browser, but
@@ -212,6 +250,17 @@ session_browser_created (ChromiumSession *session, int id, const char *url,
       g_printerr ("demo: browser %d created [window] devtools=1 %s\n", id,
                   url && *url ? url : "(no url)");
       open_browser_window (id, TRUE, title && *title ? title : NULL);
+      return;
+    }
+  if (demo.popup_in_popover && demo.popup_pending_uri &&
+      g_strcmp0 (url, demo.popup_pending_uri) == 0)
+    {
+      /* The 搭法二 answer to ::plugin-action: this browser is the popup a
+       * popover asked for. It takes no tab button — a transient popup is not
+       * a page in the tab strip. */
+      g_printerr ("demo: browser %d created [popup] %s\n", id, shown);
+      g_clear_pointer (&demo.popup_pending_uri, g_free);
+      open_popup_popover (id);
       return;
     }
   button = gtk_button_new_with_label (shown);
@@ -261,6 +310,21 @@ session_browser_closed (ChromiumSession *session, int id, gpointer data)
 {
   GtkWidget *button;
 
+  if (id == demo.popup_browser)
+    {
+      /* The popover's browser went away (the popover's own close asked for
+         this, or the page closed itself): drop what the FIFO and the widget
+         tree still hold. */
+      if (demo.browser_views)
+        g_hash_table_remove (demo.browser_views, GINT_TO_POINTER (id));
+      demo.pending_window_ids = g_list_remove (demo.pending_window_ids,
+                                               GINT_TO_POINTER (id));
+      if (demo.popup_popover)
+        gtk_popover_popdown (GTK_POPOVER (demo.popup_popover));
+      g_clear_pointer (&demo.popup_popover, gtk_widget_unparent);
+      demo.popup_browser = 0;
+      demo.popup_surface = NULL;
+    }
   if (demo.tab_buttons)
     {
       button = g_hash_table_lookup (demo.tab_buttons, GINT_TO_POINTER (id));
@@ -278,6 +342,36 @@ session_browser_closed (ChromiumSession *session, int id, gpointer data)
         gtk_window_destroy (GTK_WINDOW (window));
     }
   g_printerr ("demo: browser %d closed\n", id);
+}
+
+/* The pairing the session reports, as a script can see it. The surface-pair
+ * gate grades these lines against the pixels script_surface_probe() reads:
+ * the signal says which surface is that browser's, and the sample says the
+ * picture on it is that browser's page. */
+static void
+session_browser_surface (ChromiumSession *session, int id,
+                         NestedSurface *surface, gpointer data)
+{
+  int w = 0, h = 0;
+
+  if (!surface)
+    {
+      if (demo.popup_surface && id == demo.popup_browser)
+        demo.popup_surface = NULL;
+      g_printerr ("demo: browser-surface id=%d none\n", id);
+      return;
+    }
+  if (id == demo.popup_browser)
+    {
+      /* The popover's box is the manifest's clamped popup size, not the
+         window default; tell the toplevel before its first frame lands. */
+      demo.popup_surface = surface;
+      nested_compositor_set_surface_size (chromium_view_get_compositor (demo.view),
+                                          surface,
+                                          demo.popup_width, demo.popup_height);
+    }
+  nested_surface_get_size (surface, &w, &h);
+  g_printerr ("demo: browser-surface id=%d size=%dx%d\n", id, w, h);
 }
 
 static void
@@ -1693,6 +1787,742 @@ build_permission_panel (GtkBox *box)
   gtk_box_append (box, demo.permissions);
 }
 
+/* ------------------------------------------------------------------ *
+ * JavaScript and file dialogs                                        *
+ * ------------------------------------------------------------------ *
+ *
+ * Both arrive parked: the page cannot move until the host answers, and the
+ * session's default answers only apply to a host that does not take the
+ * signal. This panel is the half that takes it — a row per dialog, 确定 /
+ * 取消, and for a prompt the entry the page asked for. A file dialog gets a
+ * real GTK chooser; a scripted run stands in for the pointer with
+ * js-dialog-respond / file-dialog-respond.
+ *
+ * CEFNEST_DIALOG=default makes the demo decline the signal instead, so the
+ * session answers with Chrome's defaults. That is how a gate checks what a
+ * page sees when its host has no dialog UI at all. */
+
+typedef struct {
+  int id;
+  gboolean decided;
+  GtkWidget *info;
+  GtkWidget *entry;      /* prompt only, NULL otherwise */
+  GtkWidget *ok;
+  GtkWidget *cancel;
+} JsDialogRow;
+
+typedef struct {
+  int id;
+  gboolean decided;
+  GtkWidget *info;
+  GtkWidget *choose;
+  GtkWidget *cancel;
+  char *mode;
+  char *title;
+  char *default_path;
+  GPtrArray *accept;     /* char *, owned */
+} FileDialogRow;
+
+static const char *
+dialog_policy (void)
+{
+  const char *env = g_getenv ("CEFNEST_DIALOG");
+
+  return env && !strcmp (env, "default") ? "default" : "ask";
+}
+
+/* A page's message is one string it chose, and this transcript is line-based:
+ * a newline inside it would forge a line the gate might believe. */
+static char *
+transcript_text (const char *text)
+{
+  char *copy = g_strdup (text ? text : "");
+  char *p;
+
+  for (p = copy; *p; p++)
+    if ((guchar) *p < 0x20 || (guchar) *p == 0x7f)
+      *p = ' ';
+  return copy;
+}
+
+static JsDialogRow *
+js_dialog_row_for (int id)
+{
+  GtkWidget *child;
+
+  for (child = demo.dialogs ? gtk_widget_get_first_child (demo.dialogs) : NULL;
+       child; child = gtk_widget_get_next_sibling (child))
+    {
+      JsDialogRow *row = g_object_get_data (G_OBJECT (child), "cefnest-js-dialog");
+
+      if (row && row->id == id)
+        return row;
+    }
+  return NULL;
+}
+
+static FileDialogRow *
+file_dialog_row_for (int id)
+{
+  GtkWidget *child;
+
+  for (child = demo.dialogs ? gtk_widget_get_first_child (demo.dialogs) : NULL;
+       child; child = gtk_widget_get_next_sibling (child))
+    {
+      FileDialogRow *row = g_object_get_data (G_OBJECT (child), "cefnest-file-dialog");
+
+      if (row && row->id == id)
+        return row;
+    }
+  return NULL;
+}
+
+static void
+js_dialog_answer (JsDialogRow *row, gboolean ok, const char *value)
+{
+  g_autofree char *safe = transcript_text (value);
+
+  if (!row || row->decided)
+    return;
+
+  row->decided = TRUE;
+  gtk_widget_set_visible (row->ok, FALSE);
+  gtk_widget_set_visible (row->cancel, FALSE);
+  if (row->entry)
+    gtk_widget_set_sensitive (row->entry, FALSE);
+  gtk_label_set_text (GTK_LABEL (row->info), ok ? "已确认" : "已取消");
+
+  chromium_session_js_dialog_respond (demo.session, row->id, ok,
+                                      value ? value : "");
+  g_printerr ("demo: js-dialog %d %s value=%s\n", row->id,
+              ok ? "ok" : "cancel", safe);
+}
+
+static void
+js_dialog_ok_clicked (GtkButton *button, gpointer data)
+{
+  JsDialogRow *row = data;
+  const char *value = row->entry
+    ? gtk_editable_get_text (GTK_EDITABLE (row->entry)) : "";
+
+  js_dialog_answer (row, TRUE, value);
+}
+
+static void
+js_dialog_cancel_clicked (GtkButton *button, gpointer data)
+{
+  js_dialog_answer ((JsDialogRow *) data, FALSE, "");
+}
+
+/* CDP answers and events: the demo prints them, which is the whole host
+   side a scripted run needs — the assertions read these lines. */
+static void
+session_cdp_result (ChromiumSession *session, int id, gboolean ok,
+                    const char *json, const char *message, gpointer data)
+{
+  g_printerr ("demo: cdp-result id=%d ok=%d message=%s json=%.512s%s\n",
+              id, ok ? 1 : 0, message ? message : "", json ? json : "",
+              (json && strlen (json) > 512) ? "…" : "");
+}
+
+static void
+session_cdp_event (ChromiumSession *session, int browser, const char *method,
+                   const char *params, const char *message, gpointer data)
+{
+  g_printerr ("demo: cdp-event browser=%d method=%s message=%s\n",
+              browser, method ? method : "", message ? message : "");
+}
+
+/* The intercept question: the demo prints what arrived and answers nothing.
+ * CEFNEST_INTERCEPT=allow makes it answer allow immediately, which is what
+ * the passive-adjacent scenarios want without a scripted response step. */
+static void
+session_request_intercept (ChromiumSession *session, int request_id,
+                           int browser, const char *url, const char *method,
+                           const char *resource_type, gboolean is_main_frame,
+                           const char *headers, gpointer data)
+{
+  g_printerr ("demo: request-intercept id=%d browser=%d type=%s main=%d "
+              "method=%s url=%s\n",
+              request_id, browser, resource_type ? resource_type : "",
+              is_main_frame ? 1 : 0, method ? method : "",
+              url ? url : "");
+}
+
+static void
+session_request_intercept_closed (ChromiumSession *session, int request_id,
+                                  int browser, gpointer data)
+{
+  g_printerr ("demo: request-intercept-closed id=%d browser=%d\n",
+              request_id, browser);
+}
+
+/* Certificate questions: the demo prints the facts a host would put in its
+   own prompt. CEFNEST_CERTIFICATE=ask takes the question and leaves it to
+   the certificate-respond step — how test/certificate-gate.sh drives both
+   decisions; the default leaves it with the session, which denies. */
+static const char *
+certificate_policy (void)
+{
+  const char *env = g_getenv ("CEFNEST_CERTIFICATE");
+
+  return env && !strcmp (env, "ask") ? "ask" : "default";
+}
+
+static gboolean
+session_certificate_error (ChromiumSession *session, int id, int browser,
+                           const char *error, const char *url,
+                           const char *subject, const char *issuer,
+                           const char *fingerprint, gpointer data)
+{
+  g_printerr ("demo: certificate-error id=%d browser=%d error=%s url=%s "
+              "subject=%s issuer=%s fingerprint=%s policy=%s\n",
+              id, browser, error ? error : "", url ? url : "",
+              subject ? subject : "", issuer ? issuer : "",
+              fingerprint ? fingerprint : "", certificate_policy ());
+  return !strcmp (certificate_policy (), "ask");
+}
+
+static void
+session_certificate_closed (ChromiumSession *session, int id, int browser,
+                            gpointer data)
+{
+  g_printerr ("demo: certificate-error-closed id=%d browser=%d\n", id,
+              browser);
+}
+
+static gboolean
+session_js_dialog (ChromiumSession *session, int id, int browser,
+                   const char *kind, const char *origin, const char *message,
+                   const char *default_value, gpointer data)
+{
+  g_autofree char *safe_origin = transcript_text (origin);
+  g_autofree char *safe_message = transcript_text (message);
+  g_autofree char *safe_default = transcript_text (default_value);
+  const char *policy = dialog_policy ();
+  GtkWidget *row_box;
+  GtkWidget *info;
+  GtkWidget *ok;
+  GtkWidget *cancel;
+  GtkWidget *entry = NULL;
+  GtkWidget *controls;
+  JsDialogRow *row;
+  g_autofree char *text = NULL;
+
+  /* Both strings are what a script asserts on, so both are here even when the
+   * panel is not on screen (CEFNEST_DIALOG=default). */
+  g_printerr ("demo: js-dialog %d browser=%d kind=%s origin=%s message=%s "
+              "default_value=%s policy=%s\n",
+              id, browser, kind ? kind : "", safe_origin, safe_message,
+              safe_default, policy);
+
+  if (!strcmp (policy, "default"))
+    return FALSE;
+
+  row_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  info = gtk_label_new ("");
+  ok = gtk_button_new_with_label ("确定");
+  cancel = gtk_button_new_with_label ("取消");
+
+  text = g_strdup_printf ("%s · %s · %s", kind, safe_origin, safe_message);
+  gtk_label_set_text (GTK_LABEL (info), text);
+  gtk_label_set_xalign (GTK_LABEL (info), 0.0);
+  gtk_label_set_ellipsize (GTK_LABEL (info), PANGO_ELLIPSIZE_END);
+  gtk_widget_set_hexpand (info, TRUE);
+  gtk_widget_set_tooltip_text (ok, "应答这个对话框 / Answer it");
+  gtk_widget_set_tooltip_text (cancel, "拒绝 / Dismiss it");
+
+  gtk_box_append (GTK_BOX (row_box), info);
+  controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
+  if (!strcmp (kind, "prompt"))
+    {
+      entry = gtk_entry_new ();
+      gtk_editable_set_text (GTK_EDITABLE (entry), default_value);
+      gtk_editable_set_width_chars (GTK_EDITABLE (entry), 18);
+      gtk_box_append (GTK_BOX (controls), entry);
+    }
+  gtk_box_append (GTK_BOX (controls), ok);
+  gtk_box_append (GTK_BOX (controls), cancel);
+  gtk_box_append (GTK_BOX (row_box), controls);
+  /* An alert has one answer; the other kinds have both. The script can still
+   * answer any of them, which is why both buttons exist in the object tree. */
+  if (!strcmp (kind, "alert"))
+    gtk_widget_set_visible (cancel, FALSE);
+  if (!strcmp (kind, "beforeunload"))
+    {
+      gtk_button_set_label (GTK_BUTTON (ok), "离开");
+      gtk_button_set_label (GTK_BUTTON (cancel), "留下");
+    }
+
+  row = g_new0 (JsDialogRow, 1);
+  row->id = id;
+  row->info = info;
+  row->entry = entry;
+  row->ok = ok;
+  row->cancel = cancel;
+  g_object_set_data_full (G_OBJECT (row_box), "cefnest-js-dialog", row, g_free);
+  g_signal_connect (ok, "clicked", G_CALLBACK (js_dialog_ok_clicked), row);
+  g_signal_connect (cancel, "clicked", G_CALLBACK (js_dialog_cancel_clicked), row);
+
+  gtk_widget_set_visible (demo.dialogs, TRUE);
+  gtk_box_append (GTK_BOX (demo.dialogs), row_box);
+
+  /* Taking the signal is taking the question: the session will not answer a
+   * dialog this handler said it owns. */
+  return TRUE;
+}
+
+static void
+session_js_dialog_closed (ChromiumSession *session, int id, int browser,
+                          gpointer data)
+{
+  JsDialogRow *row = js_dialog_row_for (id);
+
+  g_printerr ("demo: js-dialog %d closed\n", id);
+
+  if (!row || row->decided)
+    return;
+
+  row->decided = TRUE;
+  gtk_widget_set_visible (row->ok, FALSE);
+  gtk_widget_set_visible (row->cancel, FALSE);
+  if (row->entry)
+    gtk_widget_set_sensitive (row->entry, FALSE);
+  gtk_label_set_text (GTK_LABEL (row->info), "页面已经不再等这个对话框");
+}
+
+static void
+file_dialog_answer (FileDialogRow *row, const char *const *paths)
+{
+  g_autoptr (GString) joined = g_string_new ("");
+  gsize i;
+
+  if (!row || row->decided)
+    return;
+
+  row->decided = TRUE;
+  gtk_widget_set_visible (row->choose, FALSE);
+  gtk_widget_set_visible (row->cancel, FALSE);
+
+  for (i = 0; paths && paths[i]; i++)
+    {
+      if (joined->len)
+        g_string_append (joined, ";");
+      g_string_append (joined, paths[i]);
+    }
+
+  gtk_label_set_text (GTK_LABEL (row->info),
+                      joined->len ? joined->str : "已取消");
+  chromium_session_file_dialog_respond (demo.session, row->id, paths);
+  g_printerr ("demo: file-dialog %d %s%s\n", row->id,
+              joined->len ? "answer " : "cancel", joined->str);
+}
+
+static void
+file_dialog_cancel_clicked (GtkButton *button, gpointer data)
+{
+  file_dialog_answer ((FileDialogRow *) data, NULL);
+}
+
+/* The chooser's own answer, which can arrive after the script already answered
+ * (the row is then decided and this is only cleanup). */
+static void
+file_dialog_chosen (GObject *source, GAsyncResult *result, gpointer data)
+{
+  GtkWidget *row_box = data;
+  FileDialogRow *row = g_object_get_data (G_OBJECT (row_box), "cefnest-file-dialog");
+  GError *error = NULL;
+  GPtrArray *paths = g_ptr_array_new_with_free_func (g_free);
+  gboolean multiple = row && !strcmp (row->mode, "open-multiple");
+  gboolean folder = row && !strcmp (row->mode, "open-folder");
+  gboolean save = row && !strcmp (row->mode, "save");
+
+  if (multiple)
+    {
+      GListModel *files = gtk_file_dialog_open_multiple_finish (GTK_FILE_DIALOG (source),
+                                                                result, &error);
+      guint n = files ? g_list_model_get_n_items (files) : 0;
+      guint i;
+
+      for (i = 0; i < n; i++)
+        {
+          GFile *file = g_list_model_get_item (files, i);
+          char *path = g_file_get_path (file);
+
+          if (path)
+            g_ptr_array_add (paths, path);
+          g_object_unref (file);
+        }
+      g_clear_object (&files);
+    }
+  else
+    {
+      GFile *file = folder
+        ? gtk_file_dialog_select_folder_finish (GTK_FILE_DIALOG (source), result, &error)
+        : save
+          ? gtk_file_dialog_save_finish (GTK_FILE_DIALOG (source), result, &error)
+          : gtk_file_dialog_open_finish (GTK_FILE_DIALOG (source), result, &error);
+
+      if (file)
+        {
+          char *path = g_file_get_path (file);
+
+          if (path)
+            g_ptr_array_add (paths, path);
+          g_object_unref (file);
+        }
+    }
+
+  if (error)
+    {
+      /* A dismissed chooser is a cancel, which is the same answer the empty
+       * list carries. Nothing here is an error worth a warning. */
+      g_error_free (error);
+      g_ptr_array_set_size (paths, 0);
+    }
+
+  g_ptr_array_add (paths, NULL);
+  if (row)
+    file_dialog_answer (row, (const char *const *) paths->pdata);
+  g_ptr_array_unref (paths);
+  g_object_unref (row_box);
+}
+
+static void
+file_dialog_choose_clicked (GtkButton *button, gpointer data)
+{
+  GtkWidget *row_box = data;
+  FileDialogRow *row = g_object_get_data (G_OBJECT (row_box), "cefnest-file-dialog");
+  GtkFileDialog *dialog;
+  GtkWindow *parent = demo.window ? GTK_WINDOW (demo.window) : NULL;
+  GListStore *filters = NULL;
+  gsize i;
+
+  if (!row || row->decided)
+    return;
+
+  dialog = gtk_file_dialog_new ();
+  if (row->title && *row->title)
+    gtk_file_dialog_set_title (dialog, row->title);
+  if (row->default_path && *row->default_path)
+    {
+      GFile *initial = g_file_new_for_path (row->default_path);
+
+      if (!strcmp (row->mode, "open-folder"))
+        gtk_file_dialog_set_initial_folder (dialog, initial);
+      else
+        gtk_file_dialog_set_initial_file (dialog, initial);
+      g_object_unref (initial);
+    }
+  if (row->accept && row->accept->len)
+    {
+      filters = g_list_store_new (GTK_TYPE_FILE_FILTER);
+      for (i = 0; i < row->accept->len; i++)
+        {
+          const char *text = g_ptr_array_index (row->accept, i);
+          GtkFileFilter *filter = gtk_file_filter_new ();
+
+          gtk_file_filter_set_name (filter, text);
+          if (strchr (text, '/'))
+            gtk_file_filter_add_mime_type (filter, text);
+          else if (text[0] == '.')
+            {
+              g_autofree char *pattern = g_strconcat ("*", text, NULL);
+
+              gtk_file_filter_add_pattern (filter, pattern);
+            }
+          else
+            gtk_file_filter_add_pattern (filter, text);
+          g_list_store_append (filters, filter);
+          g_object_unref (filter);
+        }
+      gtk_file_dialog_set_filters (dialog, G_LIST_MODEL (filters));
+      g_object_unref (filters);
+    }
+
+  /* Held across the async answer: the row must stay alive until its chooser
+   * has finished, even if the panel is rebuilt in the meantime. */
+  g_object_ref (row_box);
+  if (!strcmp (row->mode, "open-multiple"))
+    gtk_file_dialog_open_multiple (dialog, parent, NULL, file_dialog_chosen, row_box);
+  else if (!strcmp (row->mode, "open-folder"))
+    gtk_file_dialog_select_folder (dialog, parent, NULL, file_dialog_chosen, row_box);
+  else if (!strcmp (row->mode, "save"))
+    gtk_file_dialog_save (dialog, parent, NULL, file_dialog_chosen, row_box);
+  else
+    gtk_file_dialog_open (dialog, parent, NULL, file_dialog_chosen, row_box);
+  g_object_unref (dialog);
+}
+
+static void
+file_dialog_row_free (gpointer data)
+{
+  FileDialogRow *row = data;
+
+  g_free (row->mode);
+  g_free (row->title);
+  g_free (row->default_path);
+  if (row->accept)
+    g_ptr_array_unref (row->accept);
+  g_free (row);
+}
+
+static gboolean
+session_file_dialog (ChromiumSession *session, int id, int browser,
+                     const char *mode, const char *title,
+                     const char *default_path, GList *accept, gpointer data)
+{
+  g_autofree char *safe_title = transcript_text (title);
+  g_autofree char *safe_path = transcript_text (default_path);
+  g_autoptr (GString) joined = g_string_new ("");
+  const char *policy = dialog_policy ();
+  GtkWidget *row_box;
+  GtkWidget *info;
+  GtkWidget *choose;
+  GtkWidget *cancel;
+  GtkWidget *controls;
+  FileDialogRow *row;
+  GList *l;
+  g_autofree char *text = NULL;
+
+  for (l = accept; l; l = l->next)
+    {
+      if (joined->len)
+        g_string_append_c (joined, '+');
+      g_string_append (joined, (const char *) l->data);
+    }
+
+  g_printerr ("demo: file-dialog %d browser=%d mode=%s title=%s "
+              "default_path=%s accept=%s policy=%s\n",
+              id, browser, mode ? mode : "", safe_title, safe_path,
+              joined->len ? joined->str : "none", policy);
+
+  if (!strcmp (policy, "default"))
+    return FALSE;
+
+  row_box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 6);
+  info = gtk_label_new ("");
+  choose = gtk_button_new_with_label ("选择…");
+  cancel = gtk_button_new_with_label ("取消");
+
+  text = g_strdup_printf ("%s · %s · %s", mode, safe_title, joined->str);
+  gtk_label_set_text (GTK_LABEL (info), text);
+  gtk_label_set_xalign (GTK_LABEL (info), 0.0);
+  gtk_label_set_ellipsize (GTK_LABEL (info), PANGO_ELLIPSIZE_END);
+  gtk_widget_set_hexpand (info, TRUE);
+  gtk_widget_set_tooltip_text (choose, "打开文件选择器 / Open the chooser");
+  gtk_widget_set_tooltip_text (cancel, "取消这次选择 / Cancel it");
+
+  controls = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
+  gtk_box_append (GTK_BOX (controls), choose);
+  gtk_box_append (GTK_BOX (controls), cancel);
+  gtk_box_append (GTK_BOX (row_box), info);
+  gtk_box_append (GTK_BOX (row_box), controls);
+
+  row = g_new0 (FileDialogRow, 1);
+  row->id = id;
+  row->info = info;
+  row->choose = choose;
+  row->cancel = cancel;
+  row->mode = g_strdup (mode ? mode : "open");
+  row->title = g_strdup (title ? title : "");
+  row->default_path = g_strdup (default_path ? default_path : "");
+  row->accept = g_ptr_array_new_with_free_func (g_free);
+  for (l = accept; l; l = l->next)
+    g_ptr_array_add (row->accept, g_strdup ((const char *) l->data));
+
+  g_object_set_data_full (G_OBJECT (row_box), "cefnest-file-dialog", row,
+                          file_dialog_row_free);
+  g_signal_connect (choose, "clicked", G_CALLBACK (file_dialog_choose_clicked),
+                    row_box);
+  g_signal_connect (cancel, "clicked", G_CALLBACK (file_dialog_cancel_clicked),
+                    row);
+
+  gtk_widget_set_visible (demo.dialogs, TRUE);
+  gtk_box_append (GTK_BOX (demo.dialogs), row_box);
+  return TRUE;
+}
+
+static void
+session_file_dialog_closed (ChromiumSession *session, int id, int browser,
+                            gpointer data)
+{
+  FileDialogRow *row = file_dialog_row_for (id);
+
+  g_printerr ("demo: file-dialog %d closed\n", id);
+
+  if (!row || row->decided)
+    return;
+
+  row->decided = TRUE;
+  gtk_widget_set_visible (row->choose, FALSE);
+  gtk_widget_set_visible (row->cancel, FALSE);
+  gtk_label_set_text (GTK_LABEL (row->info), "页面已经不再等这个选择");
+}
+
+static void
+build_dialog_panel (GtkBox *box)
+{
+  demo.dialogs = gtk_box_new (GTK_ORIENTATION_VERTICAL, 2);
+
+  g_printerr ("demo: dialogs: policy=%s\n", dialog_policy ());
+
+  gtk_widget_set_margin_start (demo.dialogs, 8);
+  gtk_widget_set_margin_end (demo.dialogs, 8);
+  gtk_widget_set_margin_top (demo.dialogs, 4);
+  gtk_widget_set_margin_bottom (demo.dialogs, 4);
+  /* Nothing to say until a page asks for something. */
+  gtk_widget_set_visible (demo.dialogs, FALSE);
+  gtk_box_append (box, demo.dialogs);
+}
+
+static void
+session_loading_progress (ChromiumSession *session, double progress, gpointer data)
+{
+  g_printerr ("demo: loading-progress %.3f\n", progress);
+}
+
+static void
+session_auto_resize_updated (ChromiumSession *session, int browser, int width,
+                             int height, gpointer data)
+{
+  g_printerr ("demo: auto-resize %dx%d browser=%d\n", width, height, browser);
+}
+
+static void
+session_fullscreen_changed (ChromiumSession *session, gboolean fullscreen,
+                            gpointer data)
+{
+  g_printerr ("demo: fullscreen %d\n", fullscreen ? 1 : 0);
+}
+
+/* The browser-data answers. Each is one line on stderr with the helper's own
+ * JSON payload, so a gate can read the fields without a second protocol. */
+static void
+session_cookies_result (ChromiumSession *session, int id, gboolean ok,
+                        const char *json, gpointer data)
+{
+  g_printerr ("demo: cookies id=%d ok=%d json=%s\n", id, ok ? 1 : 0, json);
+}
+
+static void
+session_history_result (ChromiumSession *session, int id, const char *json,
+                        gpointer data)
+{
+  g_printerr ("demo: history id=%d json=%s\n", id, json);
+}
+
+/* Page text: the demo joins the chunks so the log line has the whole text
+ * (control characters folded to spaces, the first 400 bytes shown). */
+static struct {
+  int id;
+  GString *text;
+  gboolean truncated;
+} page_text_sink;
+
+static void
+session_page_text_begin (ChromiumSession *session, int id, int browser,
+                         int bytes, gboolean truncated, gpointer data)
+{
+  if (page_text_sink.text)
+    g_string_free (page_text_sink.text, TRUE);
+  page_text_sink.id = id;
+  page_text_sink.text = g_string_new (NULL);
+  page_text_sink.truncated = truncated;
+  g_printerr ("demo: page-text-begin id=%d browser=%d bytes=%d truncated=%d\n",
+              id, browser, bytes, truncated ? 1 : 0);
+}
+
+static void
+session_page_text_chunk (ChromiumSession *session, int id, const char *data,
+                         gpointer data_unused)
+{
+  if (page_text_sink.text && id == page_text_sink.id)
+    g_string_append (page_text_sink.text, data);
+}
+
+static void
+session_page_text_end (ChromiumSession *session, int id, gboolean truncated,
+                       gpointer data)
+{
+  g_autofree char *shown = NULL;
+  const char *text = page_text_sink.text ? page_text_sink.text->str : "";
+
+  shown = g_strndup (text, 400);
+  for (char *p = shown; *p; p++)
+    if ((guchar) *p < 0x20)
+      *p = ' ';
+  g_printerr ("demo: page-text id=%d bytes=%zu truncated=%d text=\"%s\"\n",
+              id, page_text_sink.text ? page_text_sink.text->len : 0,
+              truncated ? 1 : 0, shown);
+  if (page_text_sink.text)
+    g_string_free (page_text_sink.text, TRUE);
+  page_text_sink.text = NULL;
+}
+
+/* PDF bytes: collected per request, written to $CEFNEST_PDF_OUT when the host
+ * named a file, and summarized on stderr — head and tail are what tell a real
+ * PDF from an error page. */
+static struct {
+  int id;
+  GByteArray *bytes;
+} pdf_sink;
+
+static void
+session_pdf_begin (ChromiumSession *session, int id, int bytes,
+                   gboolean truncated, gpointer data)
+{
+  g_clear_pointer (&pdf_sink.bytes, g_byte_array_unref);
+  pdf_sink.id = id;
+  pdf_sink.bytes = g_byte_array_new ();
+  g_printerr ("demo: pdf-begin id=%d bytes=%d truncated=%d\n", id, bytes,
+              truncated ? 1 : 0);
+}
+
+static void
+session_pdf_chunk (ChromiumSession *session, int id, GBytes *data,
+                   gpointer data_unused)
+{
+  gsize length = 0;
+  const void *bytes = g_bytes_get_data (data, &length);
+
+  if (pdf_sink.bytes && id == pdf_sink.id)
+    g_byte_array_append (pdf_sink.bytes, bytes, length);
+}
+
+static void
+session_pdf_end (ChromiumSession *session, int id, int bytes, gboolean truncated,
+                 const char *error, gpointer data)
+{
+  const char *path = g_getenv ("CEFNEST_PDF_OUT");
+  const guint8 *bytes_data = pdf_sink.bytes ? pdf_sink.bytes->data : NULL;
+  gsize length = pdf_sink.bytes ? pdf_sink.bytes->len : 0;
+  gboolean magic = length >= 5 && !memcmp (bytes_data, "%PDF-", 5);
+  gboolean eof = FALSE;
+
+  if (length >= 8)
+    for (gsize at = length > 1024 ? length - 1024 : 0; at + 5 <= length; at++)
+      if (!memcmp (bytes_data + at, "%%EOF", 5))
+        eof = TRUE;
+
+  if (path && *path)
+    g_file_set_contents (path, (const char *) bytes_data, (gssize) length, NULL);
+  g_printerr ("demo: pdf id=%d bytes=%d truncated=%d error=\"%s\" magic=%d "
+              "eof=%d\n",
+              id, bytes, truncated ? 1 : 0, error ? error : "", magic ? 1 : 0,
+              eof ? 1 : 0);
+  g_clear_pointer (&pdf_sink.bytes, g_byte_array_unref);
+}
+
+static void
+session_favicon_changed (ChromiumSession *session, int browser,
+                         const char **urls, gpointer data)
+{
+  g_autofree char *joined = g_strjoinv (",", (char **) urls);
+
+  g_printerr ("demo: favicon browser=%d urls=%s\n", browser, joined);
+}
+
 static void
 session_closed (ChromiumSession *session, const char *reason, gpointer data)
 {
@@ -1795,6 +2625,10 @@ build_toolbar (GtkHeaderBar *header)
   GtkWidget *entry;
   GError *error = NULL;
 
+  demo.header = GTK_WIDGET (header);
+  demo.plugin_buttons = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                               g_free, g_object_unref);
+
   button = gtk_button_new_with_label ("+");
   gtk_widget_set_tooltip_text (button, "新标签 / New tab");
   g_signal_connect (button, "clicked", G_CALLBACK (new_tab_clicked), NULL);
@@ -1872,7 +2706,54 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_permission_request), NULL);
   g_signal_connect (demo.session, "permission-dismissed",
                     G_CALLBACK (session_permission_dismissed), NULL);
+  g_signal_connect (demo.session, "js-dialog",
+                    G_CALLBACK (session_js_dialog), NULL);
+  g_signal_connect (demo.session, "js-dialog-closed",
+                    G_CALLBACK (session_js_dialog_closed), NULL);
+  g_signal_connect (demo.session, "certificate-error",
+                    G_CALLBACK (session_certificate_error), NULL);
+  g_signal_connect (demo.session, "certificate-error-closed",
+                    G_CALLBACK (session_certificate_closed), NULL);
+  g_signal_connect (demo.session, "request-intercept",
+                    G_CALLBACK (session_request_intercept), NULL);
+  g_signal_connect (demo.session, "request-intercept-closed",
+                    G_CALLBACK (session_request_intercept_closed), NULL);
+  g_signal_connect (demo.session, "cdp-result",
+                    G_CALLBACK (session_cdp_result), NULL);
+  g_signal_connect (demo.session, "cdp-event",
+                    G_CALLBACK (session_cdp_event), NULL);
+  g_signal_connect (demo.session, "file-dialog",
+                    G_CALLBACK (session_file_dialog), NULL);
+  g_signal_connect (demo.session, "file-dialog-closed",
+                    G_CALLBACK (session_file_dialog_closed), NULL);
+  g_signal_connect (demo.session, "loading-progress",
+                    G_CALLBACK (session_loading_progress), NULL);
+  g_signal_connect (demo.session, "cookies-result",
+                    G_CALLBACK (session_cookies_result), NULL);
+  g_signal_connect (demo.session, "history-result",
+                    G_CALLBACK (session_history_result), NULL);
+  g_signal_connect (demo.session, "page-text-begin",
+                    G_CALLBACK (session_page_text_begin), NULL);
+  g_signal_connect (demo.session, "page-text-chunk",
+                    G_CALLBACK (session_page_text_chunk), NULL);
+  g_signal_connect (demo.session, "page-text-end",
+                    G_CALLBACK (session_page_text_end), NULL);
+  g_signal_connect (demo.session, "pdf-begin",
+                    G_CALLBACK (session_pdf_begin), NULL);
+  g_signal_connect (demo.session, "pdf-chunk",
+                    G_CALLBACK (session_pdf_chunk), NULL);
+  g_signal_connect (demo.session, "pdf-end",
+                    G_CALLBACK (session_pdf_end), NULL);
+  g_signal_connect (demo.session, "favicon-changed",
+                    G_CALLBACK (session_favicon_changed), NULL);
+  g_signal_connect (demo.session, "auto-resize-updated",
+                    G_CALLBACK (session_auto_resize_updated), NULL);
+  g_signal_connect (demo.session, "fullscreen-changed",
+                    G_CALLBACK (session_fullscreen_changed), NULL);
   g_signal_connect (demo.session, "closed", G_CALLBACK (session_closed), NULL);
+  if (demo.plugin_buttons == NULL)
+    demo.plugin_buttons = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                 g_free, g_object_unref);
   g_signal_connect (demo.session, "helper-exited",
                     G_CALLBACK (session_helper_exited), NULL);
   g_signal_connect (demo.session, "browser-created",
@@ -1881,6 +2762,8 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_browser_selected), NULL);
   g_signal_connect (demo.session, "browser-closed",
                     G_CALLBACK (session_browser_closed), NULL);
+  g_signal_connect (demo.session, "browser-surface",
+                    G_CALLBACK (session_browser_surface), NULL);
 
   /* Test hook: the source gate turns the component's own window off to grade
    * the ::view-source-only path; a real host would set the property for its
@@ -1890,6 +2773,36 @@ build_toolbar (GtkHeaderBar *header)
 
   if (demo.data_directory)
     chromium_session_set_data_directory (demo.session, demo.data_directory);
+
+  /* The start-time properties, read from the environment the same way the
+   * download and permission knobs are: a gate drives the demo without a host
+   * program of its own, and a real host would set the properties directly. */
+  if (g_getenv ("CEFNEST_PROXY"))
+    chromium_session_set_proxy (demo.session, g_getenv ("CEFNEST_PROXY"));
+  if (g_getenv ("CEFNEST_PROXY_BYPASS"))
+    chromium_session_set_proxy_bypass (demo.session, g_getenv ("CEFNEST_PROXY_BYPASS"));
+  if (g_getenv ("CEFNEST_ACCEPT_LANG"))
+    chromium_session_set_accept_language (demo.session,
+                                          g_getenv ("CEFNEST_ACCEPT_LANG"));
+  if (g_getenv ("CEFNEST_AUTO_RESIZE"))
+    {
+      const char *bounds = g_getenv ("CEFNEST_AUTO_RESIZE_BOUNDS");
+      int min_w = 0, min_h = 0, max_w = 0, max_h = 0;
+
+      if (bounds &&
+          4 == sscanf (bounds, "%d %d %d %d", &min_w, &min_h, &max_w, &max_h))
+        chromium_session_set_auto_resize_bounds (demo.session, min_w, min_h,
+                                                 max_w, max_h);
+      chromium_session_set_auto_resize (demo.session, TRUE);
+    }
+
+  /* Scan and enable before start(): the .so files load against the model
+     alone, and the helper that starts below is told the enabled set at
+     ::ready — the same rule the devtools switch follows. There is something
+     to scan when --plugin-dir named a directory, or when a data directory
+     anchors the install root the user may have installed into. */
+  if (demo.plugin_directory || demo.data_directory)
+    demo_setup_plugins ();
 
   if (!chromium_session_start (demo.session, initial_url (), &error))
     {
@@ -2316,10 +3229,23 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
  * "shot <path>", "dump <path>", "hover <x> <y>",
  * "click <x> <y> [button]", "drag <x0> <y0> <x1> <y1> [button]",
  * "drag-hold <x0> <y0> <x1> <y1> [button]", "release [button]", "surfaces",
- * "wheel <dx> <dy>", "mute", "unmute", "download-accept <path>",
+ * "wheel <dx> <dy>", "mute", "unmute", "zoom-set <level>",
+ * "auto-resize <on|off> [min-w min-h max-w max-h]", "download-accept <path>",
+ * "surface-size <browser-id>", "surface-sample <browser-id> [fx fy]",
+ * "cookies-get <url>", "cookies-set <url> <name> <value>",
+ * "cookies-delete <url> [name]", "history", "page-text", "print-pdf [max-bytes]",
  * "download-reject", "find <pattern>", "find-case <pattern>", "find-next",
  * "find-prev", "find-stop", "menu-pick <id>", "menu-dismiss",
  * "perm-accept <id>", "perm-deny <id>", "perm-dismiss <id>",
+ * "js-dialog-respond <id> <ok|cancel> [value]",
+ * "certificate-respond <id> <allow|deny>", "certificate-authorize <fp>",
+ * "intercept-add <id> <pattern>[;<pattern>…]", "intercept-remove <id>",
+ * "intercept-mode <passive|blocking>",
+ * "request-respond <id> <allow|cancel|redirect> [url]",
+ * "cdp-enable [browser]", "cdp-disable [browser]",
+ * "cdp-execute <id> <method> [json-params]",
+ * "popup-mode <window|popover>", "plugin-action <id>",
+ * "file-dialog-respond <id> [path[;path…]]",
  * "close", "quit". This is how a headless run proves navigation, history and
  * repaint all work together, and "close" is
  * how it proves the way out of the window stops the helper with it. A "js" step
@@ -2496,6 +3422,76 @@ script_drop_in (double x0, double y0, double x1, double y1, const char *payload,
   g_strfreev (types);
 }
 
+/* The paired surface of one browser, as a script can see it: the size the
+ * nested compositor configured, and one pixel of the client buffer. The pair
+ * comes from ::browser-surface, which is what the surface-pair gate grades —
+ * a pixel of this surface answering for that browser id is the whole claim. */
+static void
+script_surface_probe (const char *args, gboolean sample)
+{
+  int id = 0;
+  double fx = 0.5, fy = 0.5;
+  NestedSurface *surface;
+  int size = sample ? sscanf (args, "%d %lf %lf", &id, &fx, &fy)
+                    : sscanf (args, "%d", &id);
+
+  if (size < 1)
+    {
+      g_warning ("demo: surface-%s wants a browser id", sample ? "sample" : "size");
+      return;
+    }
+  surface = demo.session ? chromium_session_get_browser_surface (demo.session, id)
+                         : NULL;
+  if (!surface)
+    {
+      g_printerr ("demo: surface-%s browser=%d none\n",
+                  sample ? "sample" : "size", id);
+      return;
+    }
+
+  if (!sample)
+    {
+      int w = 0, h = 0;
+
+      nested_surface_get_size (surface, &w, &h);
+      g_printerr ("demo: surface-size browser=%d size=%dx%d\n", id, w, h);
+      return;
+    }
+
+  {
+    GdkTexture *texture = nested_surface_get_texture (surface);
+
+    if (!texture)
+      {
+        g_printerr ("demo: surface-sample browser=%d rgba=none\n", id);
+        return;
+      }
+    int w = gdk_texture_get_width (texture);
+    int h = gdk_texture_get_height (texture);
+    g_autofree guchar *data = g_malloc ((gsize) w * 4 * h);
+    int x, y;
+    guchar *p;
+    guchar r, g, b, a;
+
+    gdk_texture_download (texture, data, (gsize) w * 4);
+    x = CLAMP ((int) (w * fx), 0, w - 1);
+    y = CLAMP ((int) (h * fy), 0, h - 1);
+    p = data + ((gsize) y * w + x) * 4;
+
+    /* gdk_texture_download() always provides GDK_MEMORY_DEFAULT — cairo
+     * ARGB32, i.e. B,G,R,A in memory on little-endian — whatever the
+     * texture's own format was (gdkmemorytexture.h says so). The line says
+     * "rgba", so the gate gets the colour the page asked for. */
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+    b = p[0]; g = p[1]; r = p[2]; a = p[3];
+#else
+    a = p[0]; r = p[1]; g = p[2]; b = p[3];
+#endif
+    g_printerr ("demo: surface-sample browser=%d size=%dx%d rgba=%u,%u,%u,%u\n",
+                id, w, h, r, g, b, a);
+  }
+}
+
 static void
 script_finish (void)
 {
@@ -2516,6 +3512,11 @@ script_helper_gone (gpointer data)
   guint left;
 
   if (!session_script.steps)
+    return G_SOURCE_REMOVE;
+
+  /* A restart step stops the helper on purpose; the ::closed it produces is
+     expected, and the steps after it are for the new helper. */
+  if (demo.restart_pending)
     return G_SOURCE_REMOVE;
 
   /* Nothing left to dispatch: the last step was a wait or a dump, and the timer
@@ -2581,12 +3582,23 @@ script_run_next (void)
                             !strcmp (line, "stop") || !strcmp (line, "mute") ||
                             !strcmp (line, "unmute") ||
                             !strncmp (line, "zoom-", 5) ||
+                            !strncmp (line, "auto-resize", 11) ||
+                            !strncmp (line, "surface-", 8) ||
+                            !strncmp (line, "cookies-", 8) ||
+                            !strcmp (line, "history") ||
+                            !strcmp (line, "page-text") ||
+                            !strncmp (line, "print-pdf", 9) ||
                             !strncmp (line, "download-", 9) ||
                             !strncmp (line, "find", 4) ||
                             !strncmp (line, "menu-", 5) ||
                             !strncmp (line, "perm-", 5) ||
+                            !strncmp (line, "js-dialog-", 10) ||
+                            !strncmp (line, "file-dialog-", 12) ||
                             !strncmp (line, "a11y-", 5) ||
                             !strncmp (line, "devtools-", 9) ||
+                            !strncmp (line, "plugin-", 7) ||
+                            !strcmp (line, "restart") ||
+                            !strcmp (line, "clear-data") ||
                             !strncmp (line, "new-", 4) ||
                             !strncmp (line, "select-browser", 14) ||
                             !strncmp (line, "close-browser", 13)))
@@ -2638,6 +3650,72 @@ script_run_next (void)
         {
           chromium_session_set_devtools_enabled (demo.session, FALSE);
           continue;
+        }
+      else if (!strncmp (line, "plugin-enable ", 14) ||
+               !strncmp (line, "plugin-disable ", 15))
+        {
+          ChromiumPluginManager *manager = demo.session ?
+            chromium_session_get_plugin_manager (demo.session) : NULL;
+          const char *id = line + (line[7] == 'e' ? 14 : 15);
+          GError *error = NULL;
+
+          if (!manager)
+            g_printerr ("demo: %s without a session manager\n", line);
+          else if (line[7] == 'e')
+            {
+              if (!chromium_plugin_manager_enable (manager, id, &error))
+                g_printerr ("demo: plugin-enable %s failed: %s\n", id,
+                            error ? error->message : "unknown");
+              g_clear_error (&error);
+            }
+          else
+            {
+              chromium_plugin_manager_disable (manager, id);
+              g_printerr ("demo: plugin %s disabled\n", id);
+            }
+          continue;
+        }
+      else if (!strncmp (line, "popup-mode ", 11))
+        {
+          /* Which host form a ::plugin-action takes: the standalone window
+           * (搭法一, the default) or a popover under the plugin's button
+           * (搭法二). A script can drive both; a real host picks one. */
+          const char *mode = line + 11;
+
+          demo.popup_in_popover = g_strcmp0 (mode, "popover") == 0;
+          g_printerr ("demo: popup mode %s\n",
+                      demo.popup_in_popover ? "popover" : "window");
+          continue;
+        }
+      else if (!strncmp (line, "plugin-action ", 14))
+        {
+          /* The button click without the button: the same manager entry the
+           * action button lands on, for scripts that cannot point at a
+           * header bar. */
+          ChromiumPluginManager *manager = demo.session ?
+            chromium_session_get_plugin_manager (demo.session) : NULL;
+
+          if (!manager)
+            g_printerr ("demo: plugin-action without a session manager\n");
+          else
+            chromium_plugin_manager_activate_action (manager, line + 14);
+          continue;
+        }
+      else if (!strcmp (line, "restart"))
+        {
+          g_printerr ("demo: restarting the helper\n");
+          demo.restart_pending = TRUE;
+          chromium_session_stop (demo.session);
+          g_timeout_add (300, demo_restart_start, NULL);
+          return;
+        }
+      else if (!strcmp (line, "clear-data"))
+        {
+          g_printerr ("demo: stopping the helper for clear-data\n");
+          demo.restart_pending = TRUE;
+          chromium_session_stop (demo.session);
+          g_timeout_add (200, demo_clear_data_try, NULL);
+          return;
         }
       else if (!strcmp (line, "hide"))
         {
@@ -2695,12 +3773,92 @@ script_run_next (void)
           dump_view ((gpointer) (line + 5));
           return;
         }
+      else if (!strncmp (line, "cookies-get ", 12))
+        {
+          chromium_session_cookies_get (demo.session,
+                                        (int) session_script.index, line + 12);
+          continue;
+        }
+      else if (!strncmp (line, "cookies-set ", 12))
+        {
+          /* cookies-set <url> <name> <value> — one cookie is all the demo's
+           * script needs; the component API takes the array form. */
+          g_auto (GStrv) parts = g_strsplit (line + 12, " ", 3);
+          g_autoptr (JsonBuilder) builder = json_builder_new ();
+          g_autoptr (JsonNode) root = NULL;
+          g_autoptr (JsonGenerator) generator = json_generator_new ();
+          g_autofree char *json = NULL;
+          gsize length = 0;
+
+          if (g_strv_length (parts) < 3)
+            {
+              g_warning ("demo: cookies-set wants <url> <name> <value>");
+              continue;
+            }
+          json_builder_begin_array (builder);
+          json_builder_begin_object (builder);
+          json_builder_set_member_name (builder, "name");
+          json_builder_add_string_value (builder, parts[1]);
+          json_builder_set_member_name (builder, "value");
+          json_builder_add_string_value (builder, parts[2]);
+          json_builder_end_object (builder);
+          json_builder_end_array (builder);
+          root = json_builder_get_root (builder);
+          json_generator_set_root (generator, root);
+          json = json_generator_to_data (generator, &length);
+          chromium_session_cookies_set (demo.session, (int) session_script.index,
+                                        parts[0], json);
+          continue;
+        }
+      else if (!strncmp (line, "cookies-delete ", 15))
+        {
+          /* cookies-delete <url> [name] */
+          g_auto (GStrv) parts = g_strsplit (line + 15, " ", 2);
+
+          if (g_strv_length (parts) < 1 || !*parts[0])
+            {
+              g_warning ("demo: cookies-delete wants <url> [name]");
+              continue;
+            }
+          chromium_session_cookies_delete (
+            demo.session, (int) session_script.index, parts[0],
+            g_strv_length (parts) > 1 ? parts[1] : NULL);
+          continue;
+        }
+      else if (!strcmp (line, "history"))
+        {
+          chromium_session_history (demo.session, (int) session_script.index);
+          continue;
+        }
+      else if (!strcmp (line, "page-text"))
+        {
+          chromium_session_page_text (demo.session, (int) session_script.index);
+          continue;
+        }
+      else if (!strncmp (line, "print-pdf", 9))
+        {
+          /* print-pdf [max-bytes] — a cap is how a run asks for a stream cut
+           * short on purpose. */
+          int max_bytes = line[9] ? atoi (line + 10) : 0;
+
+          if (max_bytes > 0)
+            {
+              ChromiumPdfSettings settings = { 0 };
+
+              settings.max_bytes = max_bytes;
+              chromium_session_print_pdf_with_settings (
+                demo.session, (int) session_script.index, &settings);
+            }
+          else
+            chromium_session_print_pdf (demo.session,
+                                        (int) session_script.index);
+          continue;
+        }
       else if (!strcmp (line, "back"))
         {
           chromium_session_go_back (demo.session);
           continue;
-        }
-      else if (!strcmp (line, "forward"))
+        }      else if (!strcmp (line, "forward"))
         {
           chromium_session_go_forward (demo.session);
           continue;
@@ -2733,6 +3891,49 @@ script_run_next (void)
       else if (!strcmp (line, "zoom-reset"))
         {
           chromium_session_zoom (demo.session, "reset");
+          continue;
+        }
+      else if (!strncmp (line, "zoom-set ", 9))
+        {
+          double level = 0;
+          char extra = 0;
+
+          if (1 != sscanf (line + 9, "%lf %c", &level, &extra))
+            {
+              g_warning ("demo: zoom-set wants one level, got '%s'", line);
+              continue;
+            }
+          chromium_session_set_zoom_level (demo.session, level);
+          continue;
+        }
+      else if (!strncmp (line, "auto-resize ", 12))
+        {
+          const char *args = line + 12;
+          char verdict[8] = "";
+          int min_w = 0, min_h = 0, max_w = 0, max_h = 0;
+          int used = 0;
+          gboolean enabled;
+
+          if (sscanf (args, "%7s%n", verdict, &used) < 1)
+            {
+              g_warning ("demo: auto-resize wants on|off, got '%s'", line);
+              continue;
+            }
+          if (!strcmp (verdict, "on"))
+            enabled = TRUE;
+          else if (!strcmp (verdict, "off"))
+            enabled = FALSE;
+          else
+            {
+              g_warning ("demo: auto-resize wants on|off, got '%s'", verdict);
+              continue;
+            }
+          if (args[used] &&
+              4 == sscanf (args + used, "%d %d %d %d", &min_w, &min_h, &max_w,
+                           &max_h))
+            chromium_session_set_auto_resize_bounds (demo.session, min_w, min_h,
+                                                     max_w, max_h);
+          chromium_session_set_auto_resize (demo.session, enabled);
           continue;
         }
       else if (!strcmp (line, "mute"))
@@ -2900,6 +4101,243 @@ script_run_next (void)
         {
           chromium_session_context_menu_dismiss (demo.session);
           g_printerr ("demo: menu dismiss\n");
+          continue;
+        }
+      else if (!strncmp (line, "js-dialog-respond ", 18))
+        {
+          /* The id from the "demo: js-dialog" line, standing in for the button
+           * a finger would press. The rest of the line is the prompt's answer
+           * verbatim — spaces and all — because a page may ask for anything. */
+          int id = 0;
+          char verdict[8] = "";
+          int used = 0;
+          JsDialogRow *row;
+          const char *value;
+
+          if (sscanf (line + 18, "%d %7s%n", &id, verdict, &used) < 2)
+            {
+              g_warning ("demo: js-dialog-respond wants '<id> ok|cancel [value]',"
+                         " got '%s'", line);
+              continue;
+            }
+          value = line + 18 + used;
+          while (*value == ' ')
+            value++;
+          if (strcmp (verdict, "ok") && strcmp (verdict, "cancel"))
+            {
+              g_warning ("demo: js-dialog-respond wants ok or cancel, got '%s'",
+                         verdict);
+              continue;
+            }
+          row = js_dialog_row_for (id);
+          if (!row || row->decided)
+            {
+              g_warning ("demo: no js dialog %d is waiting for an answer", id);
+              continue;
+            }
+          js_dialog_answer (row, !strcmp (verdict, "ok"), value);
+          continue;
+        }
+      else if (!strncmp (line, "certificate-respond ", 20))
+        {
+          /* The id from the "demo: certificate-error" line; the verdict is
+             the whole decision the host would have made. */
+          int id = 0;
+          char verdict[8] = "";
+
+          if (sscanf (line + 20, "%d %7s", &id, verdict) != 2 ||
+              (strcmp (verdict, "allow") && strcmp (verdict, "deny")))
+            {
+              g_warning ("demo: certificate-respond wants '<id> allow|deny',"
+                         " got '%s'", line);
+              continue;
+            }
+          chromium_session_certificate_respond (demo.session, id,
+                                                !strcmp (verdict, "allow"));
+          g_printerr ("demo: certificate %d %s\n", id, verdict);
+          continue;
+        }
+      else if (!strncmp (line, "certificate-authorize ", 22))
+        {
+          chromium_session_certificate_authorize (demo.session, line + 22);
+          g_printerr ("demo: certificate authorize %.16s...\n", line + 22);
+          continue;
+        }
+      else if (!strncmp (line, "intercept-add ", 14))
+        {
+          /* intercept-add <id> <pattern>[;<pattern>…] — the host's own id,
+           * the patterns verbatim from the script line. */
+          int id = 0;
+          const char *patterns;
+          char *copy;
+          const char *patterns_argv[64] = {0};
+          int n = 0;
+          char *p;
+
+          if (sscanf (line + 14, "%d", &id) != 1 || line[14] == '\0')
+            {
+              g_warning ("demo: intercept-add wants '<id> <patterns>', got"
+                         " '%s'", line);
+              continue;
+            }
+          patterns = line + 14;
+          while (*patterns && *patterns != ' ')
+            patterns++;   /* the id the sscanf already read */
+          while (*patterns == ' ')
+            patterns++;
+          copy = g_strdup (patterns);
+          patterns_argv[n++] = copy;
+          for (p = copy; *p && n < 63; p++)
+            if (*p == ';')
+              {
+                *p = '\0';
+                patterns_argv[n++] = p + 1;
+              }
+          chromium_session_intercept_add (demo.session, (guint) id,
+                                          patterns_argv, NULL);
+          g_free (copy);
+          g_printerr ("demo: intercept-add %d (%d patterns)\n", id, n);
+          continue;
+        }
+      else if (!strncmp (line, "intercept-remove ", 17))
+        {
+          chromium_session_intercept_remove (demo.session,
+                                             (guint) atoi (line + 17));
+          g_printerr ("demo: intercept-remove %s\n", line + 17);
+          continue;
+        }
+      else if (!strncmp (line, "intercept-mode ", 15))
+        {
+          gboolean passive = !strncmp (line + 15, "passive", 7);
+
+          chromium_session_intercept_set_passive (demo.session, passive);
+          g_printerr ("demo: intercept-mode %s\n",
+                      passive ? "passive" : "blocking");
+          continue;
+        }
+      else if (!strncmp (line, "request-respond ", 16))
+        {
+          /* request-respond <id> allow|cancel|redirect [url] */
+          int id = 0;
+          char action[16] = "";
+          int used = 0;
+          const char *url;
+
+          if (sscanf (line + 16, "%d %15s%n", &id, action, &used) < 2)
+            {
+              g_warning ("demo: request-respond wants '<id> allow|cancel|"
+                         "redirect [url]', got '%s'", line);
+              continue;
+            }
+          url = line + 16 + used;
+          while (*url == ' ')
+            url++;
+          if (!strcmp (action, "allow"))
+            chromium_session_request_respond (demo.session, id,
+                                              CHROMIUM_REQUEST_ALLOW, NULL);
+          else if (!strcmp (action, "cancel"))
+            chromium_session_request_respond (demo.session, id,
+                                              CHROMIUM_REQUEST_CANCEL, NULL);
+          else if (!strcmp (action, "redirect"))
+            chromium_session_request_respond (demo.session, id,
+                                              CHROMIUM_REQUEST_REDIRECT,
+                                              *url ? url : NULL);
+          else
+            {
+              g_warning ("demo: request-respond wants allow, cancel or"
+                         " redirect, got '%s'", action);
+              continue;
+            }
+          g_printerr ("demo: request %d %s\n", id, action);
+          continue;
+        }
+      else if (!strncmp (line, "cdp-enable", 10) &&
+               (line[10] == '\0' || line[10] == ' '))
+        {
+          int id = 0;
+
+          sscanf (line + 10, "%*s %d", &id);
+          chromium_session_cdp_enable (demo.session, id);
+          g_printerr ("demo: cdp-enable browser=%d\n", id);
+          continue;
+        }
+      else if (!strncmp (line, "cdp-disable", 11) &&
+               (line[11] == '\0' || line[11] == ' '))
+        {
+          int id = 0;
+
+          sscanf (line + 11, "%*s %d", &id);
+          chromium_session_cdp_disable (demo.session, id);
+          g_printerr ("demo: cdp-disable browser=%d\n", id);
+          continue;
+        }
+      else if (!strncmp (line, "cdp-execute ", 12))
+        {
+          /* cdp-execute <id> <method> [json-params] — the rest of the line
+             is the params verbatim, because a script can carry JSON. */
+          int id = 0;
+          char method[128] = "";
+          int used = 0;
+          const char *params;
+
+          if (sscanf (line + 12, "%d %127s%n", &id, method, &used) < 2)
+            {
+              g_warning ("demo: cdp-execute wants '<id> <method> [json]',"
+                         " got '%s'", line);
+              continue;
+            }
+          params = line + 12 + used;
+          while (*params == ' ')
+            params++;
+          chromium_session_cdp_execute (demo.session, id, 0, method,
+                                        *params ? params : "");
+          g_printerr ("demo: cdp-execute id=%d method=%s\n", id, method);
+          continue;
+        }
+      else if (!strncmp (line, "file-dialog-respond ", 20))
+        {
+          /* One path is the common case; a semicolon separates the several an
+           * open-multiple asks for. No paths at all is the cancel. */
+          int id = 0;
+          int used = 0;
+          const char *rest = line + 20;
+          const char *paths_at;
+          FileDialogRow *row;
+
+          if (1 != sscanf (rest, "%d%n", &id, &used))
+            {
+              g_warning ("demo: file-dialog-respond wants '<id> [path[;path…]]',"
+                         " got '%s'", line);
+              continue;
+            }
+          paths_at = rest + used;
+          while (*paths_at == ' ')
+            paths_at++;
+          row = file_dialog_row_for (id);
+          if (!row || row->decided)
+            {
+              g_warning ("demo: no file dialog %d is waiting for an answer", id);
+              continue;
+            }
+          if (!*paths_at)
+            file_dialog_answer (row, NULL);
+          else
+            {
+              g_auto (GStrv) paths = g_strsplit (paths_at, ";", -1);
+              gsize i;
+
+              /* An empty element would be a path of "", which no chooser can
+               * return; the separator is the whole grammar. */
+              for (i = 0; paths[i]; i++)
+                if (!*paths[i])
+                  break;
+              if (paths[i])
+                {
+                  g_warning ("demo: empty path in '%s'", line);
+                  continue;
+                }
+              file_dialog_answer (row, (const char *const *) paths);
+            }
           continue;
         }
       else if (!strncmp (line, "perm-", 5))
@@ -3070,6 +4508,16 @@ script_run_next (void)
             nested_compositor_drag_from_host_cancel (compositor);
           continue;
         }
+      else if (!strncmp (line, "surface-sample ", 15))
+        {
+          script_surface_probe (line + 15, TRUE);
+          continue;
+        }
+      else if (!strncmp (line, "surface-size ", 13))
+        {
+          script_surface_probe (line + 13, FALSE);
+          continue;
+        }
       else if (!strcmp (line, "surfaces"))
         {
           GList *stack, *l;
@@ -3216,6 +4664,405 @@ start_session_script (void)
    * path keeps a fixed guess. */
   if (!demo.session)
     g_timeout_add (800, script_wait_done, NULL);
+}
+
+/* ------------------------------------------------------------------ *
+ * --plugin-dir: the demo's own plugin policy                         *
+ *                                                                    *
+ * The demo is also the plugin gate's driver, so its policy is the    *
+ * simplest one that exercises the machinery: scan, enable everything *
+ * that parsed, grant what enable() asks for. A real host shows the   *
+ * person a prompt at ::grant-request instead — the component         *
+ * deliberately has no policy of its own.                             *
+ * ------------------------------------------------------------------ */
+
+static void
+demo_grant_request (ChromiumPluginManager *manager, const char *id,
+                    const char *const *permissions,
+                    ChromiumPluginPermissionRequest *request, gpointer data)
+{
+  GString *names = g_string_new (NULL);
+
+  for (guint i = 0; permissions && permissions[i]; i++)
+    {
+      if (names->len)
+        g_string_append (names, ", ");
+      g_string_append (names, permissions[i]);
+    }
+  g_printerr ("demo: granting [%s] to plugin %s\n",
+              names->len ? names->str : "(none)", id);
+  g_string_free (names, TRUE);
+
+  /* The demo's policy is the synchronous one: it grants everything the
+     manifest declared, and accept() both fills the table and settles the
+     enable that asked. A host with a dialog would keep the request and answer
+     it later. */
+  chromium_plugin_permission_request_accept (request);
+}
+
+static void
+demo_plugin_error (ChromiumPluginManager *manager, const char *id,
+                   const char *message, gpointer data)
+{
+  g_printerr ("demo: plugin error %s: %s\n", id, message);
+}
+
+static void
+demo_setup_plugins (void)
+{
+  ChromiumPluginManager *manager;
+  GListModel *model;
+  GError *error = NULL;
+  guint n;
+
+  manager = chromium_session_get_plugin_manager (demo.session);
+  g_signal_connect (manager, "plugin-error",
+                    G_CALLBACK (demo_plugin_error), NULL);
+  g_signal_connect (manager, "grant-request",
+                    G_CALLBACK (demo_grant_request), NULL);
+
+  /* --plugin-dir names a directory to scan; the install root the session
+     anchored on the data directory is already in the manager. Either may
+     hold plugins, and neither is required. */
+  if (demo.plugin_directory &&
+      !chromium_plugin_manager_add_search_path (manager,
+                                                demo.plugin_directory,
+                                                &error))
+    {
+      g_printerr ("demo: --plugin-dir %s: %s\n", demo.plugin_directory,
+                  error ? error->message : "unknown");
+      g_clear_error (&error);
+      return;
+    }
+
+  /* A path that cannot be read is not the end of the scan: the per-plugin
+     refusals land in the model either way, and the demo prints them below. */
+  if (!chromium_plugin_manager_scan (manager, &error))
+    {
+      g_printerr ("demo: plugin scan: %s\n",
+                  error ? error->message : "unknown");
+      g_clear_error (&error);
+    }
+
+  model = chromium_plugin_manager_get_plugins (manager);
+  n = g_list_model_get_n_items (model);
+  for (guint i = 0; i < n; i++)
+    {
+      ChromiumPlugin *plugin = g_list_model_get_item (model, i);
+      ChromiumPluginState state = chromium_plugin_get_state (plugin);
+      const char *id = chromium_plugin_get_id (plugin);
+      GEnumClass *states = g_type_class_ref (CHROMIUM_TYPE_PLUGIN_STATE);
+      GEnumValue *value = g_enum_get_value (states, state);
+
+      g_printerr ("demo: plugin %s name=%s kind=%s state=%s%s%s\n", id,
+                  chromium_plugin_get_name (plugin),
+                  chromium_plugin_get_kind (plugin) ?
+                    chromium_plugin_get_kind (plugin) : "-",
+                  value ? value->value_nick : "?",
+                  state == CHROMIUM_PLUGIN_STATE_REFUSED ? " error=" : "",
+                  state == CHROMIUM_PLUGIN_STATE_REFUSED ?
+                    chromium_plugin_get_error_message (plugin) : "");
+      g_type_class_unref (states);
+
+      if (state == CHROMIUM_PLUGIN_STATE_SCANNED)
+        {
+          if (chromium_plugin_manager_enable (manager, id, &error))
+            g_printerr ("demo: plugin %s enabled\n", id);
+          else
+            g_printerr ("demo: plugin %s not enabled: %s\n", id,
+                        error ? error->message : "unknown");
+          g_clear_error (&error);
+        }
+
+      /* One action button per enabled plugin, the way §2.9 sketches it. The
+         click is the manager's activate_action: ::plugin-action for the
+         host's own popup policy, chrome.action.onClicked for the plugin. */
+      if (chromium_plugin_get_enabled (plugin) && demo.header &&
+          !g_hash_table_contains (demo.plugin_buttons, id))
+        {
+          /* ::plugin-action lives on the manager; connect here, once, on the
+             manager the session owns. */
+          g_signal_connect (manager, "plugin-action",
+                            G_CALLBACK (session_plugin_action), NULL);
+
+          GtkWidget *action = gtk_button_new_with_label (
+            chromium_plugin_get_name (plugin));
+
+          gtk_widget_set_tooltip_text (action, id);
+          g_object_set_data_full (G_OBJECT (action), "plugin-id",
+                                  g_strdup (id), g_free);
+          g_signal_connect (action, "clicked",
+                            G_CALLBACK (plugin_action_clicked), NULL);
+          gtk_header_bar_pack_end (GTK_HEADER_BAR (demo.header), action);
+          g_hash_table_insert (demo.plugin_buttons, g_strdup (id),
+                               g_object_ref (action));
+        }
+      g_object_unref (plugin);
+    }
+}
+
+static void
+plugin_action_clicked (GtkButton *button, gpointer data)
+{
+  ChromiumPluginManager *manager = demo.session ?
+    chromium_session_get_plugin_manager (demo.session) : NULL;
+  const char *id = g_object_get_data (G_OBJECT (button), "plugin-id");
+
+  if (!manager || !id)
+    return;
+  g_printerr ("demo: plugin action pressed %s\n", id);
+  chromium_plugin_manager_activate_action (manager, id);
+}
+
+/* ::plugin-action: 搭法一 — the popup opens in a window of its own, the same
+   route devtools takes, and the demo's existing windowed-browser claiming
+   gives it a surface. Nothing here sizes or anchors it: that is the part the
+   plan leaves to the host, and the demo host does the simple thing.
+   搭法二 — the "popup-mode popover" step switches the same action to a
+   GtkPopover under the plugin's own button: the browser is created just the
+   same (its CefWindow still makes the toplevel the FIFO pairs), but the
+   surface is claimed by a view inside the popover, sized to the manifest's
+   clamped popup box, and its frames are suspended the moment the popover
+   closes. The plan's mechanism acceptance, not a library promise. */
+
+/* A one-child container that is exactly the size it was built with. The
+   popover sizes itself to its child's preferred size, and ChromiumView
+   prefers 960x960 — so without this the popup page would configure its
+   surface to 960x960 and the clamped popup box would exist only in the
+   demo's intentions. */
+#define DEMO_TYPE_POPUP_BIN (demo_popup_bin_get_type ())
+G_DECLARE_FINAL_TYPE (DemoPopupBin, demo_popup_bin, DEMO, POPUP_BIN, GtkWidget)
+
+struct _DemoPopupBin
+{
+  GtkWidget parent;
+  GtkWidget *child;
+  int width;
+  int height;
+};
+
+G_DEFINE_TYPE (DemoPopupBin, demo_popup_bin, GTK_TYPE_WIDGET)
+
+static GtkSizeRequestMode
+demo_popup_bin_get_request_mode (GtkWidget *widget)
+{
+  return GTK_SIZE_REQUEST_CONSTANT_SIZE;
+}
+
+static void
+demo_popup_bin_measure (GtkWidget *widget, GtkOrientation orientation,
+                        int for_size, int *minimum, int *natural,
+                        int *minimum_baseline, int *natural_baseline)
+{
+  DemoPopupBin *self = DEMO_POPUP_BIN (widget);
+
+  *minimum = *natural = orientation == GTK_ORIENTATION_HORIZONTAL
+                            ? self->width : self->height;
+  if (minimum_baseline)
+    *minimum_baseline = -1;
+  if (natural_baseline)
+    *natural_baseline = -1;
+}
+
+static void
+demo_popup_bin_size_allocate (GtkWidget *widget, int width, int height,
+                              int baseline)
+{
+  DemoPopupBin *self = DEMO_POPUP_BIN (widget);
+  GdkRectangle box = { 0, 0, width, height };
+
+  if (self->child)
+    gtk_widget_size_allocate (self->child, &box, baseline);
+}
+
+static void
+demo_popup_bin_dispose (GObject *object)
+{
+  DemoPopupBin *self = DEMO_POPUP_BIN (object);
+
+  g_clear_pointer (&self->child, gtk_widget_unparent);
+  G_OBJECT_CLASS (demo_popup_bin_parent_class)->dispose (object);
+}
+
+static void
+demo_popup_bin_init (DemoPopupBin *self)
+{
+}
+
+static void
+demo_popup_bin_class_init (DemoPopupBinClass *klass)
+{
+  GtkWidgetClass *widget_class = GTK_WIDGET_CLASS (klass);
+  GObjectClass *object_class = G_OBJECT_CLASS (klass);
+
+  object_class->dispose = demo_popup_bin_dispose;
+  widget_class->get_request_mode = demo_popup_bin_get_request_mode;
+  widget_class->measure = demo_popup_bin_measure;
+  widget_class->size_allocate = demo_popup_bin_size_allocate;
+}
+
+static GtkWidget *
+demo_popup_bin_new (int width, int height)
+{
+  DemoPopupBin *self = g_object_new (DEMO_TYPE_POPUP_BIN, NULL);
+
+  self->width = width;
+  self->height = height;
+  return GTK_WIDGET (self);
+}
+
+static void
+popup_popover_closed (GtkPopover *popover, gpointer data)
+{
+  NestedCompositor *compositor = NULL;
+
+  if (demo.popup_surface && demo.view)
+    {
+      compositor = chromium_view_get_compositor (demo.view);
+      if (compositor)
+        nested_compositor_set_frames_suspended (compositor,
+                                                demo.popup_surface, TRUE);
+    }
+  g_printerr ("demo: popup popover closed (browser %d)\n",
+              demo.popup_browser);
+  /* The popup page is transient: the popover going away takes its browser
+     with it, and ::browser-closed tears the rest down. */
+  if (demo.session && demo.popup_browser)
+    chromium_session_close_browser (demo.session, demo.popup_browser);
+}
+
+static void
+open_popup_popover (int id)
+{
+  NestedCompositor *compositor;
+  ChromiumView *view;
+  GtkWidget *popover;
+  GtkWidget *anchor;
+
+  anchor = demo.plugin_buttons ?
+    g_hash_table_lookup (demo.plugin_buttons, demo.popup_pending_plugin) : NULL;
+  compositor = demo.view ? chromium_view_get_compositor (demo.view) : NULL;
+  if (!anchor || !compositor)
+    {
+      /* No button or no compositor: the window form is the working fallback
+         and the demo says so. */
+      g_printerr ("demo: popup popover unavailable, opening a window\n");
+      open_browser_window (id, FALSE, NULL);
+      return;
+    }
+
+  view = chromium_view_new_shared (compositor, NULL);
+  {
+    GtkWidget *bin = demo_popup_bin_new (demo.popup_width, demo.popup_height);
+
+    gtk_widget_set_parent (GTK_WIDGET (view), bin);
+    popover = gtk_popover_new ();
+    gtk_popover_set_child (GTK_POPOVER (popover), bin);
+  }
+  gtk_popover_set_autohide (GTK_POPOVER (popover), TRUE);
+  gtk_widget_set_parent (popover, anchor);
+  g_signal_connect (popover, "closed", G_CALLBACK (popup_popover_closed),
+                    NULL);
+
+  demo.popup_popover = popover;
+  demo.popup_browser = id;
+  g_hash_table_insert (demo.browser_views, GINT_TO_POINTER (id), view);
+  demo.pending_window_ids = g_list_append (demo.pending_window_ids,
+                                           GINT_TO_POINTER (id));
+  assign_browser_surfaces ();
+  gtk_popover_popup (GTK_POPOVER (popover));
+  g_printerr ("demo: popup popover browser %d (%dx%d)\n",
+              id, demo.popup_width, demo.popup_height);
+}
+
+static void
+session_plugin_action (ChromiumPluginManager *manager, const char *id,
+                       gpointer data)
+{
+  g_autoptr (ChromiumPlugin) plugin =
+    chromium_plugin_manager_lookup (manager, id);
+  const char *popup = plugin ?
+    chromium_plugin_get_popup_uri (plugin) : NULL;
+  int width = 0, height = 0;
+
+  if (!popup || !*popup)
+    {
+      g_printerr ("demo: plugin action %s has no popup to show\n", id);
+      return;
+    }
+  chromium_plugin_get_popup_size (plugin, &width, &height);
+  g_printerr ("demo: opening popup %s (%dx%d)\n", popup, width, height);
+  if (!demo.session)
+    return;
+  if (!demo.popup_in_popover)
+    {
+      /* 搭法一: the popup is an ordinary standalone browser from here on. */
+      chromium_session_new_browser (demo.session, popup, TRUE);
+      return;
+    }
+  g_free (demo.popup_pending_plugin);
+  g_free (demo.popup_pending_uri);
+  demo.popup_pending_plugin = g_strdup (id);
+  demo.popup_pending_uri = g_strdup (popup);
+  demo.popup_width = width;
+  demo.popup_height = height;
+  chromium_session_new_browser (demo.session, popup, TRUE);
+}
+
+/* The clear-data step: stop() first, then retry clear_data on a timer until
+   the reaped helper's flock is gone — the helper holds the directory lock
+   for as long as the process lives, and the reap is not synchronous. */
+static gboolean
+demo_clear_data_try (gpointer data)
+{
+  GError *error = NULL;
+  static guint attempts = 0;
+
+  if (chromium_session_clear_data (demo.session, &error))
+    {
+      attempts = 0;
+      g_printerr ("demo: data cleared\n");
+      script_run_next ();
+      return G_SOURCE_REMOVE;
+    }
+  if (++attempts > 25)
+    {
+      attempts = 0;
+      g_printerr ("demo: clear-data failed: %s\n",
+                  error ? error->message : "unknown");
+      g_clear_error (&error);
+      demo.exit_status = 1;
+      script_finish ();
+      g_application_quit (G_APPLICATION (demo.app));
+      return G_SOURCE_REMOVE;
+    }
+  g_clear_error (&error);
+  return G_SOURCE_CONTINUE;
+}
+
+/* The restart step: stop() synchronously, then give the reap a turn on the
+   main loop before start() — start() refuses with BUSY while the previous
+   child is still being waited on. */
+static gboolean
+demo_restart_start (gpointer data)
+{
+  GError *error = NULL;
+
+  demo.restart_pending = FALSE;
+
+  if (!chromium_session_start (demo.session, NULL, &error))
+    {
+      g_printerr ("demo: restart failed: %s\n",
+                  error ? error->message : "unknown");
+      g_clear_error (&error);
+      demo.exit_status = 1;
+      script_finish ();
+      g_application_quit (G_APPLICATION (demo.app));
+      return G_SOURCE_REMOVE;
+    }
+  g_printerr ("demo: session restarted\n");
+  script_run_next ();
+  return G_SOURCE_REMOVE;
 }
 
 /* The first command of a session script lands here rather than on a timer. A
@@ -3458,6 +5305,13 @@ app_shutdown (GApplication *application, gpointer data)
 static gboolean
 signal_quit (gpointer data)
 {
+  /* A plain quit left the helper drawing into a compositor nobody was
+   * reading — a timeout(1)-wrapped run then hung at full CPU until its
+   * SIGKILL (measured: 6 h 21 min at 97%). Stopping the session first takes
+   * the page down; quit still fires from the main loop, which the signal
+   * source already woke. */
+  if (demo.session)
+    chromium_session_stop (demo.session);
   g_application_quit (G_APPLICATION (data));
   return G_SOURCE_REMOVE;
 }
@@ -3556,6 +5410,7 @@ activate (GApplication *application, gpointer data)
       build_find_bar (GTK_BOX (box));
       build_download_panel (GTK_BOX (box));
       build_permission_panel (GTK_BOX (box));
+      build_dialog_panel (GTK_BOX (box));
       build_toolbar (GTK_HEADER_BAR (header));
 
       /* Ctrl+F belongs to the window, not to the page: the widget forwards
@@ -3635,6 +5490,13 @@ main (int argc, char *argv[])
           continue;
         }
 
+      if (g_str_has_prefix (argv[i], "--plugin-dir="))
+        {
+          g_free (demo.plugin_directory);
+          demo.plugin_directory = g_strdup (argv[i] + strlen ("--plugin-dir="));
+          continue;
+        }
+
       if (!strcmp (argv[i], "--devtools"))
         {
           demo.devtools = TRUE;
@@ -3667,6 +5529,7 @@ main (int argc, char *argv[])
   g_object_unref (app);
   g_strfreev (demo.client_argv);
   g_free (demo.data_directory);
+  g_free (demo.plugin_directory);
   /* Not a fixed 0: a scripted run cut short by its helper dying sets
    * demo.exit_status, and a harness only sees the difference if it is handed out. */
   return demo.exit_status;

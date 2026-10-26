@@ -33,7 +33,7 @@ quit
 SESSION
 
 echo "== page selection -> host primary"
-timeout 90 env GDK_BACKEND=wayland CHROMIUM_PRIMARYWATCH=1 \
+timeout --kill-after=10s 90 env GDK_BACKEND=wayland CHROMIUM_PRIMARYWATCH=1 \
   CHROMIUM_HELPER="$HELPER" CHROMIUM_SESSION_SCRIPT="$WORK/primary.session" \
   "$DEMO" >"$WORK/out" 2>"$WORK/err"
 rc=$?

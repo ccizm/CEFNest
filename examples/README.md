@@ -31,6 +31,32 @@ protocol between session and helper: [`docs/control-channel.md`](../docs/control
 | `devtools.c` | the inspector switch: F12 / the 检查 row, and a GTK window per inspector it opens |
 | `useragent.c` | switching the User-Agent at runtime: restart the session, the new `CHROMIUM_USER_AGENT` rides with the helper |
 | `persistent.c` | a data directory: localStorage read back across restarts, and `clear_data()` when the user asks to forget |
+| `plugin-adblock/` | a Web-frontend plugin, not a host: an EasyList-shaped cosmetic blocker with a per-site switch, an Alt+Shift+Click picker, `chrome.storage`, a `chrome.tabs`-aware popup — and the line it cannot cross (no `webRequest`) |
 
 Each file's header comment is its full write-up; start with `minimal.c` and
 pick what you need.
+
+The plugin has no build step of its own. Install it where plugins live —
+`<data-dir>/cefnest-plugins/` — and open its page; the data directory is also
+what makes its rules and counters survive a restart:
+
+```bash
+DATA=$(mktemp -d)
+mkdir -p "$DATA/cefnest-plugins"
+cp -r examples/plugin-adblock "$DATA/cefnest-plugins/"
+CHROMIUM_HELPER=$PWD/helper/build/Release/cefnest-helper \
+  ./builddir/src/cefnest-demo --data-dir="$DATA" \
+  file://$PWD/examples/plugin-adblock/demo.html
+```
+
+Without `--data-dir` the plugin still runs, but its rules live only as long as
+the process. (`--plugin-dir=$PWD/examples` also works, but scans the native
+example packages too — their `.so` files live under `builddir`, so the scan
+logs `library-open-failed` for them.)
+
+The page reports what the content script hid in its title —
+`AD-SIFT:<hidden>/<total>:style:custom`, where the last two fields say whether
+the plugin's two style elements are on the page — and in the bar at the
+bottom. The built-in list applies at `document_start`, before the page's own
+inline script; a hand-picked rule has to come back from `chrome.storage`, so
+it lands a few milliseconds later.

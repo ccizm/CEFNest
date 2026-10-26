@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AD-SIFT-POPUP</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: #101828;
+    color: #e8eef8;
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 16px 12px;
+  }
+  header svg { flex: none; }
+  h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: .01em; }
+  .dim { color: #8fa0b8; }
+  .small { font-size: 12px; }
+
+  .site {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 16px;
+    padding: 12px 14px;
+    border: 1px solid #223249;
+    border-radius: 10px;
+    background: #14202e;
+  }
+  .site .label { display: block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #8fa0b8; }
+  .site strong { display: block; margin-top: 2px; font-size: 14px; word-break: break-all; }
+
+  .switch { position: relative; display: inline-block; width: 40px; height: 22px; flex: none; }
+  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .switch span {
+    position: absolute; inset: 0;
+    border-radius: 999px;
+    background: #2b3b52;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .switch span::before {
+    content: "";
+    position: absolute;
+    top: 3px; left: 3px;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: #e8eef8;
+    transition: transform .15s;
+  }
+  .switch input:checked + span { background: #3fb8a8; }
+  .switch input:checked + span::before { transform: translateX(18px); }
+  .switch input:focus-visible + span { outline: 2px solid #6ea8fe; outline-offset: 2px; }
+  .switch input:disabled + span { opacity: .4; cursor: default; }
+
+  #status { min-height: 18px; margin: 8px 16px 0; font-size: 12px; color: #8fa0b8; }
+
+  .counts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 16px 0; }
+  .count {
+    padding: 10px 14px;
+    border: 1px solid #223249;
+    border-radius: 10px;
+    background: #0c1522;
+  }
+  .count strong { display: block; font-size: 22px; font-weight: 650; color: #7fe0cf; }
+  .count span { display: block; font-size: 11px; color: #8fa0b8; }
+
+  .rules { margin: 14px 16px 0; }
+  .rules h2 { margin: 0 0 6px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: #8fa0b8; }
+  #rule-list { list-style: none; margin: 0; padding: 0; max-height: 96px; overflow: auto; }
+  #rule-list li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 0;
+    border-top: 1px solid #1c2a3e;
+  }
+  #rule-list li:first-child { border-top: 0; }
+  #rule-list code {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font: 11px/1.5 ui-monospace, monospace;
+    color: #b9c8dc;
+  }
+  #rule-list button {
+    flex: none;
+    border: 1px solid #2b3b52;
+    border-radius: 6px;
+    padding: 2px 7px;
+    background: transparent;
+    color: #b9c8dc;
+    font: 11px system-ui, sans-serif;
+    cursor: pointer;
+  }
+  #rule-list button:hover { border-color: #6ea8fe; color: #e8eef8; }
+  #no-rules { margin: 0; font-size: 11px; }
+
+  footer {
+    position: sticky;
+    bottom: 0;
+    margin-top: 14px;
+    padding: 12px 16px 14px;
+    border-top: 1px solid #1c2a3e;
+    background: #101828;
+  }
+  footer button {
+    width: 100%;
+    border: 1px solid #2b3b52;
+    border-radius: 8px;
+    padding: 8px;
+    background: #18263a;
+    color: #e8eef8;
+    font: 12px system-ui, sans-serif;
+    cursor: pointer;
+  }
+  footer button:hover { border-color: #3fb8a8; }
+  footer button:disabled { opacity: .4; cursor: default; }
+  footer p { margin: 8px 0 0; font-size: 10px; color: #6f8098; }
+</style>
+</head>
+<body>
+<header>
+  <svg width="30" height="34" viewBox="0 0 30 34" aria-hidden="true">
+    <path d="M15 1.5 28 6v10.2c0 7.6-5.1 13.6-13 16.3C7.1 29.8 2 23.8 2 16.2V6L15 1.5Z"
+          fill="#14202e" stroke="#3fb8a8" stroke-width="2"/>
+    <path d="m9.4 16.6 3.7 3.7 7.6-8" fill="none" stroke="#7fe0cf"
+          stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <div>
+    <h1>Ad Sift</h1>
+    <div class="dim small">cosmetic blocker · v1.0</div>
+  </div>
+</header>
+
+<section class="site">
+  <div>
+    <span class="label">This site</span>
+    <strong id="site">looking for a page…</strong>
+  </div>
+  <label class="switch" title="Enabled on this site">
+    <input id="enabled" type="checkbox" checked>
+    <span></span>
+  </label>
+</section>
+<div id="status" role="status"></div>
+
+<section class="counts">
+  <div class="count"><strong id="hidden">0</strong><span>elements hidden</span></div>
+  <div class="count"><strong id="popups">0</strong><span>popups blocked</span></div>
+</section>
+
+<section class="rules">
+  <h2>Manual rules</h2>
+  <ul id="rule-list"></ul>
+  <p id="no-rules" class="dim">Alt+Shift+click an element on the page to hide it here.</p>
+</section>
+
+<footer>
+  <button id="reload" type="button">Reload page</button>
+  <p>Switches and removed rules apply on the next load. Network requests are
+     not blocked — this runtime has no webRequest.</p>
+</footer>
+
+<script src="popup.js"></script>
+</body>
+</html>

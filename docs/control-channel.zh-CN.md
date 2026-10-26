@@ -29,7 +29,7 @@
 
 | 命令 | 载荷 | 说明 |
 | --- | --- | --- |
-| `new-browser` | `url`、`mode`（`tab`/`window`，默认 `tab`） | 在同一 helper 中新建一个 CEF browser |
+| `new-browser` | `url`、`mode`（`tab`/`window`/`background`，默认 `tab`） | 在同一 helper 中新建一个 CEF browser；`background` 跑一个没有窗口、没有 surface 的页面（插件清单的 `background.service_worker` 骑在这上面） |
 | `select-browser` | `browser` | 激活该标签页；窗口模式下还会聚焦窗口 |
 | `close-browser` | `browser`（可选；默认当前激活） | 只关闭这一个；关闭最后一个会结束 helper |
 | `load` | `url` | 作用于当前激活的 browser |
@@ -38,7 +38,7 @@
 | `zoom-in` `zoom-out` `zoom-reset` | — | 步进 0.5；reset 回到 0.0 |
 | `js` | `code`、`id` | 语句形式，在页面中求值（需要 CSP 允许 `unsafe-eval`） |
 | `js-expr` | `code`、`id` | 表达式直接嵌入，不经过 `eval` |
-| `mute` | `on`（省略时切换） | 静音 |
+| `mute` | `browser`（可选）、`on`（省略时切换） | 静音；`browser` 指名标签页（`tabs.update` 的 muted 路径），`muted` 事件回报名下真正被静音的 browser |
 | `a11y` | `enabled` | `SetAccessibilityState(STATE_ENABLED/DEFAULT)` |
 | `devtools` | `enabled` | 提供右键菜单的「检查」与 F12 / Ctrl+Shift+I；开发者工具 browser 以带 `devtools` 的 `browser-created` 到达 |
 | `download-accept` | `id`、`path` | 绝对路径；父目录由宿主创建 |
@@ -50,13 +50,30 @@
 | `context-menu-select` | `id`、`flags`（可选） | 应答 `context-menu`；helper 一次只保留一个请求 |
 | `context-menu-dismiss` | — | 关闭菜单，不选择任何项 |
 | `permission-respond` | `id`、`result`（`accept`/`deny`/`dismiss`） | 应答 `permission-request`；media 的 `accept` 必须授予整个权限掩码 |
+| `js-dialog-respond` | `id`、`ok`、`value` | 应答 `js-dialog`；`value` 是 prompt 的输入文本，其他类型忽略它 |
+| `file-dialog-respond` | `id`、`paths[]` | 应答 `file-dialog`；空列表即取消 |
+| `certificate-respond` | `id`、`allow` | 应答 `certificate-error`；默认（宿主未连接）是拒绝 |
+| `certificate-authorize` | `fingerprint` | 该证书在本 helper 生命周期内免询问放行；只存内存，跨重启的持久化归宿主自己的策略存储 |
+| `intercept-add` | `id`、`patterns[]`（match pattern）、`resource_types[]`（可选：`main_frame`、`image`、`xhr`…） | 在宿主自己的 id 下登记一条拦截规则；同 id 再发是整体替换。无规则注册 = 功能关闭、零开销 |
+| `intercept-remove` | `id` | 摘掉这条规则 |
+| `intercept-mode` | `passive` | passive 只上报不阻塞；默认 blocking |
+| `request-respond` | `request_id`、`action`（`allow`/`cancel`/`redirect`）、`url`（仅 redirect） | 应答 `request-intercept`；redirect 先换 URL。无超时——页面在等宿主 |
+| `cdp-enable` | `browser`（可选） | 在该 browser 上注册 DevTools 协议观察者；这是放行 `cdp-execute` 的唯一开关 |
+| `cdp-disable` | `browser`（可选） | 注销观察者 |
+| `cdp-execute` | `id`（宿主自己的）、`method`、`params`（JSON 文本） | 一条 DevTools 方法调用；观察者未开时以 `cdp-not-enabled` 拒绝。由 `cdp-result` 应答 |
+| `plugins-load` | `plugins[]`：`id`、`root`、`background`（可选，`background.service_worker` 路径）、`scripts[]`（`matches`、`js`、`run_at`） | 一个已启用插件的全部事实：把 root 注册到 `cefnest-extension://`（factory 只服务这些目录），存下它的内容脚本，并指明合成的 `__cefnest_background__.html` 页面要跑哪个脚本。对同一个 id 再发一次是整体替换——helper 不积累历史 |
+| `plugins-unload` | `id` | 摘掉这个插件的 root 与脚本表 |
+| `menu-add-user-item` | `slot`（0–199）、`label`、`when`（可选 match pattern） | 在 26600+slot 处加一条右键菜单行，构建菜单模型时追加在末尾；`when` 不匹配的页面不显示该行 |
+| `menu-remove-user-item` | `slot` | 摘掉这条行（disable/卸载时） |
+| `plugin-respond` | `browser`、`reply_id`、`ok`、`value`（JSON 文本） | 宿主对一条 `plugin-message` 的应答；路由到那个浏览器的渲染进程，由持有该 reply id 的 shim 兑现。`value` 超 1 MiB 以 `plugin-payload-too-large` 拒收 |
+| `browsers-list` | `id`（请求 id） | 请求浏览器表；由同名 `browsers` 事件带着同一 `id` 应答 |
 
 ## 事件（helper → 宿主）
 
 | 事件 | 载荷 |
 | --- | --- |
 | `ready` | `cef`、`pid`、`url`（握手） |
-| `browser-created` | `browser`、`url`、`windowed`、`devtools`（CEF 为 `ShowDevTools` 创建的开发者工具 browser：始终是 windowed，窗口归 CEF 所有，且永远不会成为激活 browser） |
+| `browser-created` | `browser`、`url`、`windowed`、`devtools`、`background`（CEF 为 `ShowDevTools` 创建的开发者工具 browser：始终是 windowed，窗口归 CEF 所有，永远不会成为激活 browser；`background` 为真标记常驻隐藏页——无 surface、永不激活、不进 `browsers` 表） |
 | `browser-selected` | `browser`、`windowed` |
 | `browser-closed` | `browser` |
 | `take-focus` | `browser`、`next`（页面的 Tab 遍历走出了文档边缘；宿主应把焦点链交给 view 之后——`next` 为 false 时是之前——的控件） |
@@ -69,14 +86,14 @@
 | `load-end` | `url`、`http_code`（**失败时也会触发，此时 `http_code` 为 0**） |
 | `load-error` | `error_code`、`url`、`message` |
 | `renderer-exited` | `status`、`error_code`、`message`（只上报渲染进程的退出） |
-| `muted` | `muted`（回读） |
+| `muted` | `browser`、`muted`（回读；`browser` 名下真正被静音的那个——后台标签页安静了不代表当前视图变了） |
 | `zoom` | `level`（回读；每次主框架加载后也会触发一次——Chromium 按 origin 持久化缩放级别） |
 | `copy-text` | `text`（菜单中的“复制链接/图片/媒体地址”） |
 | `open-url` | `url`、`disposition`（菜单中的“在新窗口打开…”） |
 | `popup-requested` | `url`、`disposition`、`gesture`、`browser` |
 | `page-message` | `json`（页面调用 `cefnestPostMessage` 时传入的原始字符串） |
 | `primary-selection` | `text`（页面选区；空字符串表示清除选区） |
-| `js-result` | `id`、`ok`、`value`、`message` |
+| `js-result` | `id`、`ok`、`value`、`message`（`ok` 为真当且仅当脚本运行**且**结果送达；超过 helper 64 KiB 上限的结果以 `ok` 假、`value` null、`message` 说明丢弃的方式送达，不再是"成功但恰好没有值"） |
 | `download-begin` | `id`、`url`、`suggested_name`、`mime_type`、`total_bytes` |
 | `download-progress` | `id`、`received_bytes`、`total_bytes`、`percent`、`speed` |
 | `download-end` | `id`、`state`（`complete`/`cancelled`/`interrupted`）、`path`、`received_bytes` |
@@ -85,11 +102,28 @@
 | `context-menu-dismissed` | 无（只在 helper 仍持有回调时发出） |
 | `permission-request` | `id`、`kind`（`media`/`prompt`）、`origin`、`permissions[]`、`raw` |
 | `permission-dismissed` | `id`、`result`（仅 prompt 有；media 没有 dismiss 回调） |
-| `status` | `message` |
+| `js-dialog` | `id`、`kind`（`alert`/`confirm`/`prompt`/`beforeunload`）、`origin`、`message`、`default_value` |
+| `js-dialog-closed` | `id`（browser 收回了这边持有的对话框：导航重置或关闭） |
+| `file-dialog` | `id`、`mode`（`open`/`open-multiple`/`open-folder`/`save`）、`title`、`default_path`、`accept[]` |
+| `file-dialog-closed` | `id`（选择器还挂着时 browser 关闭了） |
+| `certificate-error` | `id`、`error`（Chromium 的 net-error 名）、`url`、`subject`、`issuer`、`fingerprint`（叶子证书 DER 的 SHA-256，十六进制）——导航停住等待应答；默认拒绝 |
+| `certificate-error-closed` | `id`（问题还挂着时 browser 导航或关闭了） |
+| `request-intercept` | `request_id`、`url`、`method`、`resource_type`、`is_main_frame`、`headers`（一个 JSON 对象）——请求停住等待 `request-respond`；无默认值、无超时 |
+| `request-intercept-closed` | `request_id`（问题还挂着时 browser 关闭；请求随之取消） |
+| `cdp-result` | `id`（execute 自己的）、`ok`、`json`（结果或错误字典的文本）、`message`（`cdp-too-large`：应答装不进通道的单行上限） |
+| `cdp-event` | `browser`、`method`、`params`（JSON 文本）、`message`（同上）——观察者开着期间该 browser 的 DevTools 后端发出的一切 |
+| `loading-progress` | `progress`（0.0–1.0） |
+| `fullscreen` | `fullscreen`（bool） |
+| `plugin-menu-command` | `slot`、`params`（`page_url`/`link_url`/`source_url`/`selection_text`，非空的才带）——插件的菜单行被点中了 |
+| `plugin-message` | `browser`、`reply_id`、`id`、`api`、`args`（JSON 文本）——页面经 chrome.* shim 发起的一次调用；宿主用 `plugin-respond` 应答 |
+| `browsers` | `id`（请求的）、`browsers[]`（`id`、`url`、`title`、`active`、`windowed`、`muted`、`zoom`——后两项直接读自该 browser 的 host，不是缓存）——`tabs.query` 用的浏览器表；devtools 与 background 浏览器不在列 |
+| `plugin-error` | `id`、`message`（`script-missing:<path>`、`script-too-large:<path>`——这边读不到的内容脚本文件） |
+| `status` | `message`（`extension-path-escape`：一条 `cefnest-extension://` 请求落到了 root 之外，已按 403 拒绝） |
 | `closed` | — |
 
 凡是携带页面信息的事件（helper → 宿主）都会带 `browser` 字段。只有
-`select-browser` 和 `close-browser` 会读取该字段；其余命令都作用于当前激活的 browser。
+`select-browser`、`close-browser`、`load`、`js`、`mute` 与 `cdp-*` 族会读取
+该字段；其余命令都作用于当前激活的 browser。
 
 ## 四种交互形态
 
@@ -98,9 +132,19 @@
    故意不发送 ack——它的结果全部以 `find-result` 事件送达。
 3. **挂起等待应答**：`download-begin` 会把 CEF 的回调挂起在 helper 里然后返回，宿主
    稍后用 `download-accept` / `download-reject` 应答。不应答就不会写入任何文件。
-4. **必须应答**：`context-menu` 和 `permission-request`。沉默并非中立——菜单不应答，
-   之后的所有右键都会被阻塞；权限不应答，页面的 promise 会一直处于 pending，媒体
-   队列也会堵在它后面。
+4. **必须应答**：`context-menu`、`permission-request`、`js-dialog`、
+   `file-dialog`、`certificate-error` 和 `request-intercept`。沉默并非中立——
+   菜单不应答，之后的所有右键都会被阻塞；权限不应答，页面的 promise 会一直
+   处于 pending，媒体队列也会堵在它后面；JS 对话框不应答，页面的脚本就停在
+   那里；文件选择器不应答，picker 的 promise 一直挂着；证书错误不应答，导航
+   停在原地；请求拦截不应答，那一条请求停摆。宿主若放弃对话框类信号，页面也
+   不会冻住：`ChromiumSession` 会按 Chrome 的默认值应答（alert 与
+   beforeunload：确定；confirm 与 prompt：取消，值为空；文件选择器：取消；
+   证书：拒绝）。没有安全默认值的两类——context-menu 与 request-intercept——
+   会一直挂到被应答或被收走；helper 自己绝不会背着宿主应答。
+
+`plugin-menu-command` 属"即发即忘"：宿主把它路由给注册了那个 slot 的已加载
+原生插件，通道上没有任何一方在等应答。
 
 ## 通道规则
 
@@ -114,3 +158,20 @@
   `identifier` 每次请求递增 1，只用于把同一次请求的多条回复归在一起。
 - `total_bytes`/`percent` 为 `-1` 表示服务器未给出长度；`download-end` 的 `path`
   为空表示下载在开始前就被拒绝。
+- 对话框的 `id` 由 helper 分配，并在它的整个生命周期内递增；`request-intercept`
+  的 `request_id` 是独立的一支序列，应答不会与对话框 id 相撞。CEF 对每个
+  browser 串行化 JS 对话框：这边还持有第一个时，第二个会被静默压制、不发
+  事件——这与默认 handler 的行为一致。browser 收走的请求以 `js-dialog-closed` /
+  `file-dialog-closed` / `certificate-error-closed` / `request-intercept-closed`
+  到达，且绝不会被继续——对已经不存在的请求应答只会落空。
+- `certificate-authorize` 与拦截规则表只存在于 helper 的内存里：helper 重启后
+  两者都从空开始；跨重启的持久化归宿主自己的策略存储。
+- `kind` 为 `beforeunload` 的 `js-dialog` 没有 `origin`，`message` 是 Chromium
+  自己的文本；页面 handler 里的字符串不会出现在通道上。`file-dialog` 的
+  `accept[]` 原样来自 CEF 的过滤表，顺序没有承诺。
+- `loading-progress` 是状态而不是增量：最后的 1.0 可能到达不止一次。
+- **Match pattern**（菜单行的 `when`；内容脚本将沿用同一语法）：`<all_urls>`，
+  或 `scheme://host/path`——`scheme` 是 `*` 或真实协议名，`host` 是 `*`、精确
+  主机名或 `*.example.com`（含该域本身与任意子域），`path` 可含 `*` 通配。解析
+  不了的模式让该行处处隐藏，而不是处处显示——这是对"没人能解释的条件"唯一
+  安全的读法。

@@ -10,9 +10,9 @@ Wayland compositor 直接合成进控件。既不使用 XWayland，也不做离�
 
 - 只走原生 Wayland——使用 Chromium 自己的 `ozone/wayland` 后端，GPU 或 shm 均可
 - 一个 helper 进程即可服务多个标签页和独立窗口
-- 可由宿主应答的 API：下载、查找、右键菜单、权限提示、页面 ↔ 宿主消息、
-  跨窗口边界的剪贴板与拖放
-- 缩放、静音、无障碍（ORCA 可直接使用的 AT-SPI）、帧计数
+- 可由宿主应答的 API：下载、查找、右键菜单、权限提示、JS 对话框与文件选择器、
+  页面 ↔ 宿主消息、跨窗口边界的剪贴板与拖放
+- 缩放、静音、加载进度、页面全屏、无障碍（ORCA 可直接使用的 AT-SPI）、帧计数
 - 右键"查看网页源代码"是组件自带的只读源码窗口：行号、语法高亮、查找、
   自动换行、复制；源码只在内存中流转，不再写临时文件、不再拉起外部编辑器
 
@@ -160,6 +160,17 @@ TRUE 的 `::browser-created` 到达宿主；按普通独立窗口显示即可
 每个调用的完整约定都写在 `src/chromium-session.h` 的行内注释里；方法与信号的
 分组速览见 [docs/api.zh-CN.md](docs/api.zh-CN.md)。
 
+插件：一个含 `cefnest-plugin.json` 清单的目录，经
+`chromium_session_get_plugin_manager()` 变成 `GListModel` 里的一行；启用它就
+会送达运行中的 helper——它的资源由 `cefnest-extension://` 提供，内容脚本在
+`chrome.*` 子集之上于 `document_start` 运行，原生 `.so` 插件通过五动词
+registry 注册右键菜单行与信号处理器，disable 时全部回收。清单形状兼容
+`manifest_version: 3`；MV3 的 service worker 不在其列。插件安装根就是数据
+目录里的 `cefnest-plugins/`——不设数据目录就没有任何默认插件位置（显式
+`add_search_path()` 不受影响）。内容脚本与页面共用同一个 JS 全局，因此不
+持有特权。见 [docs/plugins.zh-CN.md](docs/plugins.zh-CN.md) 与
+[docs/api.zh-CN.md 的"插件"](docs/api.zh-CN.md)。
+
 ## demo 环境变量
 
 | 变量 | 作用 |
@@ -195,12 +206,16 @@ demo 还接受 `--data-dir=<绝对路径>`（见
 - 只有渲染进程的退出会被上报，且只上报它是怎么退出的。
 - 下载状态到达 `complete` 并不等于文件已经出现。
 - 查找一次只推进一个匹配项。
-- helper 会扩展右键菜单；宿主无法添加自己的菜单项。
+- 插件的上下文菜单行只有一种：整行加、整行摘，不能像 Chrome 那样按页面条件
+  灰显；原生 `.so` 插件运行在宿主进程里，拥有宿主的全部权限（见下文"插件"）。
 - 权限只能授予或拒绝，不能缩小范围；未应答的权限还会让页面失去下一次请求的机会。
 - 页面音频绕过控件；`set_muted()` 是唯一的开关。
 - 渲染进程运行在沙箱中；helper 本身没有沙箱，也不可能有。
 - "查看网页源代码"显示的是**序列化后的 DOM**（包含脚本运行后的改动），
   不是网络返回的原始字节。
+- 内容脚本与页面脚本共用同一个 JS 全局（CEF 没有 isolated world），页面可以
+  读写、覆盖插件挂上去的桥；内容脚本因此不持有特权，特权调用一律转回宿主按
+  权限表裁决。
 - API 尚不稳定——请链接到自己构建的版本。
 
 ## 文档
@@ -210,6 +225,8 @@ demo 还接受 `--data-dir=<绝对路径>`（见
 - `docs/api.zh-CN.md` —— 方法与信号速览；权威契约在 `src/chromium-session.h`。
 - `docs/troubleshooting.zh-CN.md` —— 症状 → 处置，从 `No usable sandbox!` 到
   日志域。
+- `docs/plugins.zh-CN.md` —— 插件契约：清单、安装位置、两个前端各能做什么、
+  `chrome.*` 子集与它的接缝、隔离事实。
 - `docs/control-channel.zh-CN.md` —— session 与 helper 之间的 NDJSON 协议
   （命令、事件、四种交互形态）。只有自行编写 helper 或直接驱动通道时才需要。
 - `site/` —— 项目主页（Vite + Vue + Bootstrap）；在目录里运行 `npm run dev`

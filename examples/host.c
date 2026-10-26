@@ -612,7 +612,8 @@ on_tab_close (GtkButton *button, gpointer data)
 
 static void
 session_browser_created (ChromiumSession *session, int id, const char *url,
-                         gboolean windowed, gboolean devtools, gpointer data)
+                         gboolean windowed, gboolean devtools,
+                         gboolean background, gpointer data)
 {
   GtkWidget *row;
   GtkWidget *button;

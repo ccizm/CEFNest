@@ -102,7 +102,7 @@ run_demo() { # run_demo <tag> <logfile> <helper> <extra env...>
   if [ ! -x "$DEMO" ]; then echo "no demo at $DEMO — run ninja -C builddir"; exit 1; fi
   if [ ! -x "$helper" ]; then echo "no helper at $helper — run cmake --build helper/build"; exit 1; fi
   echo "== $tag"
-  timeout 90 env "$@" G_MESSAGES_DEBUG=all GDK_BACKEND=wayland \
+  timeout --kill-after=10s 90 env "$@" G_MESSAGES_DEBUG=all GDK_BACKEND=wayland \
     CHROMIUM_HELPER="$helper" CHROMIUM_SESSION_SCRIPT="$WORK/$tag.session" \
     "$DEMO" 2>&1 | tee "$log" | cat > /dev/null
   local status=${PIPESTATUS[0]}

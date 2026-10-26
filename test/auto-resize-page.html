@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>auto-resize</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  #box { width: 420px; height: 300px; background: #123456; }
+</style>
+</head>
+<body>
+<div id="box"></div>
+<script>
+  function setSize(w, h) {
+    const box = document.getElementById("box");
+    box.style.width = w + "px";
+    box.style.height = h + "px";
+  }
+</script>
+</body>
+</html>

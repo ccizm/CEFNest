@@ -1,0 +1,31 @@
+<!doctype html>
+<!-- The payload-ceiling page: 200 KiB must round-trip, 1.5 MiB must be
+     refused by name on the page side, and a small call right after must
+     still work — the channel survives an oversized plugin, which is the
+     whole point of the ceiling. -->
+<html>
+<head><meta charset="utf-8"><title>PAYLOAD-PAGE</title></head>
+<body>
+<h1>payload page</h1>
+<script>
+(function () {
+  var ok200 = new Array(200 * 1024 + 1).join("x");
+  chrome.storage.local.set({ big: ok200 }).then(function () {
+    var huge = new Array(1536 * 1024 + 1).join("y");
+    chrome.storage.local.set({ huge: huge }).then(function () {
+      document.title = "PAYLOAD-BIG-ACCEPTED";
+    }, function (e) {
+      var named = e && String(e.message).indexOf("plugin-payload-too-large") >= 0;
+      chrome.storage.local.set({ small: "s" }).then(function () {
+        document.title = named ? "PAYLOAD-TOOBIG-then-OK" : "PAYLOAD-UNNAMED-then-OK";
+      }, function () {
+        document.title = "PAYLOAD-DEAD";
+      });
+    });
+  }, function (e) {
+    document.title = "PAYLOAD-ERR:" + (e && e.message);
+  });
+})();
+</script>
+</body>
+</html>

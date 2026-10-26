@@ -11,6 +11,8 @@
 #include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
 
+#include "chromium-plugin.h"
+#include "chromium-plugin-private.h"
 #include "chromium-session.h"
 #include "source-window.h"
 
@@ -53,6 +55,7 @@ enum {
   SIG_BROWSER_CREATED,
   SIG_BROWSER_SELECTED,
   SIG_BROWSER_CLOSED,
+  SIG_BROWSER_SURFACE,
   SIG_DOWNLOAD_BEGIN,
   SIG_DOWNLOAD_PROGRESS,
   SIG_DOWNLOAD_END,
@@ -60,7 +63,29 @@ enum {
   SIG_CONTEXT_MENU,
   SIG_PERMISSION_REQUEST,
   SIG_PERMISSION_DISMISSED,
+  SIG_JS_DIALOG,
+  SIG_JS_DIALOG_CLOSED,
+  SIG_CERTIFICATE_ERROR,
+  SIG_CERTIFICATE_ERROR_CLOSED,
+  SIG_REQUEST_INTERCEPT,
+  SIG_REQUEST_INTERCEPT_CLOSED,
+  SIG_CDP_RESULT,
+  SIG_CDP_EVENT,
+  SIG_FILE_DIALOG,
+  SIG_FILE_DIALOG_CLOSED,
+  SIG_LOADING_PROGRESS,
+  SIG_FULLSCREEN_CHANGED,
+  SIG_AUTO_RESIZE_UPDATED,
   SIG_ZOOM_CHANGED,
+  SIG_COOKIES_RESULT,
+  SIG_HISTORY_RESULT,
+  SIG_PAGE_TEXT_BEGIN,
+  SIG_PAGE_TEXT_CHUNK,
+  SIG_PAGE_TEXT_END,
+  SIG_PDF_BEGIN,
+  SIG_PDF_CHUNK,
+  SIG_PDF_END,
+  SIG_FAVICON_CHANGED,
   SIG_COPY_TEXT,
   SIG_OPEN_URL,
   SIG_VIEW_SOURCE,
@@ -80,6 +105,17 @@ enum {
   PROP_DATA_DIRECTORY,
   /* Whether the context menu and F12 may open the inspector. Default off. */
   PROP_DEVTOOLS_ENABLED,
+  /* Network identity read by the next start(): proxy, bypass list, and
+   * Accept-Language. */
+  PROP_PROXY,
+  PROP_PROXY_BYPASS,
+  PROP_ACCEPT_LANGUAGE,
+  /* Page-driven size for the browser's own toplevel. */
+  PROP_AUTO_RESIZE,
+  PROP_AUTO_RESIZE_MIN_WIDTH,
+  PROP_AUTO_RESIZE_MIN_HEIGHT,
+  PROP_AUTO_RESIZE_MAX_WIDTH,
+  PROP_AUTO_RESIZE_MAX_HEIGHT,
 };
 static guint signals[N_SIGNALS];
 
@@ -92,6 +128,9 @@ static void chromium_session_set_property (GObject *object, guint property,
 static void source_transfer_reset (ChromiumSession *self);
 static void chromium_session_finalize (GObject *object);
 static void release_data_directory (ChromiumSession *self);
+static void session_apply_auto_resize (ChromiumSession *self, int browser,
+                                       int width, int height);
+static void session_watch_compositor (ChromiumSession *self);
 
 static void send_json (ChromiumSession *self, JsonNode *root);
 static void command_add_string (JsonBuilder *builder, const char *key,
@@ -103,6 +142,19 @@ static void handle_context_menu         (ChromiumSession *self, JsonObject *obje
 static void handle_context_menu_dismissed (ChromiumSession *self);
 static void handle_permission_request   (ChromiumSession *self, JsonObject *object);
 static void handle_permission_dismissed (ChromiumSession *self, JsonObject *object);
+static void handle_js_dialog            (ChromiumSession *self, JsonObject *object);
+static void handle_js_dialog_closed     (ChromiumSession *self, JsonObject *object);
+static void handle_certificate_error    (ChromiumSession *self, JsonObject *object);
+static void handle_certificate_closed   (ChromiumSession *self, JsonObject *object);
+static void handle_request_intercept    (ChromiumSession *self, JsonObject *object);
+static void handle_request_intercept_closed (ChromiumSession *self, JsonObject *object);
+static void handle_cdp_result           (ChromiumSession *self, JsonObject *object);
+static void handle_cdp_event            (ChromiumSession *self, JsonObject *object);
+static void handle_file_dialog          (ChromiumSession *self, JsonObject *object);
+static void handle_file_dialog_closed   (ChromiumSession *self, JsonObject *object);
+static void session_plugins_changed     (ChromiumSession *self,
+                                         ChromiumPluginManager *manager);
+static void session_send_plugins_state  (ChromiumSession *self);
 
 struct _ChromiumSession {
   GObject parent_instance;
@@ -132,6 +184,14 @@ struct _ChromiumSession {
    * mid-run does not release the path the old helper is still using. */
   char *data_directory;
   char *claimed_data_directory;
+  char *proxy;
+  char *proxy_bypass;
+  char *accept_language;
+  gboolean auto_resize;
+  int auto_resize_min_width;
+  int auto_resize_min_height;
+  int auto_resize_max_width;
+  int auto_resize_max_height;
   gboolean loading;
   gboolean can_go_back;
   gboolean can_go_forward;
@@ -184,6 +244,14 @@ struct _ChromiumSession {
      and an id leaves the set as soon as the helper dismisses it under the host. */
   GHashTable *permission_held;
 
+  /* Dialog requests the helper is holding for an answer. Both are id sets for
+   * the same reason as permission_held; a dialog the browser takes back leaves
+   * the set with its *-closed event, so a host answer for it goes nowhere. */
+  GHashTable *js_dialog_held;
+  GHashTable *certificate_held;
+  GHashTable *intercept_held;
+  GHashTable *file_dialog_held;
+
   /* A view-source transfer in flight. The helper streams one request at a time
      (begin → chunk* → end, or error) and a second begin abandons the first, so
      this is one slot, not a list. */
@@ -199,6 +267,43 @@ struct _ChromiumSession {
      the pointer, and the next request makes a new one. */
   GtkWidget *source_window;
   gboolean auto_source_window;
+
+  /* The plugin manager, created by the first get_plugin_manager() call. A
+     session that never serves plugins never builds one, and nothing plugin-
+     shaped runs anywhere in that process. */
+  ChromiumPluginManager *plugin_manager;
+  /* The plugin ids the running helper was last told about, mapped to the root
+     each was sent with. The diff against the model's enabled set is what a
+     ::changed turns into plugins-load / plugins-unload traffic; ::closed
+     empties it, because the helper's tables died with the helper. */
+  GHashTable *plugins_sent;
+  /* browser id -> the URL that browser is on. The Web frontend reads it:
+     runtime.sendMessage goes to a plugin's own extension pages, and which
+     pages those are is a URL question. From browser-created and the address
+     events; a helper that is gone takes the table with it. */
+  GHashTable *browser_urls;
+  /* An enabled web plugin's background page, plugin id → browser id. Filled
+     from browser-created events that carry the background flag; enable/disable
+     walks it against the plugin table. */
+  GHashTable *background_browsers;
+
+  /* browser id -> the toplevel its CEF window draws into. The helper creates
+   * the shared tab window first and one CefWindow per windowed browser in
+   * command order, so the k-th new toplevel belongs to the k-th windowed
+   * browser — the pairing test/surface-pair-gate.sh measures that claim before
+   * this table is relied on. Values are owned references; ::browser-surface
+   * reports a pairing when it is made and NULL when the surface goes away. */
+  GHashTable *browser_surfaces;
+  GHashTable *surface_browser_ids;
+  GHashTable *seen_toplevels;
+  GQueue *unpaired_surfaces;
+  GQueue *pending_windowed_ids;
+  int primary_browser_id;
+  gboolean primary_surface_paired;
+  /* The helper's notion of "active": every ::browser-selected names it. Events
+   * that describe one browser (mute) must not be mistaken for the active
+   * view's state when they were about a background one. */
+  int active_browser_id;
 };
 
 G_DEFINE_TYPE (ChromiumSession, chromium_session, G_TYPE_OBJECT)
@@ -241,6 +346,418 @@ session_send_devtools_state (ChromiumSession *self)
   send_json (self, root);
   g_debug ("session: devtools %s sent to helper",
            self->devtools_enabled ? "enabled" : "disabled");
+}
+
+static void
+session_send_auto_resize (ChromiumSession *self)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  if (!self->running)
+    return;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "auto-resize");
+  json_builder_set_member_name (builder, "enabled");
+  json_builder_add_boolean_value (builder, self->auto_resize);
+  json_builder_set_member_name (builder, "min_width");
+  json_builder_add_int_value (builder, self->auto_resize_min_width);
+  json_builder_set_member_name (builder, "min_height");
+  json_builder_add_int_value (builder, self->auto_resize_min_height);
+  json_builder_set_member_name (builder, "max_width");
+  json_builder_add_int_value (builder, self->auto_resize_max_width);
+  json_builder_set_member_name (builder, "max_height");
+  json_builder_add_int_value (builder, self->auto_resize_max_height);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+/* ------------------------------------------------------------------ *
+ * Plugins: the model on this side, the tables on the helper's        *
+ *                                                                    *
+ * The helper keeps no plugin state that survives a restart, so the   *
+ * session's rule is the same one the devtools switch follows: what   *
+ * the host has set goes to a running helper at once, and to a new    *
+ * helper at ::ready. The diff is driven by the manager's ::changed   *
+ * against plugins_sent — what this side last told a helper — so a    *
+ * rescan that changes nothing sends nothing.                         *
+ * ------------------------------------------------------------------ */
+
+gboolean
+_chromium_session_send_plugin_command (ChromiumSession *self,
+                                       JsonBuilder *builder)
+{
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), FALSE);
+  g_return_val_if_fail (builder != NULL, FALSE);
+
+  /* A registry verb that fires while no helper runs — a plugin enabled
+     before start(), or one disabling during teardown — has nowhere to send.
+     announce() and the ready path put the menu rows back; the script table
+     goes with the next plugins-load. */
+  if (!self->running)
+    return FALSE;
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+  return TRUE;
+}
+
+/* One plugin's entry in a plugins-load array. Native plugins carry no
+   scripts but do carry the root: the extension scheme serves every loaded
+   plugin's pages from it, popup and options included. */
+static void
+session_append_plugin (JsonBuilder *builder, ChromiumPlugin *plugin)
+{
+  JsonArray *scripts = _chromium_plugin_get_content_scripts (plugin);
+
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_string_value (builder, chromium_plugin_get_id (plugin));
+  json_builder_set_member_name (builder, "root");
+  json_builder_add_string_value (builder, chromium_plugin_get_root (plugin));
+  json_builder_set_member_name (builder, "scripts");
+  json_builder_begin_array (builder);
+  if (scripts)
+    for (guint i = 0; i < json_array_get_length (scripts); i++)
+      {
+        JsonObject *entry = json_array_get_object_element (scripts, i);
+        JsonArray *matches = json_object_has_member (entry, "matches") ?
+          json_object_get_array_member (entry, "matches") : NULL;
+        JsonArray *files = json_object_has_member (entry, "js") ?
+          json_object_get_array_member (entry, "js") : NULL;
+        const char *run_at = json_object_has_member (entry, "run_at") ?
+          json_object_get_string_member (entry, "run_at") : NULL;
+
+        json_builder_begin_object (builder);
+        json_builder_set_member_name (builder, "matches");
+        json_builder_begin_array (builder);
+        if (matches)
+          for (guint j = 0; j < json_array_get_length (matches); j++)
+            json_builder_add_string_value (
+              builder, json_array_get_string_element (matches, j));
+        json_builder_end_array (builder);
+        json_builder_set_member_name (builder, "js");
+        json_builder_begin_array (builder);
+        if (files)
+          for (guint j = 0; j < json_array_get_length (files); j++)
+            json_builder_add_string_value (
+              builder, json_array_get_string_element (files, j));
+        json_builder_end_array (builder);
+        json_builder_set_member_name (builder, "run_at");
+        json_builder_add_string_value (builder, run_at ? run_at
+                                                       : "document_idle");
+        json_builder_end_object (builder);
+      }
+  json_builder_end_array (builder);
+}
+
+/* One plugins-load carrying one plugin. The helper replaces the entry with
+   this id — its semantics are "the whole truth about this id", never
+   "add to what you have". */
+static void
+session_send_plugin_load (ChromiumSession *self, ChromiumPlugin *plugin)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+  const char *background = _chromium_plugin_get_background_page (plugin);
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "plugins-load");
+  json_builder_set_member_name (builder, "plugins");
+  json_builder_begin_array (builder);
+  json_builder_begin_object (builder);
+  session_append_plugin (builder, plugin);
+  if (background && *background)
+    {
+      json_builder_set_member_name (builder, "background");
+      json_builder_add_string_value (builder, background);
+    }
+  json_builder_end_object (builder);
+  json_builder_end_array (builder);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+static void
+session_send_plugin_unload (ChromiumSession *self, const char *id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "plugins-unload");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_string_value (builder, id);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+/* The background-page half of the plugin diff: an enabled plugin whose
+   manifest names a background.service_worker gets one resident hidden
+   browser, and one that is disabled or gone loses it. @enabled holds the
+   enabled plugins (id → plugin, refs). Called with the plugins-load traffic
+   so a helper that has just come up — or a plugin that has just been
+   enabled — reaches the same shape either way. */
+static void
+session_sync_background_browsers (ChromiumSession *self, GHashTable *enabled)
+{
+  GHashTableIter iter;
+  gpointer key, value;
+
+  if (!self->background_browsers)
+    self->background_browsers = g_hash_table_new_full (g_str_hash,
+                                                       g_str_equal,
+                                                       g_free, NULL);
+
+  g_hash_table_iter_init (&iter, enabled);
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    {
+      ChromiumPlugin *plugin = CHROMIUM_PLUGIN (value);
+      const char *background = _chromium_plugin_get_background_page (plugin);
+
+      if (background && *background &&
+          !g_hash_table_contains (self->background_browsers, key))
+        {
+          g_autofree char *uri =
+            g_strconcat (CHROMIUM_EXTENSION_URI_PREFIX,
+                         chromium_plugin_get_id (plugin),
+                         "/__cefnest_background__.html", NULL);
+
+          chromium_session_new_background_browser (self, uri);
+          /* browser-created fills the table when the helper announces the
+             new browser; until then this id stays absent, but the page load
+             itself is idempotent — a second ask before the announcement
+             would be a second browser, so the announcement is what the
+             contains() gate waits for. */
+        }
+    }
+
+  g_hash_table_iter_init (&iter, self->background_browsers);
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    if (!g_hash_table_contains (enabled, key))
+      {
+        chromium_session_close_browser (self, GPOINTER_TO_INT (value));
+        g_hash_table_iter_remove (&iter);
+      }
+}
+
+/* The diff itself. Only ever called while a helper runs; the ::ready path
+   calls it against an empty plugins_sent, which sends every enabled plugin
+   — the "start 补发" half of the rule. */
+static void
+session_send_plugins_state (ChromiumSession *self)
+{
+  ChromiumPluginManager *manager = self->plugin_manager;
+  GListModel *model;
+  GHashTable *live, *enabled;
+  GHashTableIter iter;
+  gpointer key, value;
+  guint n, i;
+
+  if (!manager || !self->running)
+    return;
+
+  /* ::closed empties the sent table along with the helper's own tables; a
+     start() after that rebuilds it here rather than at some earlier moment
+     that may never have happened. */
+  if (!self->plugins_sent)
+    self->plugins_sent = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                g_free, g_free);
+
+  live = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+  enabled = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
+                                   g_object_unref);
+  model = chromium_plugin_manager_get_plugins (manager);
+  n = g_list_model_get_n_items (model);
+  for (i = 0; i < n; i++)
+    {
+      ChromiumPlugin *plugin = g_list_model_get_item (model, i);
+
+      if (chromium_plugin_get_state (plugin) ==
+            CHROMIUM_PLUGIN_STATE_ENABLED)
+        {
+          const char *id = chromium_plugin_get_id (plugin);
+          const char *root = chromium_plugin_get_root (plugin);
+          const char *sent_root = g_hash_table_lookup (self->plugins_sent, id);
+
+          if (g_strcmp0 (sent_root, root) != 0)
+            session_send_plugin_load (self, plugin);
+          g_hash_table_replace (live, g_strdup (id), g_strdup (root));
+          g_hash_table_replace (enabled, g_strdup (id),
+                                g_object_ref (plugin));
+        }
+      g_object_unref (plugin);
+    }
+
+  g_hash_table_iter_init (&iter, self->plugins_sent);
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    if (!g_hash_table_contains (live, key))
+      {
+        session_send_plugin_unload (self, key);
+        g_hash_table_iter_remove (&iter);
+      }
+
+  g_hash_table_unref (self->plugins_sent);
+  self->plugins_sent = live;
+
+  session_sync_background_browsers (self, enabled);
+  g_hash_table_unref (enabled);
+}
+
+/* --- the Web frontend's session-side needs ------------------------------ */
+
+void
+_chromium_session_run_javascript_in_browser (ChromiumSession *self,
+                                             int browser, const char *code)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (code != NULL);
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "js");
+  json_builder_set_member_name (builder, "code");
+  json_builder_add_string_value (builder, code);
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, 0);
+  json_builder_set_member_name (builder, "browser");
+  json_builder_add_int_value (builder, browser);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+_chromium_session_load_uri_in_browser (ChromiumSession *self, int browser,
+                                       const char *url)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (url != NULL);
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "load");
+  json_builder_set_member_name (builder, "url");
+  json_builder_add_string_value (builder, url);
+  json_builder_set_member_name (builder, "browser");
+  json_builder_add_int_value (builder, browser);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+_chromium_session_deliver_plugin_message (ChromiumSession *self,
+                                          const char *plugin_id,
+                                          const char *message_json)
+{
+  g_autofree char *prefix = NULL;
+  g_autofree char *code = NULL;
+  GHashTableIter iter;
+  gpointer key, value;
+  g_autofree char *message_quoted = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (plugin_id != NULL);
+
+  if (!self->browser_urls)
+    return;
+
+  prefix = g_strconcat (CHROMIUM_EXTENSION_URI_PREFIX, plugin_id, "/", NULL);
+  message_quoted = g_strescape (message_json ? message_json : "null", NULL);
+
+  g_hash_table_iter_init (&iter, self->browser_urls);
+  while (g_hash_table_iter_next (&iter, &key, &value))
+    {
+      const char *url = value;
+
+      if (g_str_has_prefix (url, prefix))
+        {
+          /* One line of JS per open page: the shim's __cefnestOnMessage fans
+             the message out to that page's own listeners. */
+          code = g_strdup_printf ("window.__cefnestOnMessage&&"
+                                  "__cefnestOnMessage(\"%s\");",
+                                  message_quoted);
+          _chromium_session_run_javascript_in_browser (self,
+                                                       GPOINTER_TO_INT (key),
+                                                       code);
+          g_clear_pointer (&code, g_free);
+        }
+    }
+}
+
+/* Connected swapped, so the call is (self, manager): the session first — the
+   same order the body below wants to read. */
+static void
+session_plugins_changed (ChromiumSession *self,
+                         ChromiumPluginManager *manager)
+{
+  if (manager != self->plugin_manager)
+    return;
+
+  /* The .so half needs no channel: it loads and unloads against the model
+     alone, so it also runs before start() — that is what lets a host enable
+     everything before the helper exists. */
+  chromium_plugin_native_sync (manager, self);
+  session_send_plugins_state (self);
+}
+
+/* The plugin install root is anchored on the data directory, not on this
+ * component's name: <data-dir>/cefnest-plugins, the same tree the plugin
+ * storage already keeps (<data-dir>/cefnest-plugins/<id>/storage.json) and
+ * the same tree clear_data() removes. A host that asked for a profile gets
+ * its plugin tree scanned; a host without a data directory gets no default
+ * root at all, which is what keeps "no directory means nothing on disk"
+ * true for plugins too. Derived when the manager is created and whenever
+ * the property moves; the next scan() reads it. */
+static void
+session_plugin_install_root (ChromiumSession *self)
+{
+  g_autofree char *root = NULL;
+
+  if (!self->plugin_manager)
+    return;
+
+  /* A relative path is start()'s problem — it fails there loudly — and is
+     nothing to anchor until then. */
+  if (self->data_directory && g_path_is_absolute (self->data_directory))
+    root = g_build_filename (self->data_directory, "cefnest-plugins", NULL);
+
+  _chromium_plugin_manager_set_install_root (self->plugin_manager, root);
+}
+
+/* The session owns the manager and creates it here, on first use. */
+ChromiumPluginManager *
+chromium_session_get_plugin_manager (ChromiumSession *self)
+{
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), NULL);
+
+  if (!self->plugin_manager)
+    {
+      self->plugin_manager = chromium_plugin_manager_new ();
+      self->plugins_sent = g_hash_table_new_full (g_str_hash, g_str_equal,
+                                                  g_free, g_free);
+      self->browser_urls = g_hash_table_new_full (g_direct_hash,
+                                                  g_direct_equal,
+                                                  NULL, g_free);
+      _chromium_plugin_manager_set_session (self->plugin_manager, self);
+      session_plugin_install_root (self);
+      chromium_plugin_web_attach (self->plugin_manager, self);
+      g_signal_connect_object (self->plugin_manager, "changed",
+                               G_CALLBACK (session_plugins_changed), self,
+                               G_CONNECT_SWAPPED);
+    }
+
+  return self->plugin_manager;
 }
 
 static void
@@ -378,6 +895,15 @@ mark_closed (ChromiumSession *self, const char *why)
 
   self->closed_emitted = TRUE;
   self->running = FALSE;
+
+  /* Before anything emits: the native plugins' handlers are pages of code a
+     g_module_close() is about to unmap, and the ::changed below — set_state
+     emits it — must not call into one. ::closed at the end of this function
+     goes out the same way, with the plugins already gone. */
+  chromium_plugin_native_unload_all (self->plugin_manager);
+  g_clear_pointer (&self->plugins_sent, g_hash_table_unref);
+  g_clear_pointer (&self->browser_urls, g_hash_table_unref);
+  g_clear_pointer (&self->background_browsers, g_hash_table_unref);
 
   g_message ("session: helper stopped (%s)", why);
   chromium_session_set_state (self, NULL, NULL, FALSE, FALSE, FALSE);
@@ -517,6 +1043,227 @@ event_bytes (JsonObject *object, const char *key)
            (gint64) json_object_get_double_member (object, key) : (gint64) -1;
 }
 
+/* The whole event as one JSON text. The result-shaped signals carry the
+ * helper's own payload this way rather than growing a parameter per member:
+ * the control channel's shapes are documented once, in docs/control-channel.md,
+ * and a host that needs a member parses it from here. */
+static char *
+event_json_text (JsonObject *object)
+{
+  g_autoptr (JsonGenerator) generator = json_generator_new ();
+  g_autoptr (JsonNode) node = json_node_new (JSON_NODE_OBJECT);
+  gsize length = 0;
+
+  json_node_take_object (node, json_object_ref (object));
+  json_generator_set_root (generator, node);
+  return json_generator_to_data (generator, &length);
+}
+
+/* ------------------------------------------------------------------ *
+ * Browser -> surface pairing                                         *
+ *                                                                    *
+ * The helper creates one toplevel for the shared tab window and one   *
+ * more for every windowed browser, in the order the commands were     *
+ * issued. The compositor sees those toplevels in its own list order.  *
+ * Measured 2026-10-26 (test/surface-pair-gate.sh, real desktop): the  *
+ * two orders agree in all four scenarios the plugin plan named —      *
+ * popup+options at once, close one then open another (the address     *
+ * reuse case), with the inspector window open, and four plugins'      *
+ * popups opened back to back — with every surface sampled and the     *
+ * colour matched to its browser id. Either side can still arrive      *
+ * first: a browser-created event can precede its toplevel, and a      *
+ * toplevel can precede the browser that owns it, so both directions   *
+ * are queued and the pairing is made when the second half shows up.   *
+ * ------------------------------------------------------------------ */
+
+static void
+session_pair_browser_surface (ChromiumSession *self, int id,
+                              NestedSurface *surface)
+{
+  NestedSurface *old;
+
+  if (!self->browser_surfaces)
+    return;
+  old = g_hash_table_lookup (self->browser_surfaces, GINT_TO_POINTER (id));
+  if (old == surface)
+    return;
+  if (old)
+    {
+      g_hash_table_remove (self->surface_browser_ids, old);
+      g_hash_table_remove (self->browser_surfaces, GINT_TO_POINTER (id));
+      g_signal_emit (self, signals[SIG_BROWSER_SURFACE], 0, id, NULL);
+    }
+  g_hash_table_replace (self->browser_surfaces, GINT_TO_POINTER (id),
+                        g_object_ref (surface));
+  g_hash_table_replace (self->surface_browser_ids, surface,
+                        GINT_TO_POINTER (id));
+  g_signal_emit (self, signals[SIG_BROWSER_SURFACE], 0, id, surface);
+}
+
+static void
+session_unpair_browser_surface (ChromiumSession *self, int id)
+{
+  NestedSurface *surface;
+
+  if (!self->browser_surfaces)
+    return;
+  surface = g_hash_table_lookup (self->browser_surfaces, GINT_TO_POINTER (id));
+  if (!surface)
+    return;
+  g_hash_table_remove (self->surface_browser_ids, surface);
+  g_hash_table_remove (self->browser_surfaces, GINT_TO_POINTER (id));
+  g_signal_emit (self, signals[SIG_BROWSER_SURFACE], 0, id, NULL);
+}
+
+static void
+session_note_toplevel (ChromiumSession *self, NestedSurface *surface)
+{
+  gpointer pending;
+
+  if (g_hash_table_contains (self->seen_toplevels, surface))
+    return;
+  g_hash_table_add (self->seen_toplevels, g_object_ref (surface));
+
+  if (!self->primary_surface_paired && self->primary_browser_id != 0)
+    {
+      self->primary_surface_paired = TRUE;
+      session_pair_browser_surface (self, self->primary_browser_id, surface);
+      return;
+    }
+  pending = self->pending_windowed_ids
+              ? g_queue_pop_head (self->pending_windowed_ids) : NULL;
+  if (pending)
+    {
+      session_pair_browser_surface (self, GPOINTER_TO_INT (pending), surface);
+      return;
+    }
+  g_queue_push_tail (self->unpaired_surfaces, g_object_ref (surface));
+}
+
+static void
+session_note_browser_created (ChromiumSession *self, int id, gboolean windowed,
+                              gboolean background)
+{
+  if (!self->browser_surfaces)
+    return;
+
+  /* A background page owns no toplevel — pairing it here would either spend
+     a FIFO surface on it or park a windowed id waiting for a surface that
+     never comes. */
+  if (background)
+    return;
+
+  if (!windowed && self->primary_browser_id == 0)
+    {
+      NestedSurface *surface = self->unpaired_surfaces
+                                 ? g_queue_pop_head (self->unpaired_surfaces)
+                                 : NULL;
+
+      self->primary_browser_id = id;
+      if (surface && !self->primary_surface_paired)
+        {
+          self->primary_surface_paired = TRUE;
+          session_pair_browser_surface (self, id, surface);
+        }
+      else if (surface)
+        g_queue_push_head (self->unpaired_surfaces, surface);
+      return;
+    }
+
+  if (windowed)
+    {
+      NestedSurface *surface = self->unpaired_surfaces
+                                 ? g_queue_pop_head (self->unpaired_surfaces)
+                                 : NULL;
+
+      if (surface)
+        session_pair_browser_surface (self, id, surface);
+      else
+        g_queue_push_tail (self->pending_windowed_ids, GINT_TO_POINTER (id));
+    }
+}
+
+static void
+session_toplevels_changed (NestedCompositor *compositor, gpointer data)
+{
+  ChromiumSession *self = CHROMIUM_SESSION (data);
+  GList *tops, *l, *keys, *k;
+
+  tops = nested_compositor_get_toplevels (compositor);
+
+  /* A surface that is gone takes its pairing with it: the next window can come
+   * back with the same address, and a stale key would make that look paired. */
+  keys = g_hash_table_get_keys (self->seen_toplevels);
+  for (k = keys; k; k = k->next)
+    {
+      NestedSurface *surface = k->data;
+
+      if (g_list_find (tops, surface))
+        continue;
+      g_queue_remove (self->unpaired_surfaces, surface);
+      if (g_hash_table_contains (self->surface_browser_ids, surface))
+        {
+          int id = GPOINTER_TO_INT (
+            g_hash_table_lookup (self->surface_browser_ids, surface));
+          session_unpair_browser_surface (self, id);
+        }
+      g_hash_table_remove (self->seen_toplevels, surface);
+    }
+  g_list_free (keys);
+
+  for (l = tops; l; l = l->next)
+    session_note_toplevel (self, l->data);
+
+  g_list_free_full (tops, g_object_unref);
+}
+
+static void
+session_watch_compositor (ChromiumSession *self)
+{
+  NestedCompositor *compositor;
+
+  if (!self->view)
+    return;
+  compositor = chromium_view_get_compositor (self->view);
+  if (!compositor)
+    return;
+  g_signal_handlers_disconnect_matched (compositor, G_SIGNAL_MATCH_DATA, 0, 0,
+                                        NULL, NULL, self);
+  g_signal_connect_object (compositor, "toplevels-changed",
+                           G_CALLBACK (session_toplevels_changed), self, 0);
+  session_toplevels_changed (compositor, self);
+}
+
+static NestedSurface *
+session_surface_for_browser (ChromiumSession *self, int id)
+{
+  if (!self->browser_surfaces)
+    return NULL;
+  return g_hash_table_lookup (self->browser_surfaces, GINT_TO_POINTER (id));
+}
+
+static void
+session_apply_auto_resize (ChromiumSession *self, int browser, int width,
+                           int height)
+{
+  NestedCompositor *compositor;
+  NestedSurface *surface;
+
+  if (!self->view || width <= 0 || height <= 0)
+    return;
+  compositor = chromium_view_get_compositor (self->view);
+  if (!compositor)
+    return;
+  surface = session_surface_for_browser (self, browser);
+  if (!surface)
+    {
+      g_debug ("session: auto-resize %dx%d for browser %d has no paired surface",
+               width, height, browser);
+      return;
+    }
+  nested_compositor_set_surface_size (compositor, surface, width, height);
+}
+
 static void
 handle_event (ChromiumSession *self, const char *line)
 {
@@ -554,7 +1301,28 @@ handle_event (ChromiumSession *self, const char *line)
                  (int) event_int (object, "pid"),
                  event_string (object, "cef"));
 
-      /* The first navigation goes through the channel, not the command line:
+      session_send_a11y (self);
+      session_send_devtools_state (self);
+      session_send_auto_resize (self);
+      /* The helper's plugin tables start empty on every start(), and a plugin
+         disabled while the previous helper ran left its .so unloaded — the
+         sync first brings the loaded set back in step with the model, then
+         the announce puts the menu rows back, then the diff sends the script
+         table against the empty plugins_sent, which is every enabled
+         plugin. */
+      if (self->plugin_manager)
+        {
+          chromium_plugin_native_sync (self->plugin_manager, self);
+          chromium_plugin_native_announce (self->plugin_manager);
+          session_send_plugins_state (self);
+        }
+
+      /* After the plugin table, not before: the helper builds every new
+       * renderer's plugin table from what it knows at spawn time, so a first
+       * navigation that overtakes plugins-load launches a renderer with an
+       * empty table and the page's document_start scripts never run. Measured
+       * 2026-10-26: positional-URL start showed 0/6 until a reload. The first
+       * navigation still goes through the channel, not the command line:
        * Chromium rewrites its own argv during start-up, so a URL handed over
        * as an argument may not survive until the browser is created. */
       if (self->startup_url && *self->startup_url)
@@ -563,8 +1331,6 @@ handle_event (ChromiumSession *self, const char *line)
           g_clear_pointer (&self->startup_url, g_free);
         }
 
-      session_send_a11y (self);
-      session_send_devtools_state (self);
       g_signal_emit (self, signals[SIG_READY], 0);
       return;
     }
@@ -577,6 +1343,10 @@ handle_event (ChromiumSession *self, const char *line)
                                   event_string (object, "url"),
                                   NULL, self->loading, self->can_go_back,
                                   self->can_go_forward);
+      if (self->browser_urls)
+        g_hash_table_replace (self->browser_urls,
+                              GINT_TO_POINTER (event_int (object, "browser")),
+                              g_strdup (event_string (object, "url")));
       return;
     }
 
@@ -613,16 +1383,42 @@ handle_event (ChromiumSession *self, const char *line)
   if (!strcmp (event, "browser-created"))
     {
       int id = (int) event_int (object, "browser");
+      gboolean windowed = event_flag (object, "windowed");
+      gboolean background = event_flag (object, "background");
+
+      if (self->browser_urls)
+        g_hash_table_replace (self->browser_urls, GINT_TO_POINTER (id),
+                              g_strdup (event_string (object, "url")));
+      if (background && self->background_browsers)
+        {
+          /* The background page's URL carries the plugin id it belongs to:
+           * cefnest-extension://<id>/__cefnest_background__.html. The id is
+           * how enable/disable finds the browser to tear down later. */
+          const char *url = event_string (object, "url");
+          const char *prefix = CHROMIUM_EXTENSION_URI_PREFIX;
+          if (g_str_has_prefix (url, prefix))
+            {
+              const char *rest = url + strlen (prefix);
+              const char *slash = strchr (rest, '/');
+              if (slash && slash > rest)
+                g_hash_table_replace (self->background_browsers,
+                                      g_strndup (rest, slash - rest),
+                                      GINT_TO_POINTER (id));
+            }
+        }
+      session_note_browser_created (self, id, windowed, background);
       g_signal_emit (self, signals[SIG_BROWSER_CREATED], 0, id,
                      event_string (object, "url"),
-                     event_flag (object, "windowed"),
-                     event_flag (object, "devtools"));
+                     windowed,
+                     event_flag (object, "devtools"),
+                     background);
       return;
     }
 
   if (!strcmp (event, "browser-selected"))
     {
       int id = (int) event_int (object, "browser");
+      self->active_browser_id = id;
       g_signal_emit (self, signals[SIG_BROWSER_SELECTED], 0, id);
       return;
     }
@@ -630,6 +1426,28 @@ handle_event (ChromiumSession *self, const char *line)
   if (!strcmp (event, "browser-closed"))
     {
       int id = (int) event_int (object, "browser");
+
+      if (self->browser_urls)
+        g_hash_table_remove (self->browser_urls, GINT_TO_POINTER (id));
+      if (self->background_browsers)
+        {
+          /* A background page that went away on its own un-registers here:
+             the next enable, or the next plugins-state diff, can then create
+             a fresh one instead of trusting a dead id. */
+          GHashTableIter bg_iter;
+          gpointer bg_key, bg_value;
+
+          g_hash_table_iter_init (&bg_iter, self->background_browsers);
+          while (g_hash_table_iter_next (&bg_iter, &bg_key, &bg_value))
+            if (GPOINTER_TO_INT (bg_value) == id)
+              g_hash_table_iter_remove (&bg_iter);
+        }
+      session_unpair_browser_surface (self, id);
+      if (self->primary_browser_id == id)
+        {
+          self->primary_browser_id = 0;
+          self->primary_surface_paired = FALSE;
+        }
       g_signal_emit (self, signals[SIG_BROWSER_CLOSED], 0, id);
       return;
     }
@@ -700,6 +1518,100 @@ handle_event (ChromiumSession *self, const char *line)
       return;
     }
 
+  if (!strcmp (event, "cookies-result"))
+    {
+      g_autofree char *payload = event_json_text (object);
+
+      g_signal_emit (self, signals[SIG_COOKIES_RESULT], 0,
+                     (int) event_int (object, "id"),
+                     event_flag (object, "ok"), payload);
+      return;
+    }
+
+  if (!strcmp (event, "history-result"))
+    {
+      g_autofree char *payload = event_json_text (object);
+
+      g_signal_emit (self, signals[SIG_HISTORY_RESULT], 0,
+                     (int) event_int (object, "id"), payload);
+      return;
+    }
+
+  if (!strcmp (event, "page-text-begin"))
+    {
+      g_signal_emit (self, signals[SIG_PAGE_TEXT_BEGIN], 0,
+                     (int) event_int (object, "id"),
+                     (int) event_int (object, "browser"),
+                     (int) event_int (object, "bytes"),
+                     event_flag (object, "truncated"));
+      return;
+    }
+
+  if (!strcmp (event, "page-text-chunk"))
+    {
+      g_signal_emit (self, signals[SIG_PAGE_TEXT_CHUNK], 0,
+                     (int) event_int (object, "id"),
+                     event_string (object, "data"));
+      return;
+    }
+
+  if (!strcmp (event, "page-text-end"))
+    {
+      g_signal_emit (self, signals[SIG_PAGE_TEXT_END], 0,
+                     (int) event_int (object, "id"),
+                     event_flag (object, "truncated"));
+      return;
+    }
+
+  if (!strcmp (event, "pdf-begin"))
+    {
+      g_signal_emit (self, signals[SIG_PDF_BEGIN], 0,
+                     (int) event_int (object, "id"),
+                     (int) event_int (object, "bytes"),
+                     event_flag (object, "truncated"));
+      return;
+    }
+
+  if (!strcmp (event, "pdf-chunk"))
+    {
+      gsize length = 0;
+      g_autofree guchar *decoded =
+        g_base64_decode (event_string (object, "data"), &length);
+      GBytes *bytes = g_bytes_new_take (g_steal_pointer (&decoded), length);
+
+      g_signal_emit (self, signals[SIG_PDF_CHUNK], 0,
+                     (int) event_int (object, "id"), bytes);
+      g_bytes_unref (bytes);
+      return;
+    }
+
+  if (!strcmp (event, "pdf-end"))
+    {
+      g_signal_emit (self, signals[SIG_PDF_END], 0,
+                     (int) event_int (object, "id"),
+                     (int) event_int (object, "bytes"),
+                     event_flag (object, "truncated"),
+                     event_string (object, "error"));
+      return;
+    }
+
+  if (!strcmp (event, "favicon"))
+    {
+      JsonArray *urls = json_object_has_member (object, "urls")
+                          ? json_object_get_array_member (object, "urls")
+                          : NULL;
+      guint n = urls ? json_array_get_length (urls) : 0;
+      g_autofree const char **list = g_new0 (const char *, n + 1);
+
+      /* The strings belong to the parsed event, which lives exactly as long as
+       * the emission; the strv itself may be kept. */
+      for (guint i = 0; i < n; i++)
+        list[i] = json_array_get_string_element (urls, i);
+      g_signal_emit (self, signals[SIG_FAVICON_CHANGED], 0,
+                     (int) event_int (object, "browser"), list);
+      return;
+    }
+
   if (!strcmp (event, "load-end"))
     {
       g_signal_emit (self, signals[SIG_LOAD_END], 0,
@@ -745,6 +1657,72 @@ handle_event (ChromiumSession *self, const char *line)
        * 64 KiB cap the js result relay uses). */
       g_signal_emit (self, signals[SIG_PAGE_MESSAGE], 0,
                      event_string (object, "json"));
+      return;
+    }
+
+  if (!strcmp (event, "plugin-menu-command"))
+    {
+      /* A plugin's context-menu row was picked. The routing goes through the
+       * manager's loaded natives, not a signal: the row belongs to whichever
+       * .so registered that slot, and its callback is the only receiver. A
+       * slot nothing loaded claims is dropped — the helper can report a row
+       * this side disabled a moment ago. */
+      JsonObject *params = NULL;
+
+      if (json_object_has_member (object, "params"))
+        {
+          JsonNode *node = json_object_get_member (object, "params");
+
+          if (JSON_NODE_HOLDS_OBJECT (node))
+            params = json_node_get_object (node);
+        }
+      /* The Web frontend's slots are the ones it allocated itself; anything
+         it does not claim belongs to a native plugin's registry. */
+      if (!chromium_plugin_web_deliver_menu (self->plugin_manager,
+                                             event_int (object, "browser"),
+                                             event_int (object, "slot"),
+                                             params))
+        chromium_plugin_native_dispatch_menu (self->plugin_manager,
+                                              event_int (object, "slot"),
+                                              params);
+      return;
+    }
+
+  if (!strcmp (event, "plugin-message"))
+    {
+      if (self->plugin_manager)
+        chromium_plugin_web_handle_message (self->plugin_manager,
+                                            event_int (object, "browser"),
+                                            event_int (object, "reply_id"),
+                                            event_string (object, "id"),
+                                            event_string (object, "api"),
+                                            event_string (object, "args"));
+      return;
+    }
+
+  if (!strcmp (event, "browsers"))
+    {
+      if (self->plugin_manager && json_object_has_member (object, "browsers"))
+        {
+          JsonNode *node = json_object_get_member (object, "browsers");
+
+          if (JSON_NODE_HOLDS_ARRAY (node))
+            chromium_plugin_web_handle_browsers (self->plugin_manager,
+                                                 event_int (object, "id"),
+                                                 json_node_get_array (node));
+        }
+      return;
+    }
+
+  if (!strcmp (event, "plugin-error"))
+    {
+      /* Helper-side failures: a script file that could not be read. The
+         manager's own signal is where every other plugin problem already
+         goes, so this one takes the same door. */
+      if (self->plugin_manager)
+        g_signal_emit_by_name (self->plugin_manager, "plugin-error",
+                               event_string (object, "id"),
+                               event_string (object, "message"));
       return;
     }
 
@@ -801,9 +1779,15 @@ handle_event (ChromiumSession *self, const char *line)
     {
       /* The helper, not the caller, is the one that read CefBrowserHost back.
        * Nothing about the page changes when this happens, so ::changed is the
-       * only place a host can see it land. */
+       * only place a host can see it land. The event names the browser it
+       * muted: a background tab going quiet says nothing about the view the
+       * host is showing. */
+      int browser = (int) event_int (object, "browser");
       gboolean muted = event_flag (object, "muted");
 
+      if (browser != 0 && self->active_browser_id != 0 &&
+          browser != self->active_browser_id)
+        return;
       if (muted != self->muted)
         {
           self->muted = muted;
@@ -920,6 +1904,98 @@ handle_event (ChromiumSession *self, const char *line)
       /* Chromium closed a prompt this side still held. Nothing to answer any
        * more, and the host has to hear that its own prompt is now dead. */
       handle_permission_dismissed (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "js-dialog"))
+    {
+      /* The page's script is stopped until this is answered. The host answers
+       * if it takes the signal; otherwise the Chrome default (ok for alert and
+       * beforeunload, cancel for confirm and prompt) is sent here. */
+      handle_js_dialog (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "certificate-error"))
+    {
+      handle_certificate_error (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "certificate-error-closed"))
+    {
+      handle_certificate_closed (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "request-intercept"))
+    {
+      handle_request_intercept (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "request-intercept-closed"))
+    {
+      handle_request_intercept_closed (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "cdp-result"))
+    {
+      handle_cdp_result (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "cdp-event"))
+    {
+      handle_cdp_event (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "js-dialog-closed"))
+    {
+      /* Navigation or the browser itself took the dialog away. The host's own
+       * panel has nothing left to answer. */
+      handle_js_dialog_closed (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "file-dialog"))
+    {
+      /* A chooser is open on the page's behalf; only the host can draw one. */
+      handle_file_dialog (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "file-dialog-closed"))
+    {
+      handle_file_dialog_closed (self, object);
+      return;
+    }
+
+  if (!strcmp (event, "loading-progress"))
+    {
+      g_signal_emit (self, signals[SIG_LOADING_PROGRESS], 0,
+                     event_number (object, "progress"));
+      return;
+    }
+
+  if (!strcmp (event, "fullscreen"))
+    {
+      g_signal_emit (self, signals[SIG_FULLSCREEN_CHANGED], 0,
+                     event_flag (object, "fullscreen"));
+      return;
+    }
+
+  if (!strcmp (event, "auto-resize"))
+    {
+      const int browser = (int) event_int (object, "browser");
+      const int width = (int) event_int (object, "width");
+      const int height = (int) event_int (object, "height");
+
+      session_apply_auto_resize (self, browser, width, height);
+      g_signal_emit (self, signals[SIG_AUTO_RESIZE_UPDATED], 0,
+                     browser, width, height);
       return;
     }
 
@@ -1125,9 +2201,14 @@ attach_connection (ChromiumSession *self, GSocketConnection *connection)
   self->input = g_object_ref (g_io_stream_get_input_stream (G_IO_STREAM (connection)));
   self->line_pending = g_string_new (NULL);
 
-  /* The helper numbers its permission requests from one again, so an id left over
-   * from a previous helper would answer a different request than it belongs to. */
+  /* The helper numbers its permission requests and dialogs from one again, so an
+   * id left over from a previous helper would answer a different request than it
+   * belongs to. */
   g_hash_table_remove_all (self->permission_held);
+  g_hash_table_remove_all (self->js_dialog_held);
+  g_hash_table_remove_all (self->file_dialog_held);
+  g_hash_table_remove_all (self->certificate_held);
+  g_hash_table_remove_all (self->intercept_held);
 
   read_chunk (self);
 }
@@ -2189,6 +3270,548 @@ chromium_session_permission_respond (ChromiumSession *self, int id,
   permission_respond_send (self, id, result);
 }
 
+/* ------------------------------------------------------------------------ *
+ * Dialogs: the page's script is stopped until these are answered            *
+ *                                                                          *
+ * Both are parked on the helper, so every request that reaches this side has *
+ * an id that can still be answered. A host that takes the signal owns the    *
+ * answer; one that does not gets Chrome's default, because the alternative   *
+ * — leaving the page frozen — is not a state any of these can end on its own. *
+ * ------------------------------------------------------------------------ */
+
+static void
+js_dialog_respond_send (ChromiumSession *self, int id, gboolean ok,
+                        const char *value)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "js-dialog-respond");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  json_builder_set_member_name (builder, "ok");
+  json_builder_add_boolean_value (builder, ok);
+  command_add_string (builder, "value", value ? value : "");
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+static void
+handle_js_dialog (ChromiumSession *self, JsonObject *object)
+{
+  gboolean handled = FALSE;
+  int id = (int) event_int (object, "id");
+  int browser = (int) event_int (object, "browser");
+  const char *kind = event_string (object, "kind");
+  const char *origin = event_string (object, "origin");
+  const char *message = event_string (object, "message");
+  const char *default_value = event_string (object, "default_value");
+
+  /* Held before the emission for the same reason as a permission: a host that
+   * answers from inside the signal must find the id still there. */
+  g_hash_table_add (self->js_dialog_held, GINT_TO_POINTER (id));
+
+  g_signal_emit (self, signals[SIG_JS_DIALOG], 0,
+                 id, browser, kind, origin, message, default_value, &handled);
+  g_debug ("session: js-dialog %d (%s) from %s, host took it: %d",
+           id, kind, origin, handled);
+
+  if (handled)
+    return;
+
+  /* A handler that answered synchronously and still returned FALSE has already
+   * taken the id out; sending the default would be a second answer. */
+  if (!g_hash_table_remove (self->js_dialog_held, GINT_TO_POINTER (id)))
+    return;
+
+  /* Chrome's answers for a host that draws nothing: alert and beforeunload let
+   * the page continue, confirm and prompt answer "no". The prompt value is empty
+   * for the same reason — a cancelled prompt has no input to report. */
+  gboolean ok = !strcmp (kind, "alert") || !strcmp (kind, "beforeunload");
+  g_debug ("session: js-dialog %d (%s) answered %s by default",
+           id, kind, ok ? "ok" : "cancel");
+  js_dialog_respond_send (self, id, ok, "");
+}
+
+static void
+handle_js_dialog_closed (ChromiumSession *self, JsonObject *object)
+{
+  int id = (int) event_int (object, "id");
+  int browser = (int) event_int (object, "browser");
+
+  /* An id this side already answered (or never held) belongs to a dialog the
+   * host has already dealt with; there is no panel left to take down. */
+  if (!g_hash_table_remove (self->js_dialog_held, GINT_TO_POINTER (id)))
+    return;
+
+  g_debug ("session: js-dialog %d closed by the browser", id);
+  g_signal_emit (self, signals[SIG_JS_DIALOG_CLOSED], 0, id, browser);
+}
+
+void
+chromium_session_js_dialog_respond (ChromiumSession *self, int id, gboolean ok,
+                                    const char *value)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  if (!g_hash_table_remove (self->js_dialog_held, GINT_TO_POINTER (id)))
+    {
+      g_debug ("session: no js dialog %d to answer", id);
+      return;
+    }
+
+  js_dialog_respond_send (self, id, ok, value);
+}
+
+static void
+certificate_respond_send (ChromiumSession *self, int id, gboolean allow)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "certificate-respond");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  json_builder_set_member_name (builder, "allow");
+  json_builder_add_boolean_value (builder, allow);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+/* The certificate question has no safe answer the session could give: the
+ * Chrome default is deny and the navigation dies with it, so a host that
+ * draws nothing gets exactly that — the question is dropped and the page
+ * shows its error. The signal exists for the host that wants to ask the
+ * person, or that keeps its own fingerprint policy. */
+static void
+handle_certificate_error (ChromiumSession *self, JsonObject *object)
+{
+  gboolean handled = FALSE;
+  int id = (int) event_int (object, "id");
+  int browser = (int) event_int (object, "browser");
+
+  g_hash_table_add (self->certificate_held, GINT_TO_POINTER (id));
+
+  g_signal_emit (self, signals[SIG_CERTIFICATE_ERROR], 0,
+                 id, browser,
+                 event_string (object, "error"),
+                 event_string (object, "url"),
+                 event_string (object, "subject"),
+                 event_string (object, "issuer"),
+                 event_string (object, "fingerprint"),
+                 &handled);
+  g_debug ("session: certificate-error %d from %s, host took it: %d",
+           id, event_string (object, "url"), handled);
+
+  if (handled)
+    return;
+  if (!g_hash_table_remove (self->certificate_held, GINT_TO_POINTER (id)))
+    return;
+
+  /* The default is "no" (Chrome's), and it is sent so the helper's parked
+     entry goes away with the question. */
+  g_debug ("session: certificate-error %d denied by default", id);
+  certificate_respond_send (self, id, FALSE);
+}
+
+static void
+handle_certificate_closed (ChromiumSession *self, JsonObject *object)
+{
+  int id = (int) event_int (object, "id");
+  int browser = (int) event_int (object, "browser");
+
+  if (!g_hash_table_remove (self->certificate_held, GINT_TO_POINTER (id)))
+    return;
+
+  g_debug ("session: certificate-error %d closed by the browser", id);
+  g_signal_emit (self, signals[SIG_CERTIFICATE_ERROR_CLOSED], 0, id, browser);
+}
+
+void
+chromium_session_certificate_respond (ChromiumSession *self, int id,
+                                      gboolean allow)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  if (!g_hash_table_remove (self->certificate_held, GINT_TO_POINTER (id)))
+    {
+      g_debug ("session: no certificate error %d to answer", id);
+      return;
+    }
+
+  certificate_respond_send (self, id, allow);
+}
+
+/* The policy half: authorize one fingerprint for this helper's lifetime.
+ * Nothing here touches the held table — authorization applies to errors the
+ * helper has not asked about yet. */
+void
+chromium_session_certificate_authorize (ChromiumSession *self,
+                                        const char *fingerprint)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (fingerprint != NULL);
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "certificate-authorize");
+  command_add_string (builder, "fingerprint", fingerprint);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+static void
+request_respond_send (ChromiumSession *self, int request_id,
+                      const char *action, const char *url)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "request-respond");
+  json_builder_set_member_name (builder, "request_id");
+  json_builder_add_int_value (builder, request_id);
+  command_add_string (builder, "action", action);
+  if (url && *url)
+    command_add_string (builder, "url", url);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+/* No default answer here, on purpose: a request is a hole in the page until
+ * it resolves, and inventing one would be the component making a network
+ * policy call. The question stays held until the host answers it or the
+ * browser goes away. */
+static void
+handle_request_intercept (ChromiumSession *self, JsonObject *object)
+{
+  int request_id = (int) event_int (object, "request_id");
+  int browser = (int) event_int (object, "browser");
+  JsonNode *headers = json_object_has_member (object, "headers")
+                        ? json_object_get_member (object, "headers") : NULL;
+  g_autofree char *headers_json =
+      headers ? json_to_string (headers, FALSE) : g_strdup ("{}");
+
+  g_hash_table_add (self->intercept_held, GINT_TO_POINTER (request_id));
+
+  g_signal_emit (self, signals[SIG_REQUEST_INTERCEPT], 0,
+                 request_id, browser,
+                 event_string (object, "url"),
+                 event_string (object, "method"),
+                 event_string (object, "resource_type"),
+                 event_flag (object, "is_main_frame"),
+                 headers_json);
+  g_debug ("session: request-intercept %d (%s), held for the host",
+           request_id, event_string (object, "url"));
+}
+
+static void
+handle_request_intercept_closed (ChromiumSession *self, JsonObject *object)
+{
+  int request_id = (int) event_int (object, "request_id");
+  int browser = (int) event_int (object, "browser");
+
+  if (!g_hash_table_remove (self->intercept_held,
+                            GINT_TO_POINTER (request_id)))
+    return;
+
+  g_debug ("session: request-intercept %d closed by the browser", request_id);
+  g_signal_emit (self, signals[SIG_REQUEST_INTERCEPT_CLOSED], 0,
+                 request_id, browser);
+}
+
+void
+chromium_session_request_respond (ChromiumSession *self, int request_id,
+                                  ChromiumRequestAction action,
+                                  const char *url)
+{
+  const char *names[] = { "allow", "cancel", "redirect" };
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (action == CHROMIUM_REQUEST_REDIRECT ||
+                    url == NULL || !*url ||
+                    action != CHROMIUM_REQUEST_REDIRECT);
+
+  if (!g_hash_table_remove (self->intercept_held,
+                            GINT_TO_POINTER (request_id)))
+    {
+      g_debug ("session: no request %d to answer", request_id);
+      return;
+    }
+
+  request_respond_send (self, request_id, names[action], url);
+}
+
+static void
+intercept_rules_send_ids (ChromiumSession *self, const char *cmd, guint id,
+                          const char *const *patterns,
+                          const char *const *resource_types)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+  const char *const *entry;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", cmd);
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, (gint64) id);
+  if (patterns)
+    {
+      json_builder_set_member_name (builder, "patterns");
+      json_builder_begin_array (builder);
+      for (entry = patterns; *entry; entry++)
+        json_builder_add_string_value (builder, *entry);
+      json_builder_end_array (builder);
+    }
+  if (resource_types)
+    {
+      json_builder_set_member_name (builder, "resource_types");
+      json_builder_begin_array (builder);
+      for (entry = resource_types; *entry; entry++)
+        json_builder_add_string_value (builder, *entry);
+      json_builder_end_array (builder);
+    }
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_intercept_add (ChromiumSession *self, guint id,
+                                const char *const *patterns,
+                                const char *const *resource_types)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (patterns != NULL && *patterns != NULL);
+
+  intercept_rules_send_ids (self, "intercept-add", id, patterns,
+                            resource_types);
+}
+
+void
+chromium_session_intercept_remove (ChromiumSession *self, guint id)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  intercept_rules_send_ids (self, "intercept-remove", id, NULL, NULL);
+}
+
+void
+chromium_session_intercept_set_passive (ChromiumSession *self,
+                                        gboolean passive)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "intercept-mode");
+  json_builder_set_member_name (builder, "passive");
+  json_builder_add_boolean_value (builder, passive);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+/* The DevTools protocol pipe. Fire-and-forget in both directions: the host's
+   own id comes back inside the result, events arrive as they happen. Nothing
+   here runs unless the host turned the observer on — cdp_enable is the one
+   switch, and without it the helper refuses every call by name. */
+static void
+handle_cdp_result (ChromiumSession *self, JsonObject *object)
+{
+  int id = (int) event_int (object, "id");
+
+  g_signal_emit (self, signals[SIG_CDP_RESULT], 0,
+                 id,
+                 event_flag (object, "ok"),
+                 event_string (object, "json"),
+                 event_string (object, "message"));
+}
+
+static void
+handle_cdp_event (ChromiumSession *self, JsonObject *object)
+{
+  int browser = (int) event_int (object, "browser");
+
+  g_signal_emit (self, signals[SIG_CDP_EVENT], 0,
+                 browser,
+                 event_string (object, "method"),
+                 event_string (object, "params"),
+                 event_string (object, "message"));
+}
+
+static void
+cdp_target_send (ChromiumSession *self, const char *cmd, int browser)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", cmd);
+  if (browser > 0)
+    {
+      json_builder_set_member_name (builder, "browser");
+      json_builder_add_int_value (builder, browser);
+    }
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_cdp_enable (ChromiumSession *self, int browser)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  cdp_target_send (self, "cdp-enable", browser);
+}
+
+void
+chromium_session_cdp_disable (ChromiumSession *self, int browser)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  cdp_target_send (self, "cdp-disable", browser);
+}
+
+void
+chromium_session_cdp_execute (ChromiumSession *self, int id, int browser,
+                              const char *method, const char *params_json)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (method != NULL);
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "cdp-execute");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  if (browser > 0)
+    {
+      json_builder_set_member_name (builder, "browser");
+      json_builder_add_int_value (builder, browser);
+    }
+  command_add_string (builder, "method", method);
+  json_builder_set_member_name (builder, "params");
+  json_builder_add_string_value (builder,
+                                 params_json ? params_json : "");
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+static void
+file_dialog_respond_send (ChromiumSession *self, int id,
+                          const char *const *paths)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+  const char *const *path;
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "file-dialog-respond");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  json_builder_set_member_name (builder, "paths");
+  json_builder_begin_array (builder);
+  for (path = paths; path && *path; path++)
+    json_builder_add_string_value (builder, *path);
+  json_builder_end_array (builder);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+static void
+handle_file_dialog (ChromiumSession *self, JsonObject *object)
+{
+  gboolean handled = FALSE;
+  GList *accept = NULL;
+  int id = (int) event_int (object, "id");
+  int browser = (int) event_int (object, "browser");
+  const char *mode = event_string (object, "mode");
+  const char *title = event_string (object, "title");
+  const char *default_path = event_string (object, "default_path");
+  gsize i;
+
+  if (json_object_has_member (object, "accept") &&
+      json_node_get_node_type (json_object_get_member (object, "accept")) == JSON_NODE_ARRAY)
+    {
+      JsonArray *array = json_object_get_array_member (object, "accept");
+
+      for (i = 0; i < json_array_get_length (array); i++)
+        accept = g_list_append (accept,
+                               g_strdup (json_array_get_string_element (array, i)));
+    }
+
+  g_hash_table_add (self->file_dialog_held, GINT_TO_POINTER (id));
+
+  g_signal_emit (self, signals[SIG_FILE_DIALOG], 0,
+                 id, browser, mode, title, default_path, accept, &handled);
+  g_debug ("session: file-dialog %d (%s) %s, host took it: %d",
+           id, mode, title, handled);
+
+  g_list_free_full (accept, g_free);
+
+  if (handled)
+    return;
+  if (!g_hash_table_remove (self->file_dialog_held, GINT_TO_POINTER (id)))
+    return;
+
+  /* No chooser, no choice: cancel is the only answer that does not invent a
+   * path the page never asked for. */
+  g_debug ("session: file-dialog %d (%s) cancelled by default", id, mode);
+  file_dialog_respond_send (self, id, NULL);
+}
+
+static void
+handle_file_dialog_closed (ChromiumSession *self, JsonObject *object)
+{
+  int id = (int) event_int (object, "id");
+  int browser = (int) event_int (object, "browser");
+
+  if (!g_hash_table_remove (self->file_dialog_held, GINT_TO_POINTER (id)))
+    return;
+
+  g_debug ("session: file-dialog %d closed by the browser", id);
+  g_signal_emit (self, signals[SIG_FILE_DIALOG_CLOSED], 0, id, browser);
+}
+
+void
+chromium_session_file_dialog_respond (ChromiumSession *self, int id,
+                                      const char *const *paths)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  if (!g_hash_table_remove (self->file_dialog_held, GINT_TO_POINTER (id)))
+    {
+      g_debug ("session: no file dialog %d to answer", id);
+      return;
+    }
+
+  file_dialog_respond_send (self, id, paths);
+}
+
 static void
 child_waited (GObject *source, GAsyncResult *result, gpointer data)
 {
@@ -2719,6 +4342,24 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
                                   self->data_directory, TRUE);
   else
     g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_HELPER_DATA_DIR");
+  /* Same rule for the network identity: the session's values are the only
+   * source, and an inherited variable from the host's environment must not
+   * turn a session that asked for no proxy into a proxied one. */
+  if (self->proxy && *self->proxy)
+    g_subprocess_launcher_setenv (launcher, "CHROMIUM_HELPER_PROXY",
+                                  self->proxy, TRUE);
+  else
+    g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_HELPER_PROXY");
+  if (self->proxy_bypass && *self->proxy_bypass)
+    g_subprocess_launcher_setenv (launcher, "CHROMIUM_HELPER_PROXY_BYPASS",
+                                  self->proxy_bypass, TRUE);
+  else
+    g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_HELPER_PROXY_BYPASS");
+  if (self->accept_language && *self->accept_language)
+    g_subprocess_launcher_setenv (launcher, "CHROMIUM_HELPER_ACCEPT_LANG",
+                                  self->accept_language, TRUE);
+  else
+    g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_HELPER_ACCEPT_LANG");
   g_subprocess_launcher_unsetenv (launcher, "DISPLAY");
   g_subprocess_launcher_unsetenv (launcher, "WAYLAND_SOCKET");
 
@@ -2759,6 +4400,32 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
    * applied inside the new helper when that origin loads. */
   self->muted = FALSE;
   self->zoom_level = 0.0;
+  /* A new helper means new browser ids and new toplevels: nothing the previous
+   * run paired can still be true. The URL table starts empty too — the first
+   * helper run may never have created it (no plugin manager yet), and ::closed
+   * tears whatever it held down with the old browser ids. Recreated here, it
+   * keeps runtime-message delivery alive across a restart. */
+  g_hash_table_remove_all (self->browser_surfaces);
+  g_hash_table_remove_all (self->surface_browser_ids);
+  g_hash_table_remove_all (self->seen_toplevels);
+  g_queue_clear_full (self->unpaired_surfaces, g_object_unref);
+  g_queue_clear (self->pending_windowed_ids);
+  if (!self->browser_urls)
+    self->browser_urls = g_hash_table_new_full (g_direct_hash,
+                                                g_direct_equal,
+                                                NULL, g_free);
+  else
+    g_hash_table_remove_all (self->browser_urls);
+  if (!self->background_browsers)
+    self->background_browsers = g_hash_table_new_full (g_str_hash,
+                                                       g_str_equal,
+                                                       g_free, NULL);
+  else
+    g_hash_table_remove_all (self->background_browsers);
+  self->primary_browser_id = 0;
+  self->primary_surface_paired = FALSE;
+  self->active_browser_id = 0;
+  session_watch_compositor (self);
   chromium_session_set_state (self, initial_url && *initial_url ? initial_url : "",
                               "", FALSE, FALSE, FALSE);
 
@@ -2805,6 +4472,11 @@ chromium_session_set_data_directory (ChromiumSession *self, const char *path)
 
   g_free (self->data_directory);
   self->data_directory = path && *path ? g_strdup (path) : NULL;
+  /* A manager created before this call derived its install root from the
+     value that was set then; move it with the property. The model refreshes
+     on the host's next scan(), the same way the helper reads the property
+     only at start(). */
+  session_plugin_install_root (self);
   g_object_notify (G_OBJECT (self), "data-directory");
 }
 
@@ -2813,6 +4485,112 @@ chromium_session_get_data_directory (ChromiumSession *self)
 {
   g_return_val_if_fail (CHROMIUM_IS_SESSION (self), NULL);
   return self->data_directory;
+}
+
+static void
+session_set_string (ChromiumSession *self, char **field, const char *value,
+                    const char *property)
+{
+  char *replacement = value && *value ? g_strdup (value) : NULL;
+
+  if (g_strcmp0 (*field, replacement) == 0)
+    {
+      g_free (replacement);
+      return;
+    }
+  g_free (*field);
+  *field = replacement;
+  g_object_notify (G_OBJECT (self), property);
+}
+
+void
+chromium_session_set_proxy (ChromiumSession *self, const char *proxy)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  session_set_string (self, &self->proxy, proxy, "proxy");
+}
+
+const char *
+chromium_session_get_proxy (ChromiumSession *self)
+{
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), NULL);
+  return self->proxy;
+}
+
+void
+chromium_session_set_proxy_bypass (ChromiumSession *self, const char *bypass)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  session_set_string (self, &self->proxy_bypass, bypass, "proxy-bypass");
+}
+
+const char *
+chromium_session_get_proxy_bypass (ChromiumSession *self)
+{
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), NULL);
+  return self->proxy_bypass;
+}
+
+void
+chromium_session_set_accept_language (ChromiumSession *self,
+                                      const char *language)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  session_set_string (self, &self->accept_language, language,
+                      "accept-language");
+}
+
+const char *
+chromium_session_get_accept_language (ChromiumSession *self)
+{
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), NULL);
+  return self->accept_language;
+}
+
+void
+chromium_session_set_auto_resize (ChromiumSession *self, gboolean enabled)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  if (self->auto_resize == enabled)
+    return;
+  self->auto_resize = enabled;
+  session_send_auto_resize (self);
+  g_object_notify (G_OBJECT (self), "auto-resize");
+}
+
+gboolean
+chromium_session_get_auto_resize (ChromiumSession *self)
+{
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), FALSE);
+  return self->auto_resize;
+}
+
+void
+chromium_session_set_auto_resize_bounds (ChromiumSession *self, int min_width,
+                                         int min_height, int max_width,
+                                         int max_height)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (min_width >= 0 && min_height >= 0);
+  g_return_if_fail (max_width >= 0 && max_height >= 0);
+
+  self->auto_resize_min_width = min_width;
+  self->auto_resize_min_height = min_height;
+  self->auto_resize_max_width = max_width;
+  self->auto_resize_max_height = max_height;
+  session_send_auto_resize (self);
+  g_object_notify (G_OBJECT (self), "auto-resize-min-width");
+  g_object_notify (G_OBJECT (self), "auto-resize-min-height");
+  g_object_notify (G_OBJECT (self), "auto-resize-max-width");
+  g_object_notify (G_OBJECT (self), "auto-resize-max-height");
+}
+
+NestedSurface *
+chromium_session_get_browser_surface (ChromiumSession *self, int id)
+{
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), NULL);
+  return session_surface_for_browser (self, id);
 }
 
 gboolean
@@ -2884,6 +4662,7 @@ chromium_session_set_view (ChromiumSession *self, ChromiumView *view)
   if (self->view)
     g_object_unref (self->view);
   self->view = view;
+  session_watch_compositor (self);
 }
 
 void
@@ -2898,6 +4677,22 @@ chromium_session_new_browser (ChromiumSession *self, const char *url,
   command_add_string (builder, "cmd", "new-browser");
   command_add_string (builder, "url", url ? url : "");
   command_add_string (builder, "mode", windowed ? "window" : "tab");
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_new_background_browser (ChromiumSession *self, const char *url)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "new-browser");
+  command_add_string (builder, "url", url ? url : "");
+  command_add_string (builder, "mode", "background");
   json_builder_end_object (builder);
   root = json_builder_get_root (builder);
   send_json (self, root);
@@ -3084,6 +4879,23 @@ chromium_session_zoom (ChromiumSession *self, const char *action)
 }
 
 void
+chromium_session_set_zoom_level (ChromiumSession *self, double level)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "zoom-set");
+  json_builder_set_member_name (builder, "level");
+  json_builder_add_double_value (builder, level);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
 chromium_session_run_javascript (ChromiumSession *self, const char *code, int id)
 {
   g_autoptr (JsonBuilder) builder = json_builder_new ();
@@ -3266,6 +5078,167 @@ chromium_session_view_source (ChromiumSession *self)
   send_command (self, "view-source");
 }
 
+/* The three cookies commands read and write the running helper's own request
+ * context. The answer is one ::cookies-result keyed by @id, whichever command
+ * asked; nothing here waits for it. */
+void
+chromium_session_cookies_get (ChromiumSession *self, int id, const char *url)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (url != NULL);
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "cookies-get");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  command_add_string (builder, "url", url);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_cookies_set (ChromiumSession *self, int id, const char *url,
+                              const char *cookies_json)
+{
+  g_autoptr (JsonParser) parser = json_parser_new ();
+  g_autoptr (GError) error = NULL;
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+  JsonNode *cookies;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (cookies_json != NULL);
+
+  /* An array of cookie objects, the same shape cookies-get answers with. Refuse
+   * to put a malformed literal on the channel: the helper would have to drop
+   * the line, and the host would never learn which command it was. */
+  if (!json_parser_load_from_data (parser, cookies_json, -1, &error) ||
+      (cookies = json_parser_get_root (parser)) == NULL ||
+      !JSON_NODE_HOLDS_ARRAY (cookies))
+    {
+      g_warning ("session: cookies-set needs a JSON array of cookie objects: %s",
+                 error ? error->message : "the root is not an array");
+      return;
+    }
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "cookies-set");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  if (url && *url)
+    command_add_string (builder, "url", url);
+  json_builder_set_member_name (builder, "cookies");
+  json_builder_add_value (builder, json_node_copy (cookies));
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_cookies_delete (ChromiumSession *self, int id, const char *url,
+                                 const char *name)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail ((url && *url) || (name && *name));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "cookies-delete");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  if (url && *url)
+    command_add_string (builder, "url", url);
+  if (name && *name)
+    command_add_string (builder, "name", name);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_page_text (ChromiumSession *self, int id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "page-text");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_history (ChromiumSession *self, int id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "history");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_print_pdf (ChromiumSession *self, int id)
+{
+  chromium_session_print_pdf_with_settings (self, id, NULL);
+}
+
+void
+chromium_session_print_pdf_with_settings (ChromiumSession *self, int id,
+                                          const ChromiumPdfSettings *settings)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "print-pdf");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  if (settings)
+    {
+      json_builder_set_member_name (builder, "landscape");
+      json_builder_add_boolean_value (builder, settings->landscape != FALSE);
+      json_builder_set_member_name (builder, "print_background");
+      json_builder_add_boolean_value (builder,
+                                      settings->print_background != FALSE);
+      if (settings->scale > 0)
+        {
+          json_builder_set_member_name (builder, "scale");
+          json_builder_add_double_value (builder, settings->scale);
+        }
+      if (settings->page_ranges && *settings->page_ranges)
+        command_add_string (builder, "page_ranges", settings->page_ranges);
+      if (settings->max_bytes > 0)
+        {
+          json_builder_set_member_name (builder, "max_bytes");
+          json_builder_add_int_value (builder, settings->max_bytes);
+        }
+    }
+  json_builder_end_object (builder);
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
 const char *
 chromium_session_get_helper_path (ChromiumSession *self)
 {
@@ -3383,6 +5356,83 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                            FALSE,
                            G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  /**
+   * ChromiumSession:proxy:
+   *
+   * The proxy the next start() hands Chromium (`scheme://host:port`), or %NULL
+   * for a direct connection. See chromium_session_set_proxy().
+   */
+  g_object_class_install_property
+    (object_class, PROP_PROXY,
+     g_param_spec_string ("proxy", "Proxy",
+                          "Proxy for the next helper start, or NULL",
+                          NULL,
+                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                          G_PARAM_EXPLICIT_NOTIFY));
+
+  /**
+   * ChromiumSession:proxy-bypass:
+   *
+   * Chromium's proxy bypass list for the next start(). See
+   * chromium_session_set_proxy_bypass().
+   */
+  g_object_class_install_property
+    (object_class, PROP_PROXY_BYPASS,
+     g_param_spec_string ("proxy-bypass", "Proxy bypass list",
+                          "Chromium proxy bypass list for the next start",
+                          NULL,
+                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                          G_PARAM_EXPLICIT_NOTIFY));
+
+  /**
+   * ChromiumSession:accept-language:
+   *
+   * The Accept-Language list for the next start(), e.g. "zh-CN,zh". See
+   * chromium_session_set_accept_language().
+   */
+  g_object_class_install_property
+    (object_class, PROP_ACCEPT_LANGUAGE,
+     g_param_spec_string ("accept-language", "Accept-Language",
+                          "Accept-Language list for the next start",
+                          NULL,
+                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                          G_PARAM_EXPLICIT_NOTIFY));
+
+  /**
+   * ChromiumSession:auto-resize:
+   *
+   * Whether page content drives the size of the browser's toplevel. See
+   * chromium_session_set_auto_resize().
+   */
+  g_object_class_install_property
+    (object_class, PROP_AUTO_RESIZE,
+     g_param_spec_boolean ("auto-resize", "Auto resize",
+                           "Let page content drive the toplevel size",
+                           FALSE,
+                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property
+    (object_class, PROP_AUTO_RESIZE_MIN_WIDTH,
+     g_param_spec_int ("auto-resize-min-width", "Auto resize minimum width",
+                       "Smallest width auto-resize may configure", 0, G_MAXINT,
+                       0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property
+    (object_class, PROP_AUTO_RESIZE_MIN_HEIGHT,
+     g_param_spec_int ("auto-resize-min-height", "Auto resize minimum height",
+                       "Smallest height auto-resize may configure", 0, G_MAXINT,
+                       0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property
+    (object_class, PROP_AUTO_RESIZE_MAX_WIDTH,
+     g_param_spec_int ("auto-resize-max-width", "Auto resize maximum width",
+                       "Largest width auto-resize may configure, 0 = no limit",
+                       0, G_MAXINT, 0,
+                       G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property
+    (object_class, PROP_AUTO_RESIZE_MAX_HEIGHT,
+     g_param_spec_int ("auto-resize-max-height", "Auto resize maximum height",
+                       "Largest height auto-resize may configure, 0 = no limit",
+                       0, G_MAXINT, 0,
+                       G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   signals[SIG_CHANGED] =
     g_signal_new ("changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
@@ -3442,6 +5492,402 @@ chromium_session_class_init (ChromiumSessionClass *klass)
     g_signal_new ("permission-dismissed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 2,
                   G_TYPE_INT, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::js-dialog:
+   * @self: the session
+   * @id: the request id to answer with chromium_session_js_dialog_respond()
+   * @browser: the browser whose page is waiting
+   * @kind: "alert", "confirm", "prompt" or "beforeunload"
+   * @origin: the asking page's origin, or "" for a beforeunload dialog
+   * @message: the text the page passed to the dialog
+   * @default_value: the prompt's initial text, or "" for the other kinds
+   *
+   * The page's script is stopped until this dialog is answered. A handler that
+   * draws its own dialog returns %TRUE and owes exactly one answer; returning
+   * %FALSE — or connecting nothing — makes the session answer with Chrome's
+   * default: ok for alert and beforeunload, cancel (with an empty value) for
+   * confirm and prompt.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_JS_DIALOG] =
+    g_signal_new ("js-dialog", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_BOOLEAN, 6,
+                  G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING,
+                  G_TYPE_STRING, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::js-dialog-closed:
+   * @self: the session
+   * @id: the request id
+   * @browser: the browser that owned it
+   *
+   * A dialog this side still held was taken away by the browser — navigation,
+   * a reload, or the browser closing. Nothing can be answered any more, so a
+   * host panel has to come down.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_JS_DIALOG_CLOSED] =
+    g_signal_new ("js-dialog-closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_INT);
+
+  /**
+   * ChromiumSession::certificate-error:
+   * @self: the session
+   * @id: the request id to answer with chromium_session_certificate_respond()
+   * @browser: the browser that asked
+   * @error: Chromium's net-error name ("ERR_CERT_AUTHORITY_INVALID", …)
+   * @url: the request the certificate did not satisfy
+   * @subject: the leaf certificate's subject display name, or ""
+   * @issuer: its issuer's display name, or ""
+   * @fingerprint: the SHA-256 of the leaf's DER, hex, or "" when the
+   *   certificate could not be read
+   *
+   * The navigation is stopped until this is answered. A handler that wants to
+   * decide returns %TRUE and owes exactly one
+   * chromium_session_certificate_respond(); returning %FALSE — or connecting
+   * nothing — denies, which is Chrome's own default and the safe one. The
+   * decision repeats per error: a host that wants "remember this
+   * certificate" calls chromium_session_certificate_authorize() with the
+   * fingerprint, which authorizes it for this helper's lifetime; persistence
+   * beyond that is the host's own policy store.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_CERTIFICATE_ERROR] =
+    g_signal_new ("certificate-error", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_BOOLEAN, 7,
+                  G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING,
+                  G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::certificate-error-closed:
+   * @self: the session
+   * @id: the request that went away
+   * @browser: the browser that owned it
+   *
+   * The error was answered elsewhere, or its browser navigated or closed
+   * before an answer came. A panel waiting on this @id should go away; there
+   * is nothing left to answer.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_CERTIFICATE_ERROR_CLOSED] =
+    g_signal_new ("certificate-error-closed", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_INT);
+
+  /**
+   * ChromiumSession::request-intercept:
+   * @self: the session
+   * @request_id: the id to answer with chromium_session_request_respond()
+   * @browser: the browser loading the resource
+   * @url: the request URL
+   * @method: "GET", "POST", …
+   * @resource_type: "main_frame", "image", "xhr", …
+   * @is_main_frame: whether this request is the page itself
+   * @headers: the request headers as one JSON object text
+   *
+   * The request is stopped until this is answered — there is no default, no
+   * timeout, and no answer the session could invent without making a network
+   * policy call. A host that registers rules owes fast answers; closing the
+   * browser cancels what it left behind and reports it as
+   * ::request-intercept-closed.
+   *
+   * With no rule registered nothing here runs at all: the feature is off
+   * until the host says otherwise, and passive mode reports without
+   * stopping.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_REQUEST_INTERCEPT] =
+    g_signal_new ("request-intercept", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 7,
+                  G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING,
+                  G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::request-intercept-closed:
+   * @self: the session
+   * @request_id: the request that went away
+   * @browser: the browser that owned it
+   *
+   * The browser closed while the question was parked; the request was
+   * cancelled with it. Nothing is left to answer.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_REQUEST_INTERCEPT_CLOSED] =
+    g_signal_new ("request-intercept-closed", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_INT);
+
+  /**
+   * ChromiumSession::cdp-result:
+   * @self: the session
+   * @id: the id the matching chromium_session_cdp_execute() carried
+   * @ok: whether the method succeeded
+   * @json: the "result" (or the error dictionary) as one JSON text
+   * @message: "cdp-too-large" when the answer exceeded the channel's line
+   *   limit, "" otherwise
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_CDP_RESULT] =
+    g_signal_new ("cdp-result", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 4,
+                  G_TYPE_INT, G_TYPE_BOOLEAN, G_TYPE_STRING, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::cdp-event:
+   * @self: the session
+   * @browser: the browser the event came from
+   * @method: the protocol event name ("Page.frameStartedLoading", …)
+   * @params: the event parameters as one JSON text
+   * @message: "cdp-too-large" when the parameters exceeded the channel's
+   *   line limit, "" otherwise
+   *
+   * Everything the browser's DevTools backend emits while the observer is
+   * on — navigation, lifecycle, network, console. That is the feature: the
+   * observer is only registered after chromium_session_cdp_enable().
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_CDP_EVENT] =
+    g_signal_new ("cdp-event", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 4,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::file-dialog:
+   * @self: the session
+   * @id: the request id to answer with chromium_session_file_dialog_respond()
+   * @browser: the browser that asked
+   * @mode: "open", "open-multiple", "open-folder" or "save"
+   * @title: the title the page asked for, or ""
+   * @default_path: the initially selected path, or ""
+   * @accept: a GList of owned-by-the-session filter strings ("image/…", ".txt")
+   *
+   * A page wants a file chooser. A handler that draws one returns %TRUE and
+   * answers with the chosen paths — an empty list means cancelled; returning
+   * %FALSE — or connecting nothing — cancels the chooser.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_FILE_DIALOG] =
+    g_signal_new ("file-dialog", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_BOOLEAN, 6,
+                  G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING,
+                  G_TYPE_STRING, G_TYPE_POINTER);
+
+  /**
+   * ChromiumSession::file-dialog-closed:
+   * @self: the session
+   * @id: the request id
+   * @browser: the browser that owned it
+   *
+   * The chooser was taken away with its browser. Nothing to answer.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_FILE_DIALOG_CLOSED] =
+    g_signal_new ("file-dialog-closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_INT);
+
+  /**
+   * ChromiumSession::loading-progress:
+   * @self: the session
+   * @progress: the load's progress, 0.0 to 1.0
+   *
+   * The page's load progress, for a host that draws a progress bar. Advisory
+   * and fire-and-forget; the next value supersedes this one.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_LOADING_PROGRESS] =
+    g_signal_new ("loading-progress", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_DOUBLE);
+
+  /**
+   * ChromiumSession::fullscreen-changed:
+   * @self: the session
+   * @fullscreen: whether the page is in fullscreen
+   *
+   * The page entered or left fullscreen. The helper moves its own CEF window
+   * to match, and a host that owns the toplevel can follow here.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_FULLSCREEN_CHANGED] =
+    g_signal_new ("fullscreen-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
+
+  /**
+   * ChromiumSession::auto-resize-updated:
+   * @self: the session
+   * @browser: the browser whose page changed its preferred size
+   * @width: the new width in logical pixels, already clamped
+   * @height: the new height in logical pixels, already clamped
+   *
+   * The session has configured the toplevel paired with @browser to this size.
+   * A host that draws the window itself (a popover, an embedded panel) follows
+   * here; a host that leaves the window to the compositor has nothing to do.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_AUTO_RESIZE_UPDATED] =
+    g_signal_new ("auto-resize-updated", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+                  G_TYPE_INT, G_TYPE_INT, G_TYPE_INT);
+
+  /**
+   * ChromiumSession::cookies-result:
+   * @self: the session
+   * @id: the id the host passed to the cookies call
+   * @ok: whether the request succeeded
+   * @json: the result object as JSON text — `cookies` (array of cookie
+   *   objects) and `count` for a get, `count` and `failed` for a set,
+   *   `deleted` for a delete, `error` when @ok is %FALSE
+   *
+   * The answer to chromium_session_cookies_get(), _set() or _delete().
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_COOKIES_RESULT] =
+    g_signal_new ("cookies-result", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+                  G_TYPE_INT, G_TYPE_BOOLEAN, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::history-result:
+   * @self: the session
+   * @id: the id the host passed to chromium_session_history()
+   * @json: the result object as JSON text: `current_index` and `entries`,
+   *   each entry an object of `index`, `url`, `title`, `current`
+   *
+   * The browser's session-history entries, oldest first.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_HISTORY_RESULT] =
+    g_signal_new ("history-result", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::page-text-begin:
+   * @self: the session
+   * @id: the id the host passed to chromium_session_page_text()
+   * @browser: the browser whose frame was read
+   * @bytes: the number of bytes that will follow, after truncation
+   * @truncated: whether the text was cut at the channel's 4 MiB cap
+   *
+   * The frame's text arrives as one begin, ordered page-text-chunk events and
+   * one page-text-end. Chunks are whole UTF-8 and only valid during their
+   * emission.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_PAGE_TEXT_BEGIN] =
+    g_signal_new ("page-text-begin", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 4,
+                  G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_BOOLEAN);
+
+  /**
+   * ChromiumSession::page-text-chunk:
+   * @self: the session
+   * @id: the request id
+   * @data: a piece of the frame's text
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_PAGE_TEXT_CHUNK] =
+    g_signal_new ("page-text-chunk", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::page-text-end:
+   * @self: the session
+   * @id: the request id
+   * @truncated: whether the text was cut at the 4 MiB cap
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_PAGE_TEXT_END] =
+    g_signal_new ("page-text-end", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_BOOLEAN);
+
+  /**
+   * ChromiumSession::pdf-begin:
+   * @self: the session
+   * @id: the id the host passed to chromium_session_print_pdf()
+   * @bytes: the number of PDF bytes that will follow, after truncation
+   * @truncated: whether the PDF was cut at the byte cap
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_PDF_BEGIN] =
+    g_signal_new ("pdf-begin", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+                  G_TYPE_INT, G_TYPE_INT, G_TYPE_BOOLEAN);
+
+  /**
+   * ChromiumSession::pdf-chunk:
+   * @self: the session
+   * @id: the request id
+   * @data: the decoded PDF bytes
+   *
+   * Raw bytes, already base64-decoded; append them in order.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_PDF_CHUNK] =
+    g_signal_new ("pdf-chunk", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_BYTES);
+
+  /**
+   * ChromiumSession::pdf-end:
+   * @self: the session
+   * @id: the request id
+   * @bytes: total bytes streamed
+   * @truncated: whether the bytes were cut at the cap
+   * @error: "" on success, or the helper's reason
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_PDF_END] =
+    g_signal_new ("pdf-end", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 4,
+                  G_TYPE_INT, G_TYPE_INT, G_TYPE_BOOLEAN, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::favicon-changed:
+   * @self: the session
+   * @browser: the browser whose page declared icons
+   * @urls: a %NULL-terminated array of icon URLs, owned by the session for
+   *   the duration of the emission
+   *
+   * The page's icon URLs, in the order it declared them. Which to fetch and
+   * where to show it is the host's call; the helper downloads nothing.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_FAVICON_CHANGED] =
+    g_signal_new ("favicon-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_STRV);
+
   signals[SIG_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
@@ -3499,14 +5945,34 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
   signals[SIG_BROWSER_CREATED] =
     g_signal_new ("browser-created", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
-                  0, NULL, NULL, NULL, G_TYPE_NONE, 4,
-                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_BOOLEAN);
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 5,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_BOOLEAN,
+                  G_TYPE_BOOLEAN);
   signals[SIG_BROWSER_SELECTED] =
     g_signal_new ("browser-selected", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
   signals[SIG_BROWSER_CLOSED] =
     g_signal_new ("browser-closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
+  /**
+   * ChromiumSession::browser-surface:
+   * @self: the session
+   * @browser: the browser id
+   * @surface: (transfer none) (nullable): the toplevel the browser's CEF window
+   *   draws into, or %NULL when that surface went away
+   *
+   * The browser-to-surface pairing, reported when it is made and again with
+   * %NULL when the surface disappears. It can arrive before or after
+   * ::browser-created; a host binding a view should handle both orders and
+   * also ask chromium_session_get_browser_surface() when it needs the answer
+   * outside an emission. Ownership stays with the session.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_BROWSER_SURFACE] =
+    g_signal_new ("browser-surface", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, NESTED_TYPE_SURFACE);
   signals[SIG_POPUP_REQUESTED] =
     g_signal_new ("popup-requested", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
@@ -3551,6 +6017,17 @@ chromium_session_init (ChromiumSession *self)
   self->title = g_strdup ("");
   self->cancellable = g_cancellable_new ();
   self->permission_held = g_hash_table_new (g_direct_hash, g_direct_equal);
+  self->js_dialog_held = g_hash_table_new (g_direct_hash, g_direct_equal);
+  self->file_dialog_held = g_hash_table_new (g_direct_hash, g_direct_equal);
+  self->certificate_held = g_hash_table_new (g_direct_hash, g_direct_equal);
+  self->intercept_held = g_hash_table_new (g_direct_hash, g_direct_equal);
+  self->browser_surfaces = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+                                                  NULL, g_object_unref);
+  self->surface_browser_ids = g_hash_table_new (g_direct_hash, g_direct_equal);
+  self->seen_toplevels = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+                                                NULL, g_object_unref);
+  self->unpaired_surfaces = g_queue_new ();
+  self->pending_windowed_ids = g_queue_new ();
   /* The property spec's default does not reach the field on its own: without
    * this the pspec says TRUE and the session still ships windows closed. */
   self->auto_source_window = TRUE;
@@ -3575,6 +6052,30 @@ chromium_session_get_property (GObject *object, guint property,
       break;
     case PROP_DEVTOOLS_ENABLED:
       g_value_set_boolean (value, self->devtools_enabled);
+      break;
+    case PROP_PROXY:
+      g_value_set_string (value, self->proxy);
+      break;
+    case PROP_PROXY_BYPASS:
+      g_value_set_string (value, self->proxy_bypass);
+      break;
+    case PROP_ACCEPT_LANGUAGE:
+      g_value_set_string (value, self->accept_language);
+      break;
+    case PROP_AUTO_RESIZE:
+      g_value_set_boolean (value, self->auto_resize);
+      break;
+    case PROP_AUTO_RESIZE_MIN_WIDTH:
+      g_value_set_int (value, self->auto_resize_min_width);
+      break;
+    case PROP_AUTO_RESIZE_MIN_HEIGHT:
+      g_value_set_int (value, self->auto_resize_min_height);
+      break;
+    case PROP_AUTO_RESIZE_MAX_WIDTH:
+      g_value_set_int (value, self->auto_resize_max_width);
+      break;
+    case PROP_AUTO_RESIZE_MAX_HEIGHT:
+      g_value_set_int (value, self->auto_resize_max_height);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property, pspec);
@@ -3601,6 +6102,40 @@ chromium_session_set_property (GObject *object, guint property,
           self->devtools_enabled = g_value_get_boolean (value);
           session_send_devtools_state (self);
         }
+      break;
+    case PROP_PROXY:
+      chromium_session_set_proxy (self, g_value_get_string (value));
+      break;
+    case PROP_PROXY_BYPASS:
+      chromium_session_set_proxy_bypass (self, g_value_get_string (value));
+      break;
+    case PROP_ACCEPT_LANGUAGE:
+      chromium_session_set_accept_language (self, g_value_get_string (value));
+      break;
+    case PROP_AUTO_RESIZE:
+      {
+        gboolean enabled = g_value_get_boolean (value);
+
+        if (self->auto_resize != enabled)
+          {
+            self->auto_resize = enabled;
+            session_send_auto_resize (self);
+          }
+      }
+      break;
+    case PROP_AUTO_RESIZE_MIN_WIDTH:
+      self->auto_resize_min_width = g_value_get_int (value);
+      goto bounds_changed;
+    case PROP_AUTO_RESIZE_MIN_HEIGHT:
+      self->auto_resize_min_height = g_value_get_int (value);
+      goto bounds_changed;
+    case PROP_AUTO_RESIZE_MAX_WIDTH:
+      self->auto_resize_max_width = g_value_get_int (value);
+      goto bounds_changed;
+    case PROP_AUTO_RESIZE_MAX_HEIGHT:
+      self->auto_resize_max_height = g_value_get_int (value);
+    bounds_changed:
+      session_send_auto_resize (self);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property, pspec);
@@ -3656,6 +6191,15 @@ chromium_session_dispose (GObject *object)
   self->menu_pending = FALSE;
   menu_release (self);
 
+  /* Native plugins first: their session-signal handlers are pages of code the
+   * manager's unloading unmaps, and the emissions below must not reach them.
+   * Same rule as ::closed; both paths can run, and unloading twice is a
+   * no-op. The Web frontend flushes whatever storage is dirty on its way
+   * out. */
+  chromium_plugin_native_unload_all (self->plugin_manager);
+  chromium_plugin_web_detach (self->plugin_manager);
+  g_clear_object (&self->plugin_manager);
+
   /* A half-streamed source belongs to a helper that is going away, and the
    * window is this side's own: close both with the session. */
   source_transfer_reset (self);
@@ -3691,7 +6235,26 @@ chromium_session_finalize (GObject *object)
   g_free (self->startup_url);
   g_free (self->data_directory);
   g_clear_pointer (&self->claimed_data_directory, g_free);
+  g_free (self->proxy);
+  g_free (self->proxy_bypass);
+  g_free (self->accept_language);
   g_hash_table_destroy (self->permission_held);
+  g_hash_table_destroy (self->js_dialog_held);
+  g_hash_table_destroy (self->file_dialog_held);
+  g_hash_table_destroy (self->certificate_held);
+  g_hash_table_destroy (self->intercept_held);
+  g_clear_pointer (&self->plugins_sent, g_hash_table_unref);
+  g_clear_pointer (&self->browser_urls, g_hash_table_unref);
+  g_clear_pointer (&self->background_browsers, g_hash_table_unref);
+  g_clear_pointer (&self->browser_surfaces, g_hash_table_unref);
+  g_clear_pointer (&self->surface_browser_ids, g_hash_table_unref);
+  g_clear_pointer (&self->seen_toplevels, g_hash_table_unref);
+  if (self->unpaired_surfaces)
+    {
+      g_queue_free_full (self->unpaired_surfaces, g_object_unref);
+      self->unpaired_surfaces = NULL;
+    }
+  g_clear_pointer (&self->pending_windowed_ids, g_queue_free);
 
   G_OBJECT_CLASS (chromium_session_parent_class)->finalize (object);
 }

@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Plugin Demo",
+  "version": "1.0",
+  "description": "The native plugin the plugin gate installs: a context-menu row, a load-end subscription, content scripts, storage and an action popup.",
+  "permissions": ["storage"],
+  "content_scripts": [
+    { "matches": ["file://*/*plugin-page-*.html"],
+      "js": ["cs.js"],
+      "run_at": "document_start" }
+  ],
+  "action": { "default_title": "Plugin Demo", "default_popup": "popup.html" },
+  "cefnest": {
+    "type": "native",
+    "library": "libplugin-demo.so",
+    "popup": { "width": 320, "height": 480 }
+  }
+}

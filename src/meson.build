@@ -7,7 +7,10 @@ libcefnest = shared_library(
   'cefnest',
   [ 'nested.c', 'nested-dmabuf.c', 'nested-seat.c', 'nested-data-device.c',
     'nested-xdg.c', 'nested-text-input.c', 'nested-cursor.c',
-    'chromium-view.c', 'chromium-session.c', 'source-window.c',
+    'chromium-view.c', 'chromium-session.c', 'chromium-plugin.c',
+    'chromium-plugin-native.c', 'chromium-plugin-web.c',
+    'chromium-plugin-zip.c',
+    'source-window.c',
     xdg_shell_server_header, xdg_shell_code,
     dmabuf_server_header, dmabuf_code,
     viewporter_server_header, viewporter_code,
@@ -21,7 +24,7 @@ libcefnest = shared_library(
   ],
   include_directories: gen_inc,
   dependencies: [ gtk_dep, gsv_dep, json_dep, wl_server_dep, xkb_dep, gbm_dep, drm_dep,
-                  threads_dep, m_dep ],
+                  threads_dep, m_dep, gmodule_dep, zlib_dep ],
   version: get_option('cefnest-version'),
   soversion: '0',
   install: true,
@@ -37,7 +40,7 @@ libcefnest_dep = declare_dependency(
 # is what the compositor modules share with each other, and the generated protocol
 # headers name interfaces a host has no reason to implement.
 install_headers(
-  'nested.h', 'chromium-view.h', 'chromium-session.h',
+  'nested.h', 'chromium-view.h', 'chromium-session.h', 'chromium-plugin.h',
   subdir: 'cefnest',
 )
 
@@ -52,7 +55,8 @@ pkgconfig.generate(
   # only used inside the library, and it is still listed: the .so links against it,
   # and a package that resolves a dependency by pkg-config should be able to find
   # the same one we were built with.
-  requires: [ gtk_dep, gsv_dep, json_dep, wl_server_dep, xkb_dep, gbm_dep, drm_dep ],
+  requires: [ gtk_dep, gsv_dep, json_dep, wl_server_dep, xkb_dep, gbm_dep, drm_dep,
+              gmodule_dep, zlib_dep ],
   # Includedir itself as well as the subdirectory: a host writes
   # <cefnest/chromium-session.h>, and a bare "nested.h" is a name too easy to
   # find in somebody else's tree to be the only way to reach this one.

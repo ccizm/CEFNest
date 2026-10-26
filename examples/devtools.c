@@ -233,7 +233,7 @@ open_devtools_window (int id, const char *url)
 static void
 session_browser_created (ChromiumSession *session, int id, const char *url,
                          gboolean windowed, gboolean devtools_browser,
-                         gpointer data)
+                         gboolean background, gpointer data)
 {
   /* Only the inspector gets a window here: the page's browser is painted by
    * the window this file built, whose view owns the compositor. */

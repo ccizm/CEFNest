@@ -141,7 +141,8 @@ case "$MAIN_LIST" in
 esac
 
 DEV_LIST=$(dpkg -c "$DEV_DEB" 2>/dev/null || true)
-for needed in "usr/include/cefnest/chromium-session.h" \
+for needed in "usr/include/cefnest/chromium-plugin.h" \
+              "usr/include/cefnest/chromium-session.h" \
               "usr/include/cefnest/chromium-view.h" \
               "usr/include/cefnest/nested.h" \
               "pkgconfig/cefnest.pc"; do

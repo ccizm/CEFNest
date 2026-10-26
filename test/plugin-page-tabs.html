@@ -1,0 +1,27 @@
+<!doctype html>
+<!-- The tabs.query assertion page for test/plugin-gate.sh's tabs run. The
+     demo plugin's content script matches this file name, so the chrome.*
+     shim exists here; the page summarizes every tab the helper reports into
+     its title — id, windowed, muted, zoom — for the gate to read back with
+     "js document.title". -->
+<html>
+<head><meta charset="utf-8"><title>TABS-PAGE</title></head>
+<body>
+<h1>tabs query page</h1>
+<script>
+function summarize(tabs) {
+  return tabs.map(function (t) {
+    return t.id + ":" + (t.windowed ? "w" : "t") + ":" +
+      (t.muted ? "m" : "s") + ":" + (t.zoom === undefined ? "?" : t.zoom);
+  }).join("|");
+}
+if (window.chrome && chrome.tabs && chrome.tabs.query) {
+  chrome.tabs.query({}).then(function (tabs) {
+    document.title = "TABS-OK:" + summarize(tabs);
+  }, function (e) { document.title = "TABS-ERR:" + (e && e.message); });
+} else {
+  document.title = "TABS-NOSHIM";
+}
+</script>
+</body>
+</html>

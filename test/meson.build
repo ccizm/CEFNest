@@ -51,6 +51,22 @@ data_dir = executable(
 
 test('data-dir', data_dir, suite: 'unit', timeout: 60)
 
+# The plugin model's rules with no display, no helper and no channel: what a
+# manifest turns into, which manifests refuse, what the permission table does to
+# an enable, and what a rescan keeps across it. The page never has to be loaded
+# for any of it, so the suite can check it on a machine with no Chromium.
+plugin_model = executable(
+  'plugin-model',
+  [ 'plugin-model.c' ],
+  # json-glib for the internal header the install-root tests reach through:
+  # the session derives that root from the data directory, and the private
+  # setter it calls shares the internal header's includes.
+  dependencies: [ libcefnest_dep, json_dep ],
+  install: false,
+)
+
+test('plugin-model', plugin_model, suite: 'unit', timeout: 60)
+
 # Replays evdev events through /dev/uinput, so the widget -> nested seat path
 # can be driven without a hand on the real devices. Needs write access to the
 # node, which normally means running it through sudo.

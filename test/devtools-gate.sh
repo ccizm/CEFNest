@@ -93,7 +93,7 @@ run_demo() { # run_demo <tag> <script> [demo args...]
   shift 2
   echo "== $tag"
   CHROMIUM_SESSION_SCRIPT=$WORK/$script CHROMIUM_HELPER=$HELPER \
-    timeout 90 "$DEMO" "$@" </dev/null >"$WORK/$tag.log" 2>&1
+    timeout --kill-after=10s 90 "$DEMO" "$@" </dev/null >"$WORK/$tag.log" 2>&1
   RC=$?
   if [ "$RC" = 0 ]; then ok "$tag: demo exited 0"
   else bad "$tag: demo exited $RC"; tail -20 "$WORK/$tag.log" | sed 's/^/         /'; fi
@@ -204,7 +204,7 @@ expect_no 'demo: the helper went away' "$log" close-dev
 # is the correct outcome, not a failure to finish.
 echo "== close-page"
 CHROMIUM_SESSION_SCRIPT=$WORK/close-page.script CHROMIUM_HELPER=$HELPER \
-  timeout 90 "$DEMO" --devtools </dev/null >"$WORK/close-page.log" 2>&1
+  timeout --kill-after=10s 90 "$DEMO" --devtools </dev/null >"$WORK/close-page.log" 2>&1
 RC=$?
 log=$WORK/close-page.log
 if [ "$RC" = 1 ]; then ok "close-page: demo exited 1 (the helper closed itself)"

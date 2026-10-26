@@ -9,6 +9,15 @@ project(
 
 gtk_dep = dependency('gtk4', version: '>=4.14')
 json_dep = dependency('json-glib-1.0')
+# The native plugin frontend loads .so plugins with GModule. Nothing else pulls
+# gmodule into the link line (GTK's own .pc does not declare it either), so it
+# is an explicit dependency of this library and of the .pc — a host that loads
+# plugins compiles and links against it through cefnest's own flags.
+gmodule_dep = dependency('gmodule-2.0')
+# Plugin packages are zip (a .crx is a CRX3 shell around one), and install
+# unpacks them in the host process: inflate for the deflated entries comes
+# from zlib, which is also listed in the .pc for the same reason gmodule is.
+zlib_dep = dependency('zlib')
 # The component's View Source window is drawn with GtkSourceView; a host
 # linking libcefnest links it too, so it belongs to the .pc requires as well.
 gsv_dep = dependency('gtksourceview-5', version: '>=5.4')

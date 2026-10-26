@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ad Sift demo</title>
+<style>
+  :root { color-scheme: light; }
+  body {
+    margin: 0;
+    background: #f3f1ea;
+    color: #1e2530;
+    font: 16px/1.6 Georgia, "Times New Roman", serif;
+  }
+  .masthead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 18px 28px;
+    border-bottom: 2px solid #1e2530;
+    font: 600 22px/1.2 Georgia, serif;
+    letter-spacing: .02em;
+  }
+  .masthead span { font: 12px system-ui, sans-serif; color: #6b7280; letter-spacing: .08em; text-transform: uppercase; }
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(220px, 1fr);
+    gap: 32px;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 24px 28px 80px;
+  }
+  h1 { margin: 8px 0 10px; font-size: 30px; line-height: 1.15; }
+  .byline { margin: 0 0 20px; font: 12px system-ui, sans-serif; color: #6b7280; }
+  p { margin: 0 0 14px; }
+  aside { border-left: 1px solid #d5d0c4; padding-left: 24px; }
+
+  /* Ad-shaped boxes. The plugin's list targets these classes and ids; the
+     visible dashed look is only so a person can tell what disappeared. */
+  .ad-banner, .ad-slot, ins.adsbygoogle, .sponsored-content, iframe[data-ad-slot] {
+    display: block;
+    margin: 0 0 18px;
+    padding: 14px;
+    border: 1px dashed #b08a5a;
+    background: #fbf2e2;
+    color: #8a6534;
+    font: 12px/1.4 system-ui, sans-serif;
+    text-align: center;
+  }
+  .ad-banner { padding: 22px 14px; letter-spacing: .12em; text-transform: uppercase; }
+  .sponsored-content { text-align: left; }
+  .sponsored-content strong { display: block; font: 600 13px system-ui, sans-serif; color: #6f4f22; }
+  iframe[data-ad-slot] { width: 100%; height: 90px; }
+
+  .article-embed {
+    margin: 18px 0;
+    padding: 14px 16px;
+    border: 1px solid #c9c3b6;
+    border-radius: 6px;
+    background: #e9e5db;
+    font: 14px/1.5 system-ui, sans-serif;
+  }
+  .article-embed strong { display: block; margin-bottom: 4px; }
+  .status {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    padding: 10px 20px;
+    background: #1e2530;
+    color: #e8eef8;
+    font: 12px system-ui, sans-serif;
+  }
+  .status.on { background: #123c36; }
+  .status.off { background: #4a2b2b; }
+  code { font: 12px ui-monospace, monospace; background: #e6e2d8; padding: 1px 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<header class="masthead">The Daily Packet <span>Ad Sift demo</span></header>
+
+<main>
+  <div>
+    <div class="ad-banner" id="ad-banner">
+      Leaderboard ad · hidden by <code>.ad-banner</code>
+    </div>
+
+    <h1>Local compositor wins regional bake-off</h1>
+    <p class="byline">By a correspondent · 4 minute read</p>
+
+    <article>
+      <p>The judging was close, but the nested compositor took first place for
+      keeping a Wayland surface inside another Wayland surface without once
+      asking the page to draw itself.</p>
+
+      <p>“It is the only entry that never copied a frame,” one judge said,
+      apparently meaning it as a compliment.</p>
+
+      <div class="sponsored-content">
+        <strong>SPONSORED · .sponsored-content</strong>
+        Turn your unused GPU time into someone else’s banner ad. This block is
+        in the list, so it should be gone before you read this sentence.
+      </div>
+
+      <p>The committee also noted the absence of a service worker, a webRequest
+      API and an isolated world — three things this demo’s blocker cannot use,
+      and the reason its filter list only hides what the page already fetched.</p>
+
+      <div id="manual-target" class="article-embed">
+        <strong>An element no list knows about</strong>
+        Hold <code>Alt</code> and <code>Shift</code> and click this box. The
+        plugin derives a selector, hides it here, and remembers it for the next
+        load. Open the Ad Sift popup to see the rule and the counters.
+      </div>
+
+      <p>Readers who prefer a quieter page can use the popup’s switch to turn
+      the blocker off for one site, or reload after changing a rule. The list
+      is cosmetic: it removes the box, not the request that filled it.</p>
+    </article>
+  </div>
+
+  <aside>
+    <div class="ad-slot" id="div-gpt-ad-42">
+      Sidebar ad · hidden by <code>[id^="div-gpt-ad"]</code>
+    </div>
+    <ins class="adsbygoogle" data-ad-slot="demo-ins">
+      adsbygoogle · hidden by <code>ins.adsbygoogle</code>
+    </ins>
+    <iframe data-ad-slot="demo-frame" src="about:blank" title="Advertisement"></iframe>
+  </aside>
+</main>
+
+<div id="sift-status" class="status">checking for Ad Sift…</div>
+
+<script>
+(function () {
+  var TARGETS = [
+    ".ad-banner",
+    "ins.adsbygoogle",
+    "#div-gpt-ad-42",
+    ".sponsored-content",
+    "iframe[data-ad-slot]",
+    "#manual-target"
+  ].join(",");
+
+  // The title is the machine-readable answer a scripted host reads back:
+  // hidden/total, then whether each of the plugin's two style elements is on
+  // the page. It is also how this demo proves document_start order — the
+  // plugin's style is there before this script runs.
+  function check() {
+    var targets = document.querySelectorAll(TARGETS);
+    var hidden = 0;
+    for (var i = 0; i < targets.length; i++)
+      if (getComputedStyle(targets[i]).display === "none") hidden += 1;
+
+    document.title = "AD-SIFT:" + hidden + "/" + targets.length + ":" +
+      (document.getElementById("cefnest-ad-sift-style") ? "style" : "nostyle") +
+      ":" +
+      (document.getElementById("cefnest-ad-sift-custom") ? "custom" : "nocustom");
+    return document.title;
+  }
+  window.adSiftDemoCheck = check;
+
+  function status() {
+    var panel = document.getElementById("sift-status");
+    var api = window.__cefnestAdSift;
+
+    if (!api) {
+      panel.textContent = "Ad Sift is not running on this page.";
+      panel.className = "status off";
+      return;
+    }
+
+    var on = api.enabled();
+    var hidden = on ? api.recount() : 0;
+    panel.textContent = on
+      ? "Ad Sift: " + hidden + " ad elements hidden here. Alt+Shift+click the grey box to hide it by hand."
+      : "Ad Sift is off for this site. The popup's switch turns it back on.";
+    panel.className = "status " + (on ? "on" : "off");
+  }
+
+  // Both, on every tick: a hand-picked rule arrives from chrome.storage a few
+  // milliseconds after document_start, so a title written once at load would
+  // keep reporting the count from before the rule landed.
+  function tick() {
+    check();
+    status();
+  }
+
+  function start() {
+    tick();
+    setInterval(tick, 900);
+  }
+
+  if (document.readyState === "loading")
+    document.addEventListener("DOMContentLoaded", start);
+  else
+    start();
+})();
+</script>
+</body>
+</html>

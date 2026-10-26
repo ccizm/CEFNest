@@ -160,7 +160,7 @@ close
 EOF
 
 printf '== burst\n'
-if timeout 90 env GDK_BACKEND=wayland CHROMIUM_HELPER="$FAKE" \
+if timeout --kill-after=10s 90 env GDK_BACKEND=wayland CHROMIUM_HELPER="$FAKE" \
      CHROMIUM_SESSION_SCRIPT="$WORK/burst.session" \
      "$DEMO" >"$WORK/burst.out" 2>"$WORK/burst.log"; then
   ok "burst: the demo finished with status 0"
@@ -225,7 +225,7 @@ close
 EOF
 
 printf '== flood\n'
-timeout 90 env GDK_BACKEND=wayland CHROMIUM_HELPER="$WORK/flood-helper.py" \
+timeout --kill-after=10s 90 env GDK_BACKEND=wayland CHROMIUM_HELPER="$WORK/flood-helper.py" \
   CHROMIUM_SESSION_SCRIPT="$WORK/flood.session" \
   "$DEMO" >"$WORK/flood.out" 2>"$WORK/flood.log"
 status=$?
