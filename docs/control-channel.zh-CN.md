@@ -18,6 +18,7 @@
 | `XDG_SESSION_TYPE` | `wayland` |
 | `CHROMIUM_HELPER_SOCKET` | 控制通道 socket 的完整路径 |
 | `CHROMIUM_HELPER_DATA_DIR` | 持久 profile 的绝对路径；不存在即 incognito |
+| `CHROMIUM_HELPER_AUTOPLAY_POLICY` | `--autoplay-policy` 的值（如 `user-gesture-required`）；不设置即 Chromium 默认。同样是 spawn 期一次性：无值时被移除，继承不来 |
 
 `DISPLAY` 和 `WAYLAND_SOCKET` 会被移除。`CHROMIUM_HELPER_DATA_DIR` 只在宿主
 指定了数据目录时设置；否则即便宿主自己的环境里有这个变量，它也会被移除。
@@ -57,9 +58,11 @@
 | `file-dialog-respond` | `id`、`paths[]` | 应答 `file-dialog`；空列表即取消 |
 | `certificate-respond` | `id`、`allow` | 应答 `certificate-error`；默认（宿主未连接）是拒绝 |
 | `certificate-authorize` | `fingerprint` | 该证书在本 helper 生命周期内免询问放行；只存内存，跨重启的持久化归宿主自己的策略存储 |
+| `certificate-clear-authorized` | — | 撤销全部指纹豁免。两张表一起清：helper 自己的指纹表，加上 Chromium 在 `OnCertificateError` 继续（Continue）之后按 (host, 证书) 自己记住的那份。CEF 还建议同时 `CloseAllConnections`——本 CEF 实测该调用在浏览器活着时会段错误，而不清连接重新连接照样会再询问，所以只清例外表 |
 | `auth-respond` | `id`、`user`、`password` | 应答 `auth-required`：请求以这组凭据继续 |
 | `auth-cancel` | `id` | 取消 `auth-required`——请求以 401 失败，即 Chrome 自己的默认 |
 | `client-cert-respond` | `id`、`index` | 应答 `client-cert-request`；-1 表示不选证书继续握手，也是默认值 |
+| `render-unresponsive-respond` | `id`、`action`（`wait`/`terminate`） | 应答 `render-unresponsive`：`wait` 重置 CEF 的计时继续等，`terminate` 杀掉渲染进程（随后照常来 `renderer-exited`）。不应答 = CEF 默认，静默继续等——杀进程的决定不能由超时代答 |
 | `tls-info` | `id`（宿主自己的）、可选 `browser` | 读一次已加载页面的证书事实，走组件自己的管道（`Security.enable` + `visibleSecurityStateChanged`；CEF 156 没有 `getVisibleSecurityState`）。由 `tls-info` 应答；五秒无人应答的提问以 `ok` 假收场 |
 | `capture-screenshot` | `id`（宿主自己的）、可选 `browser` | 页面的一张 PNG（`Page.captureScreenshot`），由 `screenshot-result` 应答；超约 3 MiB 以 `screenshot-too-large` 拒发而非发出不可读的行 |
 | `clear-data` | `types`（位掩码：1 缓存，2 cookies，4 HTTP 认证缓存，8 源存储）、`origins[]`（仅源存储需要） | 同一条管道上的分类型清除（`Network.clearBrowserCache` / `clearBrowserCookies` / `clearHttpAuthCache`，源存储逐 origin 跑 `Storage.clearDataForOrigin`）。即发即忘；每次调用自己记录结果 |
@@ -130,6 +133,20 @@
 | `auth-closed` | `id`、`browser`（问题还挂着时 browser 导航或关闭了） |
 | `client-cert-request` | `id`、`browser`、`origin`（`host:port`）、`certs[]`（`subject`、`issuer`、`fingerprint`）——握手停住等待 `client-cert-respond`；默认不选 |
 | `client-cert-closed` | `id`、`browser` |
+| `render-unresponsive` | `id`、`browser`——渲染进程 15 秒以上不处理输入事件（CEF 文档原话）；问题挂起等 `render-unresponsive-respond`，每 browser 至多一条，不应答 = 继续等。**实测（2026-10-26）本 CEF 的 Alloy/嵌套 Wayland 形态下该回调不触发**（JS 死循环 90 秒 + 向挂起页面点击，观察 35 秒无事件）；面保留，实测记录在此 |
+| `render-responsive` | `id`、`browser`（挂着的页面自己缓过来了；宿主面板收起，之后再应答无效） |
+| `render-unresponsive-closed` | `id`、`browser`（问题还挂着时 browser 关闭了） |
+| `console` | `browser`、`level`（`debug`/`info`/`warning`/`error`）、`message`（1 MiB 截断）、`source`、`line`——页面 `console.*` 的逐条转发；没有它这些行只存在于 DevTools agent 里 |
+| `tooltip-changed` | `browser`、`text`（空串 = 收起；helper 返回 true 压掉 CEF 自己的 tooltip 弹层，画法归宿主）——**实测（2026-10-26）本形态下 CEF 的 views 层从不调用 `OnTooltip`**，面保留 |
+| `status-message` | `browser`、`text`（悬停链接时是目标 URL） |
+| `focus-requested` | `browser`、`source`（`navigation`/`system`）——browser 即将取得焦点；只上报不拦 |
+| `media-access-changed` | `browser`、`video`、`audio`——采集开始或停止；devtools 之外照发，**后台页也发**：隐藏页面占着麦克风时硬件灯是亮的，指示器不亮就是谎报 |
+| `print-requested` | `browser`——页面调了 `window.print()`。从打印事务的起点上报（实测：`OnPrintStart` 必触发，而 `OnPrintDialog` 只在环境里有打印机时才会到）；组件不开打印对话框，宿主要打印就调 `print-pdf` 喂自己的 GTK 对话框 |
+| `frame-created` | `browser`、`frame`（CEF 156 的字符串标识；"-4" 占位 frame 已滤掉）、`is_main`、`url`（created 时刻通常为空——URL 要等导航提交） |
+| `frame-destroyed` | `browser`、`frame` |
+| `frame-attached` | `browser`、`frame`、`reattached`（从 BackForwardCache 或连接错误中回来时为 true） |
+| `frame-detached` | `browser`、`frame` |
+| `main-frame-changed` | `browser`、`old_frame`、`new_frame`（首次赋值 old 为空串，最后移除 new 为空串；跨源导航换进程时宿主的归因靠它） |
 | `tls-info` | `id`（提问的）、`browser`、`ok`、`security_state`（`secure`/`insecure`/`insecure-broken`…）、`subject`、`issuer`、`fingerprint`（叶证书 DER 的 SHA-256 十六进制；状态不带证书时为空串）、`valid_from`、`valid_to`（Unix 秒） |
 | `screenshot-result` | `id`、`browser`、`ok`、`data`（base64 PNG；`ok` 时才有）、`message`（触顶时为 `screenshot-too-large`） |
 | `window-properties` | `browser`、`x`、`y`、`w`、`h`、`toolbar`、`menubar`、`status`、`resizable`、`fullscreen`——窗口化浏览器的窗口在创建时与边界/全屏变化时上报；本 helper 的窗口无框，toolbar/menubar/status 恒为 false |

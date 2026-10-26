@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Hang probe</title>
+</head>
+<body>
+  <h1>hang probe page</h1>
+  <p id="state">waiting to hang</p>
+  <script>
+    // ?delay=<ms> before the hang, ?duration=<ms> of it. While the loop runs
+    // the renderer stops answering input — the hang monitor's 15-second
+    // threshold is what render-unresponsive reports; after the loop the page
+    // recovers and render-responsive follows (when the host answered wait).
+    var params = new URLSearchParams(location.search);
+    var delay = parseInt(params.get("delay") || "2000", 10);
+    var duration = parseInt(params.get("duration") || "25000", 10);
+    setTimeout(function () {
+      document.title = "hung";
+      document.getElementById("state").textContent = "hung";
+      var end = performance.now() + duration;
+      while (performance.now() < end) { /* spin */ }
+      document.title = "recovered";
+      document.getElementById("state").textContent = "recovered";
+    }, delay);
+  </script>
+</body>
+</html>

@@ -20,6 +20,7 @@ Set by the host when it spawns the subprocess:
 | `CHROMIUM_HELPER_SOCKET` | full path of the control-channel socket |
 | `CHROMIUM_HELPER_DATA_DIR` | absolute path of a persistent profile; absent means incognito |
 | `CHROMIUM_HELPER_SCHEMES` | the host's custom schemes, `name=flag,flag;name2` with flags `standard` `local` `display_isolated` `secure` `cors` `fetch` `csp_bypassing` (empty flags = `standard,secure,fetch`); read in every process by `OnRegisterCustomSchemes`, the one point CEF gives scheme options a voice. Absent means no host schemes |
+| `CHROMIUM_HELPER_AUTOPLAY_POLICY` | the `--autoplay-policy` value (e.g. `user-gesture-required`); absent means Chromium's default. Spawn-time like the rest: removed when unset, never inherited |
 
 `DISPLAY` and `WAYLAND_SOCKET` are removed. `CHROMIUM_HELPER_DATA_DIR` is set
 only when the host asked for a data directory — otherwise it is removed even
@@ -60,9 +61,11 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `file-dialog-respond` | `id`, `paths[]` | answers `file-dialog`; an empty list is the cancel |
 | `certificate-respond` | `id`, `allow` | answers `certificate-error`; the default (an unconnected host) is deny |
 | `certificate-authorize` | `fingerprint` | continues this certificate without asking for the helper's lifetime; memory only, persistence is the host's own policy store |
+| `certificate-clear-authorized` | — | forgets every fingerprint exemption. Two tables go together: the helper's own fingerprint set, and the per-(host, certificate) memory Chromium itself keeps once `OnCertificateError` continued. CEF also recommends `CloseAllConnections` here — measured on this CEF that call segfaults the helper while a browser is live, and the reconnect asks again without it, so only the exception store is cleared |
 | `auth-respond` | `id`, `user`, `password` | answers `auth-required`: the request continues with these credentials |
 | `auth-cancel` | `id` | answers `auth-required` with a cancel — the request fails with its 401, Chrome's own default |
 | `client-cert-respond` | `id`, `index` | answers `client-cert-request`; -1 continues the handshake without a certificate, which is also the default |
+| `render-unresponsive-respond` | `id`, `action` (`wait`/`terminate`) | answers `render-unresponsive`: `wait` resets CEF's timer and keeps waiting, `terminate` kills the renderer (`renderer-exited` follows as usual). No answer is CEF's default, keep waiting silently — a kill decision is nobody's timeout to make |
 | `tls-info` | `id` (the host's own), optional `browser` | one read of the loaded page's certificate facts, over the component's own pipe (`Security.enable` + `visibleSecurityStateChanged`; CEF 156 has no `getVisibleSecurityState`). Answered by `tls-info`; a question nothing answers in five seconds reports `ok` false |
 | `capture-screenshot` | `id` (the host's own), optional `browser` | one PNG of the page (`Page.captureScreenshot`), answered by `screenshot-result`; a capture past ~3 MiB is refused as `screenshot-too-large` rather than sent unreadable |
 | `clear-data` | `types` (bitmask: 1 cache, 2 cookies, 4 HTTP auth cache, 8 origin storage), `origins[]` (origin storage only) | typed clearing over the same pipe (`Network.clearBrowserCache` / `clearBrowserCookies` / `clearHttpAuthCache`, `Storage.clearDataForOrigin` per origin). Fire-and-forget; each call logs its own outcome |
@@ -133,6 +136,20 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `auth-closed` | `id`, `browser` (the browser navigated or closed while the question was parked) |
 | `client-cert-request` | `id`, `browser`, `origin` (`host:port`), `certs[]` (`subject`, `issuer`, `fingerprint`) — the handshake is stopped until `client-cert-respond`; default none |
 | `client-cert-closed` | `id`, `browser` |
+| `render-unresponsive` | `id`, `browser` — the render process went 15+ seconds without processing input events (CEF's own wording); the question parks until `render-unresponsive-respond`, at most one per browser, no answer = keep waiting. **Measured 2026-10-26: this callback never fires in this component's Alloy-on-nested-Wayland shape** (a 90 s JS spin with a click delivered onto the hung page, 35 s of observation, no event); the face stays wired, the measurement lives here |
+| `render-responsive` | `id`, `browser` (the parked page recovered on its own; a host panel comes down, answering that id afterwards does nothing) |
+| `render-unresponsive-closed` | `id`, `browser` (the browser closed with the question still parked) |
+| `console` | `browser`, `level` (`debug`/`info`/`warning`/`error`), `message` (1 MiB truncation), `source`, `line` — one per page `console.*` call; without this relay the lines only exist inside a DevTools agent |
+| `tooltip-changed` | `browser`, `text` (empty = hide; the helper returns true to keep CEF's own tooltip popup out of it, the drawing is the host's) — **measured 2026-10-26: CEF's views layer never calls `OnTooltip` in this shape**, the face stays wired |
+| `status-message` | `browser`, `text` (a hovered link's URL while it hovers) |
+| `focus-requested` | `browser`, `source` (`navigation`/`system`) — the browser is about to take focus; reported, not intercepted |
+| `media-access-changed` | `browser`, `video`, `audio` — a capture started or stopped; relayed for every non-devtools browser, **background pages included**: the mic light burns while a hidden page holds the device, and an indicator that stayed dark would be lying |
+| `print-requested` | `browser` — the page called `window.print()`. Reported from the start of the print transaction (measured: `OnPrintStart` always runs; `OnPrintDialog` only when the environment has a printer to consult); the component opens no printer dialog — a host that wants to print calls `print-pdf` and feeds its own GTK dialog |
+| `frame-created` | `browser`, `frame` (CEF 156's string identifier; "-4" placeholders are filtered), `is_main`, `url` (usually empty at creation — CEF only knows the URL once the navigation commits) |
+| `frame-destroyed` | `browser`, `frame` |
+| `frame-attached` | `browser`, `frame`, `reattached` (true on a return from the back-forward cache or a recovered connection) |
+| `frame-detached` | `browser`, `frame` |
+| `main-frame-changed` | `browser`, `old_frame`, `new_frame` ("" old on the first assignment, "" new on the last removal; a cross-origin navigation's process swap is what a host's attribution needs) |
 | `tls-info` | `id` (the ask's), `browser`, `ok`, `security_state` (`secure`/`insecure`/`insecure-broken`/…), `subject`, `issuer`, `fingerprint` (SHA-256 of the leaf's DER, hex; "" when the state carries none), `valid_from`, `valid_to` (Unix seconds) |
 | `screenshot-result` | `id`, `browser`, `ok`, `data` (base64 PNG; present when `ok`), `message` (`screenshot-too-large` on the ceiling) |
 | `window-properties` | `browser`, `x`, `y`, `w`, `h`, `toolbar`, `menubar`, `status`, `resizable`, `fullscreen` — a windowed browser's window at creation and on bounds/fullscreen changes; this helper's windows are frameless, so toolbar/menubar/status are always false |

@@ -58,13 +58,13 @@ CEF 156 的 `CefClient` 可返回 18 个 handler。下表覆盖这 18 个，以�
 | --- | --- | --- | --- |
 | `CefLifeSpanHandler` | ◐ | `OnAfterCreated`、`OnBeforeClose`、`OnBeforePopup` | `OnBeforePopupAborted`、`OnBeforeDevToolsPopup`（DevTools 弹窗由 CEF 自己链路，本项目不替换）、`DoClose`（Alloy 关闭顺序已够，见 multi-browser 门禁） |
 | `CefLoadHandler` | ✅ | `OnLoadingStateChange`、`OnLoadStart`、`OnLoadEnd`、`OnLoadError` | —（全接） |
-| `CefDisplayHandler` | ◐ | `OnAddressChange`、`OnTitleChange`、`OnFaviconURLChange`、`OnFullscreenModeChange`、`OnAutoResize`、`OnLoadingProgressChange` | `OnTooltip`、`OnStatusMessage`、`OnConsoleMessage`、`OnCursorChange`、`OnMediaAccessChange`、`OnContentsBoundsChange`、`GetRootWindowScreenRect` — 见下文"缺口" |
-| `CefFocusHandler` | ◐ | `OnTakeFocus`、`OnGotFocus` | `OnSetFocus`（页面主动要焦点时不再回告宿主；Tab 链出界已由 `OnTakeFocus` 覆盖） |
+| `CefDisplayHandler` | ◐ | `OnAddressChange`、`OnTitleChange`、`OnFaviconURLChange`、`OnFullscreenModeChange`、`OnAutoResize`、`OnLoadingProgressChange`、`OnConsoleMessage`、`OnTooltip`、`OnStatusMessage`、`OnMediaAccessChange` | `OnCursorChange`、`OnContentsBoundsChange`、`GetRootWindowScreenRect` — 见下文"缺口"；OnTooltip/OnStatusMessage 有实测注（§三） |
+| `CefFocusHandler` | ✅ | `OnTakeFocus`、`OnGotFocus`、`OnSetFocus`（`::focus-requested`，只上报不拦） | —（全接） |
 | `CefKeyboardHandler` | ◐ | `OnPreKeyEvent`（F12 / Ctrl+Shift+I / Esc / Ctrl+Q） | `OnKeyEvent`（不拦截，全部交给页面） |
-| `CefRequestHandler` | ◐ | `OnOpenURLFromTab`、`GetResourceRequestHandler`、`GetAuthCredentials`、`OnCertificateError`、`OnSelectClientCertificate`、`OnRenderProcessTerminated` | `OnBeforeBrowse`、`OnRenderViewReady`、`OnRenderProcessUnresponsive`、`OnRenderProcessResponsive`、`OnDocumentAvailableInMainFrame` |
+| `CefRequestHandler` | ◐ | `OnOpenURLFromTab`、`GetResourceRequestHandler`、`GetAuthCredentials`、`OnCertificateError`、`OnSelectClientCertificate`、`OnRenderProcessTerminated`、`OnRenderProcessUnresponsive`、`OnRenderProcessResponsive` | `OnBeforeBrowse`、`OnRenderViewReady`、`OnDocumentAvailableInMainFrame`；unresponsive/responsive 已接但实测本形态不触发（§三） |
 | `CefDragHandler` | ✗ | — | `OnDragEnter`、`OnDraggableRegionsChanged`。页面 HTML5 拖放照常工作（Chromium 自己处理 Wayland data device，`dnd-gate.sh` 实测通过）；缺的是"宿主介入拖放"的能力 |
 | `CefAudioHandler` | ✗ | — | `GetAudioParameters`、`OnAudioStreamStarted/Packet/Stopped/Error`。声音走 Chromium 自己的 audio service；宿主只有静音开关，拿不到音频流 |
-| `CefFrameHandler` | ✗ | — | `OnFrameCreated/Destroyed/Attached/Detached`、`OnMainFrameChanged`。**这是当前最实的缺口**：没有逐 frame 生命周期事件，宿主只能从 `page-text`/脚本自己推断 |
+| `CefFrameHandler` | ✅ | `OnFrameCreated/Destroyed/Attached/Detached`、`OnMainFrameChanged`（`frame-*`/`main-frame-changed` 事件族，"-4" 占位 frame 滤掉） | —（全接） |
 | `CefCommandHandler` | — | — | Chrome runtime 的命令面，Alloy 不适用 |
 | `CefResourceRequestHandler` | ◐ | `OnBeforeResourceLoad`（拦截的 parked / passive 两态） | `GetCookieAccessFilter`、`GetResourceHandler`、`OnResourceRedirect`、`OnResourceResponse`、`GetResourceResponseFilter`、`OnResourceLoadComplete`、`OnProtocolExecution`、`CanSendCookie`、`CanSaveCookie` |
 | `CefRenderHandler` | — | — | OSR 专用，见第一节 |
@@ -74,7 +74,7 @@ CEF 156 的 `CefClient` 可返回 18 个 handler。下表覆盖这 18 个，以�
 | `CefDialogHandler` | ✅ | `OnFileDialog` | — |
 | `CefPermissionHandler` | ✅ | `OnRequestMediaAccessPermission`、`OnShowPermissionPrompt`、`OnDismissPermissionPrompt` | 无遗漏（MIDI / 地理 / 剪贴板 / 通知都经 `OnShowPermissionPrompt`） |
 | `CefContextMenuHandler` | ✅ | `RunContextMenu`、`OnContextMenuCommand`、`OnContextMenuDismissed` | `OnBeforeContextMenu` 不需要：整张模型交给宿主绘制，不修改 CEF 默认项 |
-| `CefPrintHandler` | ◐ | 六个方法全接（`OnPrintStart/Settings/Reset` 空实现、`OnPrintDialog/Job` 返回 false、`GetPdfPaperSize` A4） | 语义上等于"不接管系统打印"——见第七节 |
+| `CefPrintHandler` | ✅ | `OnPrintStart` 上报 `::print-requested`（实测 `OnPrintStart` 必触发而 `OnPrintDialog` 只在有打印机时到）；其余方法保持不接管系统打印 | 见第七节——打印对话框归宿主 |
 | `CefRenderProcessHandler` | ◐ | `OnWebKitInitialized`、`OnContextCreated`、`OnProcessMessageReceived` | `OnBrowserCreated/Destroyed`、`GetLoadHandler`、`OnContextReleased`、`OnUncaughtException`、`OnFocusedNodeChanged` |
 | `CefBrowserProcessHandler` | ◐ | `OnBeforeChildProcessLaunch` | `OnContextInitialized`、`GetDefaultClient`、`OnScheduleMessagePumpWork`、`OnAlreadyRunningAppRelaunch` |
 | `CefV8Handler` | ✅ | 四个桥函数：`__chromiumHelperReport`（js 结果）、`cefnestPostMessage`、`cefnestPrimarySelection`、`__cefnestPlugin` | — |
@@ -114,10 +114,10 @@ CEF 156 的 `CefClient` 可返回 18 个 handler。下表覆盖这 18 个，以�
 | 截图 | ✅ | `capture_screenshot(id, browser)` → `::screenshot-result` | `Page.captureScreenshot`，PNG；`screenshot-gate`（魔数 + 尺寸） |
 | 打印为 PDF | ✅ | `print_pdf` / `print_pdf_with_settings` → `::pdf-*` | `PrintToPDF` 写临时文件再流回，16 MiB 上限；`pdf-gate` |
 | 页面内 PDF 查看 | ✗ | — | **实测（2026-10-26）**：加载本地 PDF 得到 `document.contentType=application/pdf`，但页面里没有 viewer 的 `embed`、正文为空 —— 本发行包没有可用的 PDF 查看器组件扩展。PDF 链接目前只能当下载处理 |
-| 控制台消息转发 | ✗ | — | `OnConsoleMessage` 未接：页面 `console.*` 只有开 DevTools 或 CDP `Log` 域才看得到 |
-| 状态栏 / tooltip 文案 | ✗ | — | `OnStatusMessage` / `OnTooltip` 未接；宿主地址栏悬停提示做不了 |
+| 控制台消息转发 | ✅ | `::console (browser, level, message, source, line)` | 逐条转发；`console-gate` 双面断言 |
+| 状态栏 / tooltip 文案 | ◐ | `::status-message` / `::tooltip-changed` | status-message 实测通（悬停链接的 URL，`console-gate` 断言）；tooltip 的面接了，但实测（2026-10-26）本形态 CEF views 层从不调用 `OnTooltip`——面保留，画法归宿主 |
 | 光标形状 | ◐ | — | `OnCursorChange` 未接：窗口化模式下 helper 作为 Wayland 客户端自己设光标（`wp_cursor_shape` / `wl_pointer.set_cursor`），嵌套合成器（`src/nested-cursor.c`）负责把它落到 GTK 光标上。宿主拿不到改光标的接口，但光标本身是通的 |
-| 页面主动索要焦点 | ✗ | — | `OnSetFocus` 未接 |
+| 页面主动索要焦点 | ✅ | `::focus-requested (browser, source)` | 只上报不拦；窗口激活联动归宿主 |
 
 ## 四、信任面与凭据
 
@@ -128,7 +128,7 @@ CEF 156 的 `CefClient` 可返回 18 个 handler。下表覆盖这 18 个，以�
 | 代理认证（407） | ✅ | 同上，`is_proxy=true` | `auth-gate` 代理例（需 `<-loopback>` 才让 loopback 目标走代理） |
 | 客户端证书选择 | ◐ | `::client-cert-request` + `client_cert_respond(index)` | 已接 `OnSelectClientCertificate`，-1 = 不选；本环境起不了 mTLS，门禁为源码级 wiring 断言 |
 | 正常页面的证书信息 | ✅ | `get_tls_info(id, browser)` → `::tls-info` | CEF 无直接取口；走 `Security.enable` + `visibleSecurityStateChanged`（156 后端没有 `getVisibleSecurityState`）；自签页状态字为 `insecure-broken`；`tls-info-gate` |
-| 证书例外清理 | ✗ | — | `ClearCertificateExceptions` 未暴露；例外本身只活一个 helper |
+| 证书例外清理 | ✅ | `certificate_clear_authorized()` | helper 指纹表 + `ClearCertificateExceptions`（Chromium 自己的 per-(host, cert) 记忆）一起清；CEF 建议的 `CloseAllConnections` 实测段错误，不清连接实测照样再询问；`certificate-gate` revoke 段 |
 | 权限提示（媒体/地理/剪贴板/MIDI/通知） | ✅ | `::permission-request` + `permission_respond` | 默认拒绝；`permission-gate` |
 | 桌面捕获（getDisplayMedia） | ✗ | — | CEF Alloy 无桌面捕获源选择面；未接，未实测 |
 | 站点隔离 / 进程模型 | ◐ | — | 走 Chromium 默认（每站点一 renderer）；未做 per-site 进程策略 |
@@ -205,7 +205,7 @@ CEF 156 的 `CefClient` 可返回 18 个 handler。下表覆盖这 18 个，以�
 | 桌面捕获（getDisplayMedia） | ✗ | 见第四节 |
 | 投屏（MediaRouter / Cast） | — | 不在范围 |
 | DRM（Widevine） | ✗ | 发行包不含 Widevine（`libwidevinecdm` 缺失），Netflix/Spotify 类站点不可用 |
-| 自动播放策略 | ✗ | helper 不追加 `--autoplay-policy`，目前只能用 Chromium 默认策略；计划本意是 spawn 期全局一刀切（per-site 在 CEF 无面），该开关还未接 |
+| 自动播放策略 | ✅ | `autoplay-policy` 属性（spawn 期全局一刀切，per-site 在 CEF 无面） | env → `--autoplay-policy`；AudioContext 探针，`autoplay-gate`（实测：本 Chromium 默认已挂起无手势 AudioContext，`user-gesture-required` 不管 Web Audio，可双向断言的组合是 `document-user-activation-required` ↔ `no-user-gesture-required`） |
 | 媒体会话（Media Session / 系统媒体键） | ✗ | 未接 |
 
 ## 九、插件与扩展体系
@@ -236,19 +236,19 @@ CEF 156 的 `CefClient` 可返回 18 个 handler。下表覆盖这 18 个，以�
 
 只列 **CEF 有面、本组件确实没接** 的项，以及它们的实际后果：
 
-1. **`CefFrameHandler`（frame 生命周期）** — 宿主拿不到子 frame 创建/销毁。影响：iframe 级的内容策略、逐 frame 的脚本注入统计、跨域 frame 的导航归因都只能靠猜。`all_frames` 注入本身是工作的（本进程枚举 frame）。
-2. **`OnConsoleMessage`** — 页面 `console.error` 宿主看不见。影响：壳子做不了"开发者控制台"面板，也做不了页面报错采集；只能开 DevTools。
+1. ~~`CefFrameHandler`（frame 生命周期）~~ — **已接**（2026-10-26）：`frame-*` 事件族，`frame-gate`。
+2. ~~`OnConsoleMessage`~~ — **已接**（2026-10-26）：`::console`，`console-gate`。
 3. **`CefAudioHandler`** — 拿不到音频流。影响：可视化、转写、逐页音量归一都做不了；只有静音。
 4. **`CefResponseFilter` / `OnResourceResponse`** — 不能改响应。影响：广告/追踪拦截只能"整请求取消/重定向"，不能"DNR 式"局部改；这是 `response-filter-plan` 的立项理由。
-5. **`CefDragHandler`** — 不能改拖放目标或拖放内容。
+5. **`CefDragHandler`** — 不能改拖放目标或拖放内容。维持不做：页面拖放已通，宿主介入无需求。
 6. **`CefAccessibilityHandler`** — 宿主拿不到无障碍树（系统级 a11y 正常）。
-7. **`OnStatusMessage` / `OnTooltip`** — 悬停链接的地址栏提示缺失。
-8. **`OnSetFocus`、`GetRootWindowScreenRect`、`OnContentsBoundsChange`、`OnMediaAccessChange`** — 细节能力缺失，未见宿主需求。
+7. **`OnStatusMessage` / `OnTooltip`** — status-message 已接（实测通）；tooltip 的面接了但本形态 CEF 不回调（2026-10-26 实测），面保留。
+8. `GetRootWindowScreenRect`、`OnContentsBoundsChange` — 细节能力缺失，未见宿主需求。`OnSetFocus`（`::focus-requested`）与 `OnMediaAccessChange`（`::media-access-changed`）**已接**（2026-10-26）。
 9. **PDF 查看器** — 实测：PDF 以 `application/pdf` 提交，但没有查看器 embed，页面空白。
    影响：壳子里的 PDF 链接只能当下载；打印为 PDF（`print_pdf`）不受影响。
 10. **Widevine** — 发行包不带，受 DRM 保护的流媒体不可用。
 11. **桌面捕获（getDisplayMedia）** — 无源选择面。
-12. **系统打印对话框** — 明确不做（宿主 GTK 事务）。
+12. **系统打印对话框** — 明确不做（宿主 GTK 事务）；`window.print()` 现以 `::print-requested` 上报（2026-10-26），宿主拿 `print_pdf` 喂自己的 GTK 对话框即闭环。
 13. **下载续传、证书例外清理、`CefUrlRequest`、`CefServer`、`CefMediaRouter`** — 无需求/不在范围。
 
 ## 十二、明确不做（与计划的裁定一致）

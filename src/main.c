@@ -67,6 +67,8 @@ typedef struct {
   GList *pending_window_ids;    /* windowed browsers waiting for a surface */
   NestedSurface *tab_surface;   /* the tab CefWindow's toplevel */
   int active_browser;
+  /* The most recent ::render-unresponsive id, for the hang-respond step. */
+  int pending_hang_id;
 
   /* 搭法二, the popover form: a plugin popup hosted under its action button
    * instead of in a standalone window. One at a time; the browser behind a
@@ -2709,6 +2711,116 @@ session_favicon_changed (ChromiumSession *session, int browser,
 }
 
 static void
+session_console (ChromiumSession *session, int browser, const char *level,
+                 const char *message, const char *source, int line,
+                 gpointer data)
+{
+  g_printerr ("demo: console browser=%d level=%s source=%s:%d message=%s\n",
+              browser, level, source, line, message);
+}
+
+static void
+session_tooltip_changed (ChromiumSession *session, int browser,
+                         const char *text, gpointer data)
+{
+  g_printerr ("demo: tooltip browser=%d text=%s\n", browser, text);
+}
+
+static void
+session_status_message (ChromiumSession *session, int browser,
+                        const char *text, gpointer data)
+{
+  g_printerr ("demo: status-message browser=%d text=%s\n", browser, text);
+}
+
+static void
+session_focus_requested (ChromiumSession *session, int browser,
+                         const char *source, gpointer data)
+{
+  g_printerr ("demo: focus-requested browser=%d source=%s\n", browser, source);
+}
+
+static void
+session_media_access_changed (ChromiumSession *session, int browser,
+                              gboolean video, gboolean audio, gpointer data)
+{
+  g_printerr ("demo: media-access browser=%d video=%d audio=%d\n",
+              browser, video ? 1 : 0, audio ? 1 : 0);
+}
+
+static void
+session_print_requested (ChromiumSession *session, int browser,
+                         gpointer data)
+{
+  g_printerr ("demo: print-requested browser=%d\n", browser);
+}
+
+static void
+session_render_unresponsive (ChromiumSession *session, int id, int browser,
+                             gpointer data)
+{
+  /* The id is what the hang-respond step names. */
+  demo.pending_hang_id = id;
+  g_printerr ("demo: render-unresponsive id=%d browser=%d\n", id, browser);
+}
+
+static void
+session_render_responsive (ChromiumSession *session, int id, int browser,
+                           gpointer data)
+{
+  g_printerr ("demo: render-responsive id=%d browser=%d\n", id, browser);
+}
+
+static void
+session_render_unresponsive_closed (ChromiumSession *session, int id,
+                                    int browser, gpointer data)
+{
+  g_printerr ("demo: render-unresponsive-closed id=%d browser=%d\n",
+              id, browser);
+}
+
+static void
+session_frame_created (ChromiumSession *session, int browser,
+                       const char *frame, gboolean is_main, const char *url,
+                       gpointer data)
+{
+  g_printerr ("demo: frame-created browser=%d frame=%s main=%d url=%s\n",
+              browser, frame, is_main ? 1 : 0, url);
+}
+
+static void
+session_frame_destroyed (ChromiumSession *session, int browser,
+                         const char *frame, gpointer data)
+{
+  g_printerr ("demo: frame-destroyed browser=%d frame=%s\n", browser, frame);
+}
+
+static void
+session_frame_attached (ChromiumSession *session, int browser,
+                        const char *frame, gboolean reattached,
+                        gpointer data)
+{
+  g_printerr ("demo: frame-attached browser=%d frame=%s re=%d\n",
+              browser, frame, reattached ? 1 : 0);
+}
+
+static void
+session_frame_detached (ChromiumSession *session, int browser,
+                        const char *frame, gpointer data)
+{
+  g_printerr ("demo: frame-detached browser=%d frame=%s\n", browser, frame);
+}
+
+static void
+session_main_frame_changed (ChromiumSession *session, int browser,
+                            const char *old_frame, const char *new_frame,
+                            gpointer data)
+{
+  g_printerr ("demo: main-frame-changed browser=%d old=%s new=%s\n",
+              browser, old_frame, new_frame);
+}
+
+static void
 session_closed (ChromiumSession *session, const char *reason, gpointer data)
 {
   if (demo.back)
@@ -2953,6 +3065,34 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_pdf_end), NULL);
   g_signal_connect (demo.session, "favicon-changed",
                     G_CALLBACK (session_favicon_changed), NULL);
+  g_signal_connect (demo.session, "console",
+                    G_CALLBACK (session_console), NULL);
+  g_signal_connect (demo.session, "tooltip-changed",
+                    G_CALLBACK (session_tooltip_changed), NULL);
+  g_signal_connect (demo.session, "status-message",
+                    G_CALLBACK (session_status_message), NULL);
+  g_signal_connect (demo.session, "focus-requested",
+                    G_CALLBACK (session_focus_requested), NULL);
+  g_signal_connect (demo.session, "media-access-changed",
+                    G_CALLBACK (session_media_access_changed), NULL);
+  g_signal_connect (demo.session, "print-requested",
+                    G_CALLBACK (session_print_requested), NULL);
+  g_signal_connect (demo.session, "render-unresponsive",
+                    G_CALLBACK (session_render_unresponsive), NULL);
+  g_signal_connect (demo.session, "render-responsive",
+                    G_CALLBACK (session_render_responsive), NULL);
+  g_signal_connect (demo.session, "render-unresponsive-closed",
+                    G_CALLBACK (session_render_unresponsive_closed), NULL);
+  g_signal_connect (demo.session, "frame-created",
+                    G_CALLBACK (session_frame_created), NULL);
+  g_signal_connect (demo.session, "frame-destroyed",
+                    G_CALLBACK (session_frame_destroyed), NULL);
+  g_signal_connect (demo.session, "frame-attached",
+                    G_CALLBACK (session_frame_attached), NULL);
+  g_signal_connect (demo.session, "frame-detached",
+                    G_CALLBACK (session_frame_detached), NULL);
+  g_signal_connect (demo.session, "main-frame-changed",
+                    G_CALLBACK (session_main_frame_changed), NULL);
   g_signal_connect (demo.session, "auto-resize-updated",
                     G_CALLBACK (session_auto_resize_updated), NULL);
   g_signal_connect (demo.session, "fullscreen-changed",
@@ -2991,6 +3131,9 @@ build_toolbar (GtkHeaderBar *header)
   if (g_getenv ("CEFNEST_ACCEPT_LANG"))
     chromium_session_set_accept_language (demo.session,
                                           g_getenv ("CEFNEST_ACCEPT_LANG"));
+  if (g_getenv ("CEFNEST_AUTOPLAY_POLICY"))
+    chromium_session_set_autoplay_policy (demo.session,
+                                          g_getenv ("CEFNEST_AUTOPLAY_POLICY"));
   if (g_getenv ("CEFNEST_AUTO_RESIZE"))
     {
       const char *bounds = g_getenv ("CEFNEST_AUTO_RESIZE_BOUNDS");
@@ -3479,6 +3622,7 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
  * "perm-accept <id>", "perm-deny <id>", "perm-dismiss <id>",
  * "js-dialog-respond <id> <ok|cancel> [value]",
  * "certificate-respond <id> <allow|deny>", "certificate-authorize <fp>",
+ * "certificate-clear", "hang-respond <wait|terminate>",
  * "intercept-add <id> <pattern>[;<pattern>…]", "intercept-remove <id>",
  * "intercept-mode <passive|blocking>",
  * "request-respond <id> <allow|cancel|redirect> [url]",
@@ -4681,6 +4825,39 @@ script_run_next (void)
         {
           chromium_session_certificate_authorize (demo.session, line + 22);
           g_printerr ("demo: certificate authorize %.16s...\n", line + 22);
+          continue;
+        }
+      else if (!strcmp (line, "certificate-clear"))
+        {
+          chromium_session_certificate_clear_authorized (demo.session);
+          g_printerr ("demo: certificate clear\n");
+          continue;
+        }
+      else if (!strncmp (line, "hang-respond ", 13))
+        {
+          /* hang-respond <wait|terminate> — answers the ::render-unresponsive
+           * the demo last saw. The id bookkeeping is the demo's convenience;
+           * the component API is id-addressed like every parked pair. */
+          const char *action = line + 13;
+
+          if (strcmp (action, "wait") && strcmp (action, "terminate"))
+            {
+              g_warning ("demo: hang-respond wants 'wait|terminate', got '%s'",
+                         line);
+              continue;
+            }
+          if (!demo.pending_hang_id)
+            {
+              g_warning ("demo: hang-respond with no pending hang");
+              continue;
+            }
+          chromium_session_render_unresponsive_respond (
+              demo.session, demo.pending_hang_id,
+              !strcmp (action, "terminate") ? CHROMIUM_HANG_TERMINATE
+                                            : CHROMIUM_HANG_WAIT);
+          g_printerr ("demo: hang-respond id=%d %s\n", demo.pending_hang_id,
+                      action);
+          demo.pending_hang_id = 0;
           continue;
         }
       else if (!strncmp (line, "intercept-add ", 14))

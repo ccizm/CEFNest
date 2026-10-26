@@ -73,6 +73,9 @@ enum {
   SIG_AUTH_CLOSED,
   SIG_CLIENT_CERT_REQUEST,
   SIG_CLIENT_CERT_CLOSED,
+  SIG_RENDER_UNRESPONSIVE,
+  SIG_RENDER_RESPONSIVE,
+  SIG_RENDER_UNRESPONSIVE_CLOSED,
   SIG_TLS_INFO,
   SIG_REQUEST_INTERCEPT,
   SIG_REQUEST_INTERCEPT_CLOSED,
@@ -97,6 +100,17 @@ enum {
   SIG_PDF_CHUNK,
   SIG_PDF_END,
   SIG_FAVICON_CHANGED,
+  SIG_CONSOLE,
+  SIG_TOOLTIP_CHANGED,
+  SIG_STATUS_MESSAGE,
+  SIG_FOCUS_REQUESTED,
+  SIG_MEDIA_ACCESS_CHANGED,
+  SIG_PRINT_REQUESTED,
+  SIG_FRAME_CREATED,
+  SIG_FRAME_DESTROYED,
+  SIG_FRAME_ATTACHED,
+  SIG_FRAME_DETACHED,
+  SIG_MAIN_FRAME_CHANGED,
   SIG_COPY_TEXT,
   SIG_OPEN_URL,
   SIG_VIEW_SOURCE,
@@ -130,6 +144,9 @@ enum {
   /* The session-wide user agent, applied live over the component's own pipe.
    * Empty (the default) is Chromium's own. */
   PROP_USER_AGENT,
+  /* The --autoplay-policy value the next start() hands Chromium, or NULL/""
+   * for Chromium's own default. Only start() reads it. */
+  PROP_AUTOPLAY_POLICY,
 };
 static guint signals[N_SIGNALS];
 
@@ -259,6 +276,7 @@ struct _ChromiumSession {
   char *proxy;
   char *proxy_bypass;
   char *accept_language;
+  char *autoplay_policy;
   gboolean auto_resize;
   int auto_resize_min_width;
   int auto_resize_min_height;
@@ -2177,6 +2195,125 @@ handle_event (ChromiumSession *self, const char *line)
       return;
     }
 
+  if (!strcmp (event, "console"))
+    {
+      g_signal_emit (self, signals[SIG_CONSOLE], 0,
+                     (int) event_int (object, "browser"),
+                     event_string (object, "level"),
+                     event_string (object, "message"),
+                     event_string (object, "source"),
+                     (int) event_int (object, "line"));
+      return;
+    }
+
+  if (!strcmp (event, "tooltip-changed"))
+    {
+      g_signal_emit (self, signals[SIG_TOOLTIP_CHANGED], 0,
+                     (int) event_int (object, "browser"),
+                     event_string (object, "text"));
+      return;
+    }
+
+  if (!strcmp (event, "status-message"))
+    {
+      g_signal_emit (self, signals[SIG_STATUS_MESSAGE], 0,
+                     (int) event_int (object, "browser"),
+                     event_string (object, "text"));
+      return;
+    }
+
+  if (!strcmp (event, "focus-requested"))
+    {
+      g_signal_emit (self, signals[SIG_FOCUS_REQUESTED], 0,
+                     (int) event_int (object, "browser"),
+                     event_string (object, "source"));
+      return;
+    }
+
+  if (!strcmp (event, "media-access-changed"))
+    {
+      g_signal_emit (self, signals[SIG_MEDIA_ACCESS_CHANGED], 0,
+                     (int) event_int (object, "browser"),
+                     event_flag (object, "video"),
+                     event_flag (object, "audio"));
+      return;
+    }
+
+  if (!strcmp (event, "render-unresponsive"))
+    {
+      g_signal_emit (self, signals[SIG_RENDER_UNRESPONSIVE], 0,
+                     (int) event_int (object, "id"),
+                     (int) event_int (object, "browser"));
+      return;
+    }
+
+  if (!strcmp (event, "render-responsive"))
+    {
+      g_signal_emit (self, signals[SIG_RENDER_RESPONSIVE], 0,
+                     (int) event_int (object, "id"),
+                     (int) event_int (object, "browser"));
+      return;
+    }
+
+  if (!strcmp (event, "render-unresponsive-closed"))
+    {
+      g_signal_emit (self, signals[SIG_RENDER_UNRESPONSIVE_CLOSED], 0,
+                     (int) event_int (object, "id"),
+                     (int) event_int (object, "browser"));
+      return;
+    }
+
+  if (!strcmp (event, "frame-created"))
+    {
+      g_signal_emit (self, signals[SIG_FRAME_CREATED], 0,
+                     (int) event_int (object, "browser"),
+                     event_string (object, "frame"),
+                     event_flag (object, "is_main"),
+                     event_string (object, "url"));
+      return;
+    }
+
+  if (!strcmp (event, "frame-destroyed"))
+    {
+      g_signal_emit (self, signals[SIG_FRAME_DESTROYED], 0,
+                     (int) event_int (object, "browser"),
+                     event_string (object, "frame"));
+      return;
+    }
+
+  if (!strcmp (event, "frame-attached"))
+    {
+      g_signal_emit (self, signals[SIG_FRAME_ATTACHED], 0,
+                     (int) event_int (object, "browser"),
+                     event_string (object, "frame"),
+                     event_flag (object, "reattached"));
+      return;
+    }
+
+  if (!strcmp (event, "frame-detached"))
+    {
+      g_signal_emit (self, signals[SIG_FRAME_DETACHED], 0,
+                     (int) event_int (object, "browser"),
+                     event_string (object, "frame"));
+      return;
+    }
+
+  if (!strcmp (event, "main-frame-changed"))
+    {
+      g_signal_emit (self, signals[SIG_MAIN_FRAME_CHANGED], 0,
+                     (int) event_int (object, "browser"),
+                     event_string (object, "old_frame"),
+                     event_string (object, "new_frame"));
+      return;
+    }
+
+  if (!strcmp (event, "print-requested"))
+    {
+      g_signal_emit (self, signals[SIG_PRINT_REQUESTED], 0,
+                     (int) event_int (object, "browser"));
+      return;
+    }
+
   if (!strcmp (event, "fullscreen"))
     {
       g_signal_emit (self, signals[SIG_FULLSCREEN_CHANGED], 0,
@@ -3675,6 +3812,22 @@ chromium_session_certificate_authorize (ChromiumSession *self,
   send_json (self, root);
 }
 
+void
+chromium_session_certificate_clear_authorized (ChromiumSession *self)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "certificate-clear-authorized");
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
 /* ------------------------------------------------------------------ *
  * HTTP authentication (must-be-answered, default cancel)             *
  * ------------------------------------------------------------------ */
@@ -3810,6 +3963,29 @@ chromium_session_client_cert_respond (ChromiumSession *self, int id, int index)
   json_builder_add_int_value (builder, id);
   json_builder_set_member_name (builder, "index");
   json_builder_add_int_value (builder, index);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_render_unresponsive_respond (ChromiumSession *self,
+                                              int id,
+                                              ChromiumHangAction action)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "render-unresponsive-respond");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, id);
+  command_add_string (builder, "action",
+                      action == CHROMIUM_HANG_TERMINATE ? "terminate"
+                                                        : "wait");
   json_builder_end_object (builder);
 
   root = json_builder_get_root (builder);
@@ -5521,6 +5697,15 @@ chromium_session_start (ChromiumSession *self, const char *initial_url,
                                   self->accept_language, TRUE);
   else
     g_subprocess_launcher_unsetenv (launcher, "CHROMIUM_HELPER_ACCEPT_LANG");
+  /* Autoplay rides the same spawn-time rule: one global value the helper
+   * turns into --autoplay-policy, and an inherited variable must not give a
+   * session that asked for Chromium's default a strict policy instead. */
+  if (self->autoplay_policy && *self->autoplay_policy)
+    g_subprocess_launcher_setenv (launcher, "CHROMIUM_HELPER_AUTOPLAY_POLICY",
+                                  self->autoplay_policy, TRUE);
+  else
+    g_subprocess_launcher_unsetenv (launcher,
+                                    "CHROMIUM_HELPER_AUTOPLAY_POLICY");
   /* The host's schemes: the option flags are only listenable at process
      start, so they ride the environment exactly like the proxy does. The
      data factories are live traffic and go over the channel on ::ready. */
@@ -5718,6 +5903,22 @@ chromium_session_get_accept_language (ChromiumSession *self)
 {
   g_return_val_if_fail (CHROMIUM_IS_SESSION (self), NULL);
   return self->accept_language;
+}
+
+void
+chromium_session_set_autoplay_policy (ChromiumSession *self,
+                                      const char *policy)
+{
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  session_set_string (self, &self->autoplay_policy, policy,
+                      "autoplay-policy");
+}
+
+const char *
+chromium_session_get_autoplay_policy (ChromiumSession *self)
+{
+  g_return_val_if_fail (CHROMIUM_IS_SESSION (self), NULL);
+  return self->autoplay_policy;
 }
 
 void
@@ -6661,6 +6862,24 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                           "",
                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  /**
+   * ChromiumSession:autoplay-policy:
+   *
+   * The `--autoplay-policy` value for the next start(), e.g.
+   * "user-gesture-required". %NULL or "" (the default) leaves Chromium's own
+   * policy in place. Chromium has no runtime and no per-site face for it, so
+   * like #ChromiumSession:proxy this is one global value read once per
+   * start(); setting it after start() takes effect on the next start.
+   */
+  g_object_class_install_property
+    (object_class, PROP_AUTOPLAY_POLICY,
+     g_param_spec_string ("autoplay-policy", "Autoplay policy",
+                          "--autoplay-policy for the next start, NULL for "
+                          "Chromium's default",
+                          NULL,
+                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS |
+                          G_PARAM_EXPLICIT_NOTIFY));
+
   signals[SIG_CHANGED] =
     g_signal_new ("changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 0);
@@ -7135,6 +7354,197 @@ chromium_session_class_init (ChromiumSessionClass *klass)
                   0, NULL, NULL, NULL, G_TYPE_NONE, 2,
                   G_TYPE_INT, G_TYPE_STRV);
 
+  /**
+   * ChromiumSession::console:
+   * @self: the session
+   * @browser: the browser whose page wrote the line
+   * @level: "debug", "info", "warning" or "error"
+   * @message: the text after console's own formatting
+   * @source: the script URL it came from ("" when Chromium has none)
+   * @line: the line in that script, 0 when unknown
+   *
+   * One per page console.* call. Without this relay the lines only exist
+   * inside a DevTools agent; here they feed a host's error collection or
+   * console panel. Fire-and-forget.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_CONSOLE] =
+    g_signal_new ("console", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 5,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+                  G_TYPE_INT);
+
+  /**
+   * ChromiumSession::tooltip-changed:
+   * @self: the session
+   * @browser: the browser under the pointer
+   * @text: the hover text, or "" when the tooltip goes away
+   *
+   * The page's hover text (a link's `title`, an element's tooltip). The
+   * component suppresses CEF's own tooltip popup — drawing the hint is the
+   * host's call, and the empty text is the hide half.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_TOOLTIP_CHANGED] =
+    g_signal_new ("tooltip-changed", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::status-message:
+   * @self: the session
+   * @browser: the browser under the pointer
+   * @text: the status text, typically a hovered link's URL
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_STATUS_MESSAGE] =
+    g_signal_new ("status-message", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::focus-requested:
+   * @self: the session
+   * @browser: the browser that asked
+   * @source: "navigation" (an API load) or "system" (a system-generated
+   *   focus event, a popup's first show among them)
+   *
+   * The page asked for focus. The ask is relayed and granted; whether the
+   * window follows is the host's activation policy.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_FOCUS_REQUESTED] =
+    g_signal_new ("focus-requested", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::media-access-changed:
+   * @self: the session
+   * @browser: the browser holding (or releasing) the devices
+   * @video: whether a camera is in use
+   * @audio: whether a microphone is in use
+   *
+   * A capture started or stopped. Background pages are relayed too: the mic
+   * light burns while a hidden page holds the device, and a host indicator
+   * that stayed dark would be lying about the hardware.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_MEDIA_ACCESS_CHANGED] =
+    g_signal_new ("media-access-changed", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+                  G_TYPE_INT, G_TYPE_BOOLEAN, G_TYPE_BOOLEAN);
+
+  /**
+   * ChromiumSession::print-requested:
+   * @self: the session
+   * @browser: the browser whose page asked to print
+   *
+   * The page called window.print(). The component runs no printer dialog —
+   * printing is the host's GTK transaction — so this only reports the ask;
+   * a host that wants to print answers with chromium_session_print_pdf() and
+   * feeds the bytes to its own dialog. (Measured: the helper relays from the
+   * start of the print transaction, which happens whether or not the
+   * environment has a printer for CEF's own pipeline to consult.)
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_PRINT_REQUESTED] =
+    g_signal_new ("print-requested", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1,
+                  G_TYPE_INT);
+
+  /**
+   * ChromiumSession::frame-created:
+   * @self: the session
+   * @browser: the browser that owns the frame
+   * @frame: the frame's identifier, as CEF spells it (a string; "-4"
+   *   placeholders never reach here)
+   * @is_main: whether this is the browser's main frame
+   * @url: the frame's URL, possibly still about:blank for a fresh frame
+   *
+   * A frame came into existence — the main frame of a navigation or any
+   * iframe the page opened. Fire-and-forget; the pair for it is
+   * ::frame-destroyed.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_FRAME_CREATED] =
+    g_signal_new ("frame-created", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 4,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_BOOLEAN, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::frame-destroyed:
+   * @self: the session
+   * @browser: the browser that owned the frame
+   * @frame: the frame's identifier
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_FRAME_DESTROYED] =
+    g_signal_new ("frame-destroyed", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::frame-attached:
+   * @self: the session
+   * @browser: the browser that owns the frame
+   * @frame: the frame's identifier
+   * @reattached: whether this is a return from the back-forward cache or a
+   *   recovered connection, not a first attach
+   *
+   * The frame can route commands to its renderer again — after a creation,
+   * a cross-process swap, or a return from the back-forward cache.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_FRAME_ATTACHED] =
+    g_signal_new ("frame-attached", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_BOOLEAN);
+
+  /**
+   * ChromiumSession::frame-detached:
+   * @self: the session
+   * @browser: the browser that owns the frame
+   * @frame: the frame's identifier
+   *
+   * The frame lost its renderer — destroyed, cached, or a rare connection
+   * error; ::frame-destroyed follows when it is destruction.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_FRAME_DETACHED] =
+    g_signal_new ("frame-detached", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_STRING);
+
+  /**
+   * ChromiumSession::main-frame-changed:
+   * @self: the session
+   * @browser: the browser whose main frame changed
+   * @old_frame: the previous main frame's identifier, or "" on the first
+   *   assignment
+   * @new_frame: the new main frame's identifier, or "" on the last removal
+   *
+   * Cross-origin main-frame navigations swap the frame object (and usually
+   * the renderer process) under the browser; this is the fact a host's
+   * process-attribution needs.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_MAIN_FRAME_CHANGED] =
+    g_signal_new ("main-frame-changed", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+                  G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING);
+
   signals[SIG_CLOSED] =
     g_signal_new ("closed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
@@ -7312,6 +7722,52 @@ chromium_session_class_init (ChromiumSessionClass *klass)
    */
   signals[SIG_CLIENT_CERT_CLOSED] =
     g_signal_new ("client-cert-closed", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_INT);
+
+  /**
+   * ChromiumSession::render-unresponsive:
+   * @self: the session
+   * @id: the question's id
+   * @browser: the browser whose renderer stopped answering
+   *
+   * The page's script is stuck and its surface shows the last frame it
+   * painted. Answer with chromium_session_render_unresponsive_respond();
+   * not answering keeps CEF's own keep-waiting.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_RENDER_UNRESPONSIVE] =
+    g_signal_new ("render-unresponsive", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_INT);
+
+  /**
+   * ChromiumSession::render-responsive:
+   * @self: the session
+   * @id: the question that resolved itself
+   * @browser: the browser that came back
+   *
+   * The page recovered after a ::render-unresponsive; a host panel for it
+   * comes down, and answering that @id afterwards does nothing.
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_RENDER_RESPONSIVE] =
+    g_signal_new ("render-responsive", G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+                  G_TYPE_INT, G_TYPE_INT);
+
+  /**
+   * ChromiumSession::render-unresponsive-closed:
+   * @self: the session
+   * @id: the question that went away
+   * @browser: the browser that owned it
+   *
+   * Since: 156.0.14
+   */
+  signals[SIG_RENDER_UNRESPONSIVE_CLOSED] =
+    g_signal_new ("render-unresponsive-closed", G_TYPE_FROM_CLASS (klass),
                   G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
                   G_TYPE_INT, G_TYPE_INT);
 
@@ -7536,6 +7992,9 @@ chromium_session_get_property (GObject *object, guint property,
     case PROP_USER_AGENT:
       g_value_set_string (value, self->user_agent);
       break;
+    case PROP_AUTOPLAY_POLICY:
+      g_value_set_string (value, self->autoplay_policy);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property, pspec);
     }
@@ -7598,6 +8057,10 @@ chromium_session_set_property (GObject *object, guint property,
       break;
     case PROP_USER_AGENT:
       chromium_session_set_user_agent (self, g_value_get_string (value));
+      break;
+    case PROP_AUTOPLAY_POLICY:
+      chromium_session_set_autoplay_policy (self,
+                                            g_value_get_string (value));
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property, pspec);
@@ -7700,6 +8163,7 @@ chromium_session_finalize (GObject *object)
   g_free (self->proxy);
   g_free (self->proxy_bypass);
   g_free (self->accept_language);
+  g_free (self->autoplay_policy);
   g_hash_table_destroy (self->permission_held);
   g_hash_table_destroy (self->js_dialog_held);
   g_hash_table_destroy (self->file_dialog_held);

@@ -180,5 +180,36 @@ expect 'demo: certificate-error id=1 browser=1 error=ERR_CERT_' "$log" deny
 expect 'load error .*ERR_CERT' "$log" deny
 expect_no 'value="TLS-OK-PAGE"' "$log" deny
 
+# --- revoke -----------------------------------------------------------------
+# One run proves both halves of the exemption's life: an authorized
+# fingerprint continues without asking, and certificate-clear undoes it, so
+# the same certificate asks again. (Each run_demo is a fresh helper, which is
+# why both halves share one session.)
+
+if [ -n "$FP" ]; then
+  cat >"$WORK/revoke.session" <<EOF
+certificate-authorize $FP
+load $URL
+wait 3500
+certificate-clear
+load $URL
+wait 2500
+certificate-respond 1 deny
+wait 2500
+quit
+EOF
+
+  run_demo revoke "$WORK/revoke.session"
+  log=$WORK/revoke.log
+  if [ "$?" = 0 ]; then ok "revoke: demo exited 0"
+  else bad "revoke: demo exited"; tail -8 "$log" | sed 's/^/         /'; fi
+  expect "helper: certificate-error $FP authorized" "$log" revoke
+  expect 'helper: certificate-clear-authorized \([1-9][0-9]* forgotten\)' "$log" revoke
+  expect 'demo: certificate-error id=1 browser=1 error=ERR_CERT_' "$log" revoke
+  expect_no 'value="TLS-OK-PAGE"' "$log" revoke
+else
+  bad "revoke: skipped, no fingerprint came out of the allow run"
+fi
+
 if [ "$fails" = 0 ]; then printf 'certificate gate: passed\n'
 else printf 'certificate gate: %d check(s) failed\n' "$fails"; exit 1; fi

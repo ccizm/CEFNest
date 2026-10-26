@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Frame probe</title>
+</head>
+<body>
+  <h1>frame probe page</h1>
+  <!-- A same-origin iframe present from the start… -->
+  <iframe id="static" src="frame-child.html" width="300" height="80"></iframe>
+  <!-- …and a button-driven second one the gate adds and removes. -->
+  <p>
+    <button id="add">add</button>
+    <button id="remove">remove</button>
+  </p>
+  <script>
+    document.getElementById("add").addEventListener("click", function () {
+      if (!document.getElementById("dynamic")) {
+        var f = document.createElement("iframe");
+        f.id = "dynamic";
+        f.src = "frame-child.html?dynamic";
+        f.width = 300;
+        f.height = 80;
+        document.body.appendChild(f);
+      }
+    });
+    document.getElementById("remove").addEventListener("click", function () {
+      var f = document.getElementById("dynamic");
+      if (f)
+        f.remove();
+    });
+    // The gate drives both buttons through the js step (the buttons are real
+    // page controls; no host click geometry needed).
+    window.__frames = function () {
+      return document.querySelectorAll("iframe").length;
+    };
+  </script>
+</body>
+</html>

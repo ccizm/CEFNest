@@ -81,6 +81,16 @@ void               chromium_session_set_accept_language (ChromiumSession *self,
                                                          const char *language);
 const char        *chromium_session_get_accept_language (ChromiumSession *self);
 
+/* Autoplay policy, the same spawn-time rule as the proxy: Chromium has no
+ * runtime and no per-site face, so this is one global value read by the next
+ * start() and handed over as --autoplay-policy. @policy is Chromium's own
+ * spelling ("user-gesture-required" is the strict one a browser shell wants,
+ * "document-user-activation-required" the stricter still); NULL or "" keeps
+ * Chromium's default. */
+void               chromium_session_set_autoplay_policy (ChromiumSession *self,
+                                                         const char *policy);
+const char        *chromium_session_get_autoplay_policy (ChromiumSession *self);
+
 /* Runtime accessibility. The session watches org.a11y.Status's
  * ScreenReaderEnabled property on the session bus and calls this itself; a host
  * may also force it. TRUE maps to CefBrowserHost::SetAccessibilityState(
@@ -645,6 +655,38 @@ void               chromium_session_certificate_respond (ChromiumSession *self,
                                                    gboolean allow);
 void               chromium_session_certificate_authorize (ChromiumSession *self,
                                                    const char *fingerprint);
+
+/* Forget every fingerprint chromium_session_certificate_authorize () put
+ * into the helper's table; the next bad certificate asks again. The helper's
+ * table is the only place the exemptions live, so this one call is the whole
+ * undo. */
+void               chromium_session_certificate_clear_authorized
+                                                  (ChromiumSession *self);
+
+/* A renderer that stopped answering input for 15+ seconds parks this
+ * question:
+ *
+ * ::render-unresponsive (id, browser) arrives; the page's script is stuck,
+ * its surface shows the last frame it painted. The host answers with
+ * chromium_session_render_unresponsive_respond (): CHROMIUM_HANG_WAIT resets
+ * the helper's timer and keeps waiting (the page may still recover —
+ * ::render-responsive (id, browser) says it did, and the panel comes down),
+ * CHROMIUM_HANG_TERMINATE kills the renderer, which surfaces as the usual
+ * ::renderer-exited. Connecting nothing — or not answering — is CEF's own
+ * keep-waiting: the page stays hung until the host or the person decides
+ * something, which is the only safe default for a kill decision.
+ *
+ * One question per browser at a time; ::render-unresponsive-closed
+ * (id, browser) says the browser went away with the question unanswered. */
+typedef enum {
+  CHROMIUM_HANG_WAIT,
+  CHROMIUM_HANG_TERMINATE
+} ChromiumHangAction;
+
+void               chromium_session_render_unresponsive_respond
+                                                  (ChromiumSession *self,
+                                                   int id,
+                                                   ChromiumHangAction action);
 
 /* Resource interception, the consultative shape. With no rule registered the
  * feature does not exist: no handler, no callback, no overhead, and Web

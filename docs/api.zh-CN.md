@@ -26,7 +26,7 @@
 | TLS 信息 | `get_tls_info(id, browser)` → `::tls-info`——已加载页面的证书事实（地址栏锁的另一半），走组件自己的管道 |
 | 标签页 / 窗口 | `new_browser()` · `new_browser_with_geometry(url, windowed, x, y, w, h)`（window.open 特性） · `new_background_browser()`（常驻隐藏页：无窗口、无 surface、永不激活） · `select_browser()` · `close_browser()` · `get_browser_surface()`（session 实测的 id→surface 配对） · `browsers_list()` → 推送表的快照（见 `::browsers-changed`） |
 | 查看源码 | `view_source(browser)` → 结果经 `::view-source` / `::view-source-error` 返回；`auto-source-window` 属性（默认开）决定是否自动弹出组件源码窗口 |
-| 页面 / 其他 | `set_muted()` · `set_zoom_level(browser, level)` · `zoom(browser, action)` · `set_accessibility()` · `set_proxy()` / `set_proxy_bypass()`（须在 `start()` 之前） · `set_accept_language()`（须在 `start()` 之前） · `set_auto_resize()` / `set_auto_resize_bounds()` |
+| 页面 / 其他 | `set_muted()` · `set_zoom_level(browser, level)` · `zoom(browser, action)` · `set_accessibility()` · `set_proxy()` / `set_proxy_bypass()`（须在 `start()` 之前） · `set_accept_language()`（须在 `start()` 之前） · `set_autoplay_policy()`（须在 `start()` 之前，如 `user-gesture-required`） · `set_auto_resize()` / `set_auto_resize_bounds()` |
 | 用户代理 | `user-agent` 属性（session 级、实时生效） · `browser_set_user_agent(browser, ua)`（单浏览器）——走组件自己的管道，渲染进程崩溃后自动重放，空串即 Chromium 自身 |
 | 截图 | `capture_screenshot(id, browser)` → `::screenshot-result`，携带 PNG 字节 |
 | Cookies | `cookies_get()` / `cookies_set()` / `cookies_delete()` → 由 `::cookies-result` 返回 |
@@ -35,7 +35,7 @@
 | 宿主脚本 | `script_add(id, browser, patterns, code, run_at, all_frames)` · `script_remove(id)`——user-script 的一半；`document_start` 先于页面内联脚本，且没有隔离世界 |
 | 开发者工具 | `set_devtools_enabled()` · `get_devtools_enabled()`；`devtools-enabled` 属性（默认关）——见[开发者工具](../README.zh-CN.md#开发者工具) |
 | CDP 管道 | `cdp_enable(browser)` 打开（每 browser 一支开关） · `cdp_execute(id, browser, method, params_json)` → `::cdp-result` · `cdp_disable(browser)`；观察者开着期间，所有协议事件经 `::cdp-event` 到达。组件自身的功能（历史跳转、TLS 信息、UA、截图、分类型清数据）不需要这支开关 |
-| 证书 | 用 `certificate_respond(id, allow)` 应答 `::certificate-error`；`certificate_authorize(fingerprint)` 对该证书在本 helper 生命周期内免询问放行 |
+| 证书 | 用 `certificate_respond(id, allow)` 应答 `::certificate-error`；`certificate_authorize(fingerprint)` 对该证书在本 helper 生命周期内免询问放行；`certificate_clear_authorized()` 撤销全部豁免（helper 表与 Chromium 自己的例外记忆一起清） |
 | 请求拦截 | `intercept_add(id, patterns, resource_types)` · `intercept_remove(id)` · `intercept_set_passive()`；用 `request_respond(request_id, action, url)` 应答 `::request-intercept` |
 | 插件 | 应答 `::grant-request`（见下） |
 
@@ -80,6 +80,17 @@
 | `::auth-closed` | `id, browser` | 提问已被收走；之后再应答无效 |
 | `::client-cert-request` → gboolean | `id, browser, origin, certs` | `certs` 是仅在发射期间有效的 `ChromiumClientCert` GList；返回 TRUE 自行展示选择器，返回 FALSE——或不连接——即“不选” |
 | `::client-cert-closed` | `id, browser` | 握手已收走 |
+| `::render-unresponsive` | `id, browser` | 渲染进程 15 秒以上不处理输入；用 `render_unresponsive_respond(id, wait/terminate)` 应答，不应答 = CEF 默认继续等（实测本形态下该事件不触发，见 control-channel 文档） |
+| `::render-responsive` / `::render-unresponsive-closed` | `id, browser` | 页面自己缓过来了 / browser 带着问题关闭了 |
+| `::console` | `browser, level, message, source, line` | 页面 `console.*` 逐条转发（level：debug/info/warning/error） |
+| `::tooltip-changed` / `::status-message` | `browser, text` | 悬停文案（tooltip 空串 = 收起；本形态下 tooltip 实测不触发）与状态栏文案（悬停链接的 URL） |
+| `::focus-requested` | `browser, source` | browser 即将取得焦点（navigation/system）；只上报不拦 |
+| `::media-access-changed` | `browser, video, audio` | 摄像头/麦克风开始或停止被占用；后台页也发 |
+| `::print-requested` | `browser` | 页面调了 `window.print()`；要打印就调 `print_pdf` 喂自己的 GTK 打印对话框 |
+| `::frame-created` | `browser, frame, is_main, url` | 一个 frame 诞生（主框架或任意 iframe）；created 时刻 url 通常为空 |
+| `::frame-destroyed` | `browser, frame` | 一个 frame 消失；与 created 靠同一字符串 id 配对 |
+| `::frame-attached` / `::frame-detached` | `browser, frame(, reattached)` | frame 与渲染进程的接上/断开（跨进程交换、BFCache 进出） |
+| `::main-frame-changed` | `browser, old_frame, new_frame` | 主框架换对象——跨源导航换进程的归因依据 |
 | `::tls-info` | `id, browser, ok, security_state, subject, issuer, fingerprint, valid_from, valid_to` | 一次 `get_tls_info()` 的应答；状态不带证书时各证书字段为空串（如普通 http） |
 | `::scheme-request` → gboolean | `id, browser, url, method, headers` | 宿主注册过的 scheme 的请求；返回 TRUE 由你服务（response → 写 → end），返回 FALSE——或不连接——即中止 |
 | `::scheme-closed` | `id, browser` | browser 在请求中途关闭 |
@@ -142,4 +153,7 @@ Web 插件的内容脚本在 `document_start` 运行（先于页面自己的内�
 `chrome.*` shim；宿主按权限表裁决每一次调用。子集、接缝、载荷上限与隔离
 事实都在 [docs/plugins.zh-CN.md](plugins.zh-CN.md)——写插件前先读它。会话
 恢复不需要组件再做任何事：宿主侧配方见
-[docs/session-restore.zh-CN.md](session-restore.zh-CN.md)。
+[docs/session-restore.zh-CN.md](session-restore.zh-CN.md)。PDF 链接在本
+发行包里没有查看器可渲染：宿主侧配方
+[docs/pdf-viewer.zh-CN.md](pdf-viewer.zh-CN.md)（拦截 + scheme + pdf.js，
+组件零改动）。

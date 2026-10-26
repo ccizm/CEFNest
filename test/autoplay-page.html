@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Autoplay probe</title>
+</head>
+<body>
+  <h1>autoplay probe page</h1>
+  <p id="state">pending</p>
+  <script>
+    // The AudioContext is the deterministic autoplay probe: under a
+    // user-gesture policy it is born "suspended", without one "running".
+    // It needs no media file and no sound device.
+    try {
+      var ctx = new AudioContext();
+      window.__actState = ctx.state;
+    } catch (e) {
+      window.__actState = "error:" + e.message;
+    }
+    document.getElementById("state").textContent = window.__actState;
+  </script>
+</body>
+</html>

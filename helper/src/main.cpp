@@ -1081,6 +1081,8 @@ void EmitWindowProperties(int browser_id, CefRefPtr<CefWindow> window) {
  * ------------------------------------------------------------------ */
 constexpr size_t kSourceChunkBytes = 64 * 1024;
 constexpr size_t kSourceMaxBytes = 16 * 1024 * 1024;
+/* One console message's ceiling on the control channel. */
+constexpr size_t kConsoleMessageMaxBytes = 1024 * 1024;
 int g_next_source_id = 1;
 
 class SourceStream : public CefStringVisitor {
@@ -3100,6 +3102,18 @@ struct ClientCertRequest {
 };
 std::map<uint32_t, ClientCertRequest> g_client_cert_requests;
 
+/* The render process stopped answering input for 15+ seconds. One parked
+ * question per browser: CEF re-fires while the hang lasts and the answer
+ * belongs to the host's own panel, so a second event would only duplicate
+ * it. No answer at all keeps CEF's default — waiting silently — which is
+ * the only safe default: terminating a renderer is nobody's timeout to
+ * decide. */
+struct HangDialog {
+  int browser_id = 0;
+  CefRefPtr<CefUnresponsiveProcessCallback> callback;
+};
+std::map<uint32_t, HangDialog> g_hang_dialogs;
+
 /* Scheme handlers the host serves data for. HostSchemeHandler registers
  * itself here at Create() and erases itself when CEF cancels the load or the
  * handler dies; the answer commands reach it through this table. Create()
@@ -4075,6 +4089,25 @@ void DropDialogsForBrowser(int browser_id) {
     fprintf(stderr, "helper: client-cert %d closed (browser closed)\n", id);
   }
 
+  for (auto it = g_hang_dialogs.begin(); it != g_hang_dialogs.end();) {
+    if (it->second.browser_id != browser_id) {
+      ++it;
+      continue;
+    }
+    /* The question goes with its browser; the callback dies unanswered,
+     * which is CEF's own keep-waiting — a closing browser has no renderer
+     * left to terminate. */
+    it->second.callback = nullptr;
+    const int id = static_cast<int>(it->first);
+    it = g_hang_dialogs.erase(it);
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("render-unresponsive-closed");
+    dict->SetInt("browser", browser_id);
+    dict->SetInt("id", id);
+    Emit(dict);
+    fprintf(stderr, "helper: render-unresponsive %d closed (browser closed)\n",
+            id);
+  }
+
   {
     std::vector<HostSchemeHandler*> closing;
     {
@@ -4285,15 +4318,40 @@ class HelperDialogHandler : public CefDialogHandler {
  * control channel has no event for. */
 class HelperPrintHandler : public CefPrintHandler {
  public:
-  void OnPrintStart(CefRefPtr<CefBrowser> browser) override {}
+  /* window.print() lands here first — measured on this CEF: OnPrintStart and
+   * OnPrintSettings always run, while OnPrintDialog only does when a printer
+   * exists for the pipeline to consult (without one, Chromium shows its own
+   * print-error views dialog and the flow dies before any dialog callback).
+   * So the ask is relayed from here, once per print transaction. The dialog
+   * itself is the host's GTK transaction: a host that wants to print answers
+   * with print-pdf and feeds the bytes to its own dialog; this side's
+   * remaining callbacks stay out of the way and CEF's printer path ends as it
+   * always did in a printer-less environment. */
+  void OnPrintStart(CefRefPtr<CefBrowser> browser) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("print-requested");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    Emit(dict);
+    fprintf(stderr, "helper: print-requested browser=%d\n",
+            browser ? browser->GetIdentifier() : 0);
+  }
 
   void OnPrintSettings(CefRefPtr<CefBrowser> browser,
                        CefRefPtr<CefPrintSettings> settings,
-                       bool get_defaults) override {}
+                       bool get_defaults) override {
+    fprintf(stderr, "helper: print-settings browser=%d defaults=%d\n",
+            browser ? browser->GetIdentifier() : 0, get_defaults ? 1 : 0);
+  }
 
   bool OnPrintDialog(CefRefPtr<CefBrowser> browser,
                      bool has_selection,
                      CefRefPtr<CefPrintDialogCallback> callback) override {
+    /* Reached only when the pipeline found a printer to talk about; the
+     * answer stays "no dialog here", exactly what the bare stub did before
+     * the relay existed. */
     return false;
   }
 
@@ -5356,6 +5414,51 @@ void HandleCommand(const std::string& line) {
     }
     g_cert_authorized.insert(fingerprint);
     fprintf(stderr, "helper: certificate-authorize %s\n", fingerprint.c_str());
+    return;
+  }
+
+  if (name == "certificate-clear-authorized") {
+    /* The other half of the store: forget every fingerprint, so the next
+     * bad certificate asks again. Two tables hold an exemption — this
+     * process's fingerprint set, and the ones Chromium itself keeps per
+     * (host, certificate) once OnCertificateError continued — so both go.
+     * CEF also recommends CloseAllConnections here; measured 2026-10-26 on
+     * this CEF that call segfaults the helper while a browser is live, and
+     * the recommendation's worry does not materialize without it: the
+     * reconnect after the clear asks again. So only the exception store is
+     * cleared. */
+    const size_t count = g_cert_authorized.size();
+    g_cert_authorized.clear();
+    CefRefPtr<CefRequestContext> context = CefRequestContext::GetGlobalContext();
+    if (context)
+      context->ClearCertificateExceptions(nullptr);
+    fprintf(stderr,
+            "helper: certificate-clear-authorized (%zu forgotten)\n", count);
+    return;
+  }
+
+  if (name == "render-unresponsive-respond") {
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    const std::string action = command->GetString("action").ToString();
+    CefRefPtr<CefUnresponsiveProcessCallback> callback;
+    {
+      auto it = g_hang_dialogs.find(id);
+      if (it == g_hang_dialogs.end()) {
+        EmitStatus("no-such-hang");
+        return;
+      }
+      callback = it->second.callback;
+      g_hang_dialogs.erase(it);
+    }
+    if (!callback)
+      return;  // the browser closed under the host's panel
+    if (action == "terminate") {
+      fprintf(stderr, "helper: render-unresponsive %u terminate\n", id);
+      callback->Terminate();
+    } else {
+      fprintf(stderr, "helper: render-unresponsive %u wait\n", id);
+      callback->Wait();
+    }
     return;
   }
 
@@ -6731,6 +6834,16 @@ class HelperApp : public CefApp,
       fprintf(stderr, "helper: --proxy-bypass-list=%s\n", proxy_bypass.c_str());
     }
 
+    // Autoplay is a spawn-time decision too: the switch has no runtime API and
+    // CEF exposes no per-site face, so the host's policy is one global value
+    // ("user-gesture-required" being the strict one a browser shell wants).
+    // An empty variable leaves Chromium's own default untouched.
+    const std::string autoplay = EnvOrEmpty("CHROMIUM_HELPER_AUTOPLAY_POLICY");
+    if (!autoplay.empty()) {
+      command_line->AppendSwitchWithValue("autoplay-policy", autoplay);
+      fprintf(stderr, "helper: --autoplay-policy=%s\n", autoplay.c_str());
+    }
+
     if (EnvOrEmpty("CHROMIUM_SPELLCHECK") != "1") {
       command_line->AppendSwitch("disable-spell-checking");
       fprintf(stderr, "helper: spellcheck disabled (CHROMIUM_SPELLCHECK=1 enables)\n");
@@ -6820,7 +6933,8 @@ class HelperClient : public CefClient,
                      public CefDisplayHandler,
                      public CefFocusHandler,
                      public CefKeyboardHandler,
-                     public CefRequestHandler {
+                     public CefRequestHandler,
+                     public CefFrameHandler {
  public:
   explicit HelperClient(int slot) : slot_(slot) {}
 
@@ -6832,6 +6946,7 @@ class HelperClient : public CefClient,
   CefRefPtr<CefFocusHandler> GetFocusHandler() override { return this; }
   CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
   CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+  CefRefPtr<CefFrameHandler> GetFrameHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override {
     return download_handler_;
   }
@@ -6859,6 +6974,25 @@ class HelperClient : public CefClient,
      * that the same click goes on to request. Idempotent by the guard in
      * SelectBrowserById. */
     SelectBrowserById(browser->GetIdentifier());
+  }
+
+  /* The browser is about to take focus. Reported and allowed: whether the
+   * window follows is the host's activation policy, and stealing or refusing
+   * focus is not a decision the component makes on its own. */
+  bool OnSetFocus(CefRefPtr<CefBrowser> browser, FocusSource source) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return false;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("focus-requested");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    /* CEF 156 names two sources: an API navigation and a system-generated
+     * focus event (a popup's first show is one of these). The words go to the
+     * host as they are. */
+    dict->SetString("source", source == FOCUS_SOURCE_SYSTEM ? "system"
+                                                            : "navigation");
+    Emit(dict);
+    return false;
   }
 
   void OnTakeFocus(CefRefPtr<CefBrowser> browser, bool next) override {
@@ -7572,6 +7706,95 @@ class HelperClient : public CefClient,
     EmitBrowsersChanged();
   }
 
+  /* The page's console.* lines. Chromium only surfaces these to a DevTools
+   * agent, so without this relay a page's console.error is invisible to the
+   * host — the gap that made "collect page errors" impossible without opening
+   * the inspector. Fire-and-forget: the host's console panel is a log, not a
+   * question. One MiB is the per-message ceiling; a console line worth more
+   * than that is a dump, and the tail marker says so. */
+  bool OnConsoleMessage(CefRefPtr<CefBrowser> browser,
+                        cef_log_severity_t level,
+                        const CefString& message,
+                        const CefString& source,
+                        int line) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return false;
+    std::string text = message.ToString();
+    if (text.size() > kConsoleMessageMaxBytes) {
+      text.resize(kConsoleMessageMaxBytes);
+      text += "…";
+    }
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("console");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetString("level",
+                    level >= LOGSEVERITY_ERROR
+                        ? "error"
+                        : level == LOGSEVERITY_WARNING
+                              ? "warning"
+                              : level >= LOGSEVERITY_INFO ? "info" : "debug");
+    dict->SetString("message", text);
+    dict->SetString("source", source.ToString());
+    dict->SetInt("line", line);
+    Emit(dict);
+    fprintf(stderr, "helper: console %s from %s:%d\n",
+            level >= LOGSEVERITY_ERROR
+                ? "error"
+                : level == LOGSEVERITY_WARNING
+                      ? "warning"
+                      : level >= LOGSEVERITY_INFO ? "info" : "debug",
+            source.ToString().c_str(), line);
+    return false;
+  }
+
+  /* Hover text. Returning true keeps CEF's views tooltip layer out of it —
+   * the host draws hover hints (status bar, address-bar tail), and a views
+   * popup would draw the same text a second time. The empty text is the hide
+   * half of the pairing: the host takes it down the same way. */
+  bool OnTooltip(CefRefPtr<CefBrowser> browser, CefString& text) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return true;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("tooltip-changed");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetString("text", text.ToString());
+    Emit(dict);
+    return true;
+  }
+
+  void OnStatusMessage(CefRefPtr<CefBrowser> browser,
+                       const CefString& value) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("status-message");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetString("text", value.ToString());
+    Emit(dict);
+  }
+
+  /* A capture started or stopped. Unlike the other Display relays a
+   * background page is *not* filtered here: the mic light burns while a
+   * hidden page holds the device, and a host indicator that stayed dark
+   * would be lying about the hardware. DevTools pages are still skipped —
+   * the inspector records nothing. */
+  void OnMediaAccessChange(CefRefPtr<CefBrowser> browser,
+                           bool is_video_capture,
+                           bool is_audio_capture) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools)
+        return;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("media-access-changed");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetBool("video", is_video_capture ? true : false);
+    dict->SetBool("audio", is_audio_capture ? true : false);
+    Emit(dict);
+  }
+
   void OnLoadEnd(CefRefPtr<CefBrowser> browser,
                  CefRefPtr<CefFrame> frame,
                  int http_status_code) override {
@@ -7666,6 +7889,147 @@ class HelperClient : public CefClient,
     dict->SetInt("status", static_cast<int>(status));
     dict->SetInt("error_code", error_code);
     dict->SetString("message", error_string.ToString());
+    Emit(dict);
+  }
+
+  /* The renderer stopped answering input for at least 15 seconds. The event
+   * parks until render-unresponsive-respond names its id: wait resets CEF's
+   * timer, terminate kills the renderer (OnRenderProcessTerminated follows).
+   * Returning true without touching the callback is the no-answer path —
+   * CEF's own "keep waiting" — and that is what an absent host gets. */
+  bool OnRenderProcessUnresponsive(
+      CefRefPtr<CefBrowser> browser,
+      CefRefPtr<CefUnresponsiveProcessCallback> callback) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (!callback)
+      return false;
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return false;
+
+    const int browser_id = browser ? browser->GetIdentifier() : 0;
+    for (const auto& entry : g_hang_dialogs)
+      if (entry.second.browser_id == browser_id)
+        return true;  // still parked; the host has the question already
+
+    const uint32_t id = ++g_dialog_seq;
+    HangDialog& entry = g_hang_dialogs[id];
+    entry.browser_id = browser_id;
+    entry.callback = callback;
+
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("render-unresponsive");
+    if (browser_id)
+      dict->SetInt("browser", browser_id);
+    dict->SetInt("id", static_cast<int>(id));
+    Emit(dict);
+    fprintf(stderr, "helper: render-unresponsive %u browser=%d\n", id,
+            browser_id);
+    return true;
+  }
+
+  void OnRenderProcessResponsive(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    const int browser_id = browser ? browser->GetIdentifier() : 0;
+    for (auto it = g_hang_dialogs.begin(); it != g_hang_dialogs.end(); ++it) {
+      if (it->second.browser_id != browser_id)
+        continue;
+      const uint32_t id = it->first;
+      g_hang_dialogs.erase(it);
+      CefRefPtr<CefDictionaryValue> dict = NewEvent("render-responsive");
+      if (browser_id)
+        dict->SetInt("browser", browser_id);
+      dict->SetInt("id", static_cast<int>(id));
+      Emit(dict);
+      fprintf(stderr, "helper: render-responsive %u browser=%d\n", id,
+              browser_id);
+      return;
+    }
+  }
+
+  /* The frame tree, event by event. Before this relay the host could only
+   * guess at subframe life from page text and script probes; every iframe a
+   * page opens (and closes, and swaps across a site boundary) is reported
+   * here with the string identifier CEF 156 uses for frames. The
+   * placeholder frames the docs mention carry identifier "-4" and are
+   * filtered: a frame that does not exist in any renderer is not a fact a
+   * content policy can act on. */
+  void OnFrameCreated(CefRefPtr<CefBrowser> browser,
+                      CefRefPtr<CefFrame> frame) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return;
+    const std::string id = frame->GetIdentifier().ToString();
+    if (id == "-4")
+      return;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("frame-created");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetString("frame", id);
+    dict->SetBool("is_main", frame->IsMain());
+    dict->SetString("url", frame->GetURL().ToString());
+    Emit(dict);
+  }
+
+  void OnFrameDestroyed(CefRefPtr<CefBrowser> browser,
+                        CefRefPtr<CefFrame> frame) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return;
+    const std::string id = frame->GetIdentifier().ToString();
+    if (id == "-4")
+      return;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("frame-destroyed");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetString("frame", id);
+    Emit(dict);
+  }
+
+  void OnFrameAttached(CefRefPtr<CefBrowser> browser,
+                       CefRefPtr<CefFrame> frame,
+                       bool reattached) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return;
+    const std::string id = frame->GetIdentifier().ToString();
+    if (id == "-4")
+      return;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("frame-attached");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetString("frame", id);
+    dict->SetBool("reattached", reattached);
+    Emit(dict);
+  }
+
+  void OnFrameDetached(CefRefPtr<CefBrowser> browser,
+                       CefRefPtr<CefFrame> frame) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return;
+    const std::string id = frame->GetIdentifier().ToString();
+    if (id == "-4")
+      return;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("frame-detached");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetString("frame", id);
+    Emit(dict);
+  }
+
+  void OnMainFrameChanged(CefRefPtr<CefBrowser> browser,
+                          CefRefPtr<CefFrame> old_frame,
+                          CefRefPtr<CefFrame> new_frame) override {
+    if (BrowserSlot* slot = FindSlotForBrowser(browser))
+      if (slot->devtools || slot->background)
+        return;
+    CefRefPtr<CefDictionaryValue> dict = NewEvent("main-frame-changed");
+    if (browser)
+      dict->SetInt("browser", browser->GetIdentifier());
+    dict->SetString("old_frame",
+                    old_frame ? old_frame->GetIdentifier().ToString() : "");
+    dict->SetString("new_frame",
+                    new_frame ? new_frame->GetIdentifier().ToString() : "");
     Emit(dict);
   }
 
