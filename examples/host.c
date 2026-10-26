@@ -806,7 +806,7 @@ script_run (void)
           return;
         }
       else if (!strcmp (verb, "load"))
-        chromium_session_load_uri (host.session, rest);
+        chromium_session_load_uri (host.session, 0, rest);
       else if (!strcmp (verb, "tab"))
         chromium_session_new_browser (host.session, *rest ? rest : "about:blank",
                                       FALSE);
@@ -867,32 +867,32 @@ load_script (const char *path)
 static void
 on_entry_activate (GtkEntry *entry, gpointer data)
 {
-  chromium_session_load_uri (host.session,
+  chromium_session_load_uri (host.session, 0,
                              gtk_editable_get_text (GTK_EDITABLE (entry)));
 }
 
 static void
 on_back (GtkButton *button, gpointer data)
 {
-  chromium_session_go_back (host.session);
+  chromium_session_go_back (host.session, 0);
 }
 
 static void
 on_forward (GtkButton *button, gpointer data)
 {
-  chromium_session_go_forward (host.session);
+  chromium_session_go_forward (host.session, 0);
 }
 
 static void
 on_reload (GtkButton *button, gpointer data)
 {
-  chromium_session_reload (host.session, FALSE);
+  chromium_session_reload (host.session, 0, FALSE);
 }
 
 static void
 on_stop (GtkButton *button, gpointer data)
 {
-  chromium_session_stop_loading (host.session);
+  chromium_session_stop_loading (host.session, 0);
 }
 
 static void

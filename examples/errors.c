@@ -105,7 +105,7 @@ on_reload (GtkButton *button, gpointer data)
   hide_banner ();
   if (chromium_session_get_running (errors.session))
     {
-      chromium_session_reload (errors.session, TRUE);   /* hard: skip caches */
+      chromium_session_reload (errors.session, 0, TRUE);   /* hard: skip caches */
       return;
     }
 

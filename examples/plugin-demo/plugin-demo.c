@@ -25,13 +25,14 @@ on_menu_command (int slot, const char *params_json, gpointer user_data)
 }
 
 /* "load-end" is a session signal, so the handler has the signal's own
- * signature — session first, then (url, http_code), then user_data. */
+ * signature — session first, then (browser, url, http_code), then
+ * user_data. */
 static void
-on_load_end (ChromiumSession *session, const char *url, int http_code,
-             gpointer user_data)
+on_load_end (ChromiumSession *session, int browser, const char *url,
+             int http_code, gpointer user_data)
 {
-  fprintf (stderr, "plugin-demo: page loaded %s (http=%d)\n",
-           url ? url : "", http_code);
+  fprintf (stderr, "plugin-demo: page loaded browser=%d %s (http=%d)\n",
+           browser, url ? url : "", http_code);
 }
 
 /* The one export. api_version is the load host's; a mismatch means this

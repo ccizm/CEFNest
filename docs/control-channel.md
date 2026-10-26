@@ -19,6 +19,7 @@ Set by the host when it spawns the subprocess:
 | `XDG_SESSION_TYPE` | `wayland` |
 | `CHROMIUM_HELPER_SOCKET` | full path of the control-channel socket |
 | `CHROMIUM_HELPER_DATA_DIR` | absolute path of a persistent profile; absent means incognito |
+| `CHROMIUM_HELPER_SCHEMES` | the host's custom schemes, `name=flag,flag;name2` with flags `standard` `local` `display_isolated` `secure` `cors` `fetch` `csp_bypassing` (empty flags = `standard,secure,fetch`); read in every process by `OnRegisterCustomSchemes`, the one point CEF gives scheme options a voice. Absent means no host schemes |
 
 `DISPLAY` and `WAYLAND_SOCKET` are removed. `CHROMIUM_HELPER_DATA_DIR` is set
 only when the host asked for a data directory — otherwise it is removed even
@@ -35,7 +36,7 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `select-browser` | `browser` | activate the tab; window mode also focuses |
 | `close-browser` | `browser` (optional; default active) | close this one only; the last one ends the helper |
 | `load` | `url` | the active browser |
-| `back` `forward` `reload` `stop` | `reload` adds `hard` | navigation; the active browser |
+| `back` `forward` `reload` `stop` | `reload` adds `hard`; all five take an optional `browser` (default active) | navigation, nameable at a background tab |
 | `quit` | — | close every browser and end the helper |
 | `zoom-in` `zoom-out` `zoom-reset` | — | step 0.5; reset returns to 0.0 |
 | `js` | `code`, `id` | statement form, evaluated in the page (needs CSP `unsafe-eval`) |
@@ -46,9 +47,12 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `download-accept` | `id`, `path` | absolute path; the host creates parent directories |
 | `download-reject` | `id` | refuses an unstarted download, cancels one in flight |
 | `download-pause` / `download-resume` | `id` | only for a download that already has its item callback |
-| `find` | `pattern`, `forward`, `match_case`, `next` | no ack; answers arrive as `find-result` |
-| `find-stop` | `clear` (default true) | ends the search and drops the highlight |
-| `view-source` | — | stream the active browser's main frame source back as `view-source-begin`/`-chunk`/`-end`; the menu's View Source takes the same path. No ack — the events are the answer |
+| `find` | `pattern`, `forward`, `match_case`, `next`, optional `browser` | no ack; answers arrive as `find-result` |
+| `find-stop` | `clear` (default true), optional `browser` | ends the search and drops the highlight |
+| `view-source` | optional `browser` | stream that browser's main frame source back as `view-source-begin`/`-chunk`/`-end`; the menu's View Source takes the same path. No ack — the events are the answer |
+| `history-go` | `index`, optional `browser` | the one history jump CEF's public API has no button for: the helper runs `Page.getNavigationHistory` + `Page.navigateToHistoryEntry` over its own DevTools pipe — the host's `cdp-enable` is not consulted, this is a scoped capability. The jump lands as the usual `address`/`load-*` events; no receipt |
+| `zoom-set` | `level`, optional `browser` | one explicit CEF zoom level (0.0 = 100 %); the zoom family and `stop` all take the optional `browser` too |
+| `ua-set` | `value`, optional `browser` | the user agent. Without `browser` this is the session-wide property (every current browser hears it; future ones at creation); with one, that browser's own override wins. Empty value = back to Chromium's own (captured via `Browser.getVersion`). Applied per load start, so a renderer crash does not lose it |
 | `context-menu-select` | `id`, `flags` (optional) | answers `context-menu`; the helper holds one request at a time |
 | `context-menu-dismiss` | — | close the menu, select nothing |
 | `permission-respond` | `id`, `result` (`accept`/`deny`/`dismiss`) | answers `permission-request`; a media `accept` must grant the whole mask |
@@ -56,6 +60,20 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `file-dialog-respond` | `id`, `paths[]` | answers `file-dialog`; an empty list is the cancel |
 | `certificate-respond` | `id`, `allow` | answers `certificate-error`; the default (an unconnected host) is deny |
 | `certificate-authorize` | `fingerprint` | continues this certificate without asking for the helper's lifetime; memory only, persistence is the host's own policy store |
+| `auth-respond` | `id`, `user`, `password` | answers `auth-required`: the request continues with these credentials |
+| `auth-cancel` | `id` | answers `auth-required` with a cancel — the request fails with its 401, Chrome's own default |
+| `client-cert-respond` | `id`, `index` | answers `client-cert-request`; -1 continues the handshake without a certificate, which is also the default |
+| `tls-info` | `id` (the host's own), optional `browser` | one read of the loaded page's certificate facts, over the component's own pipe (`Security.enable` + `visibleSecurityStateChanged`; CEF 156 has no `getVisibleSecurityState`). Answered by `tls-info`; a question nothing answers in five seconds reports `ok` false |
+| `capture-screenshot` | `id` (the host's own), optional `browser` | one PNG of the page (`Page.captureScreenshot`), answered by `screenshot-result`; a capture past ~3 MiB is refused as `screenshot-too-large` rather than sent unreadable |
+| `clear-data` | `types` (bitmask: 1 cache, 2 cookies, 4 HTTP auth cache, 8 origin storage), `origins[]` (origin storage only) | typed clearing over the same pipe (`Network.clearBrowserCache` / `clearBrowserCookies` / `clearHttpAuthCache`, `Storage.clearDataForOrigin` per origin). Fire-and-forget; each call logs its own outcome |
+| `script-add` | `id`, `patterns[]`, `code`, `run_at` (`document_start`/`document_end`/`document_idle`, default idle), `all_frames`, optional `browser` (default all browsers) | registers a host script; re-adding an id replaces it. `document_start` injects in the renderer before the page's inline scripts; the other two ride main-frame load end. There is no isolated world — the script runs in the page's own JavaScript domain |
+| `script-remove` | `id` | takes the script back out |
+| `scheme-register` | `name`, `flags` (optional, for the next start) | attaches the host's data factory for this scheme at once; the *options* are read from `CHROMIUM_HELPER_SCHEMES` at process start only, and a `flags` payload here is logged as deferred. Names must match `[a-z][a-z0-9+.-]*`; built-ins and `cefnest-extension` are refused |
+| `scheme-unregister` | `name` | detaches the factory |
+| `scheme-response` | `id`, `status`, `reason`, `content_type`, `headers` (optional JSON object) | answers `scheme-request`: names the response, opens the body |
+| `scheme-chunk` | `id`, `data` (base64, 48 KiB raw per chunk) | one body piece |
+| `scheme-end` | `id` | closes the body |
+| `scheme-abort` | `id` | the host takes the request back; the load cancels |
 | `intercept-add` | `id`, `patterns[]` (match patterns), `resource_types[]` (optional: `main_frame`, `image`, `xhr`, …) | registers one interception rule under the host's own id; re-adding an id replaces it. No rules registered = the feature is off and costs nothing |
 | `intercept-remove` | `id` | takes the rule back out |
 | `intercept-mode` | `passive` | passive reports every match and blocks nothing; the default is blocking |
@@ -74,7 +92,7 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 
 | Event | Payload |
 | --- | --- |
-| `ready` | `cef`, `pid`, `url` (handshake) |
+| `ready` | `version` (the control-channel contract this helper speaks; the session stops a helper whose major differs), `cef`, `pid`, `url` (handshake) |
 | `browser-created` | `browser`, `url`, `windowed`, `devtools`, `background` (the inspector CEF created for `ShowDevTools`: always windowed, CEF owns its window, and it never becomes the active browser; `background` TRUE marks the resident hidden page — no surface, never active, never in `browsers`) |
 | `browser-selected` | `browser`, `windowed` |
 | `browser-closed` | `browser` |
@@ -85,8 +103,9 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `view-source-error` | `browser`, `id`, `message` (alone, or after a `begin` — the frame can be gone before anything streamed) |
 | `address` / `title` | `url` / `title` (`address` only for committed navigations) |
 | `loading` | `loading`, `can_go_back`, `can_go_forward` |
-| `load-end` | `url`, `http_code` (**fires on failure too, with code 0**) |
-| `load-error` | `error_code`, `url`, `message` |
+| `load-started` | `browser`, `url`, `transition` (Chromium's bitmask), `is_main_frame` — one per committed navigation; a navigation that fails before commit never reaches here |
+| `load-end` | `browser`, `url`, `http_code` (**fires on failure too, with code 0**) — exactly one per navigation |
+| `load-error` | `browser`, `error_code`, `url`, `message` — exactly one per failed navigation: Chromium's ERR_ABORTED echo, which lands seconds behind the real error, is dropped by the helper |
 | `renderer-exited` | `status`, `error_code`, `message` (only the renderer's death is reported) |
 | `muted` | `browser`, `muted` (read back; `browser` names the tab actually muted — a background tab going quiet says nothing about the active view) |
 | `zoom` | `level` (read back; also once after each main-frame load — Chromium persists zoom per origin) |
@@ -110,6 +129,16 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `file-dialog-closed` | `id` (the browser closed while the chooser was held) |
 | `certificate-error` | `id`, `error` (Chromium's net-error name), `url`, `subject`, `issuer`, `fingerprint` (SHA-256 of the leaf's DER, hex) — the navigation is stopped until answered; default deny |
 | `certificate-error-closed` | `id` (the browser navigated or closed while the question was parked) |
+| `auth-required` | `id`, `browser`, `is_proxy`, `scheme` (`basic`/`digest`/…), `realm`, `origin` — the request is stopped until `auth-respond`/`auth-cancel`; the session cancels when no host listens, which is the request dying with its 401 |
+| `auth-closed` | `id`, `browser` (the browser navigated or closed while the question was parked) |
+| `client-cert-request` | `id`, `browser`, `origin` (`host:port`), `certs[]` (`subject`, `issuer`, `fingerprint`) — the handshake is stopped until `client-cert-respond`; default none |
+| `client-cert-closed` | `id`, `browser` |
+| `tls-info` | `id` (the ask's), `browser`, `ok`, `security_state` (`secure`/`insecure`/`insecure-broken`/…), `subject`, `issuer`, `fingerprint` (SHA-256 of the leaf's DER, hex; "" when the state carries none), `valid_from`, `valid_to` (Unix seconds) |
+| `screenshot-result` | `id`, `browser`, `ok`, `data` (base64 PNG; present when `ok`), `message` (`screenshot-too-large` on the ceiling) |
+| `window-properties` | `browser`, `x`, `y`, `w`, `h`, `toolbar`, `menubar`, `status`, `resizable`, `fullscreen` — a windowed browser's window at creation and on bounds/fullscreen changes; this helper's windows are frameless, so toolbar/menubar/status are always false |
+| `browsers-changed` | `browsers[]` (`id`, `url`, `title`, `active`, `windowed`, `muted`, `zoom` — the whole table, pushed on create, close, select, title, address, mute and zoom) |
+| `scheme-request` | `id`, `browser`, `url`, `method`, `headers` (one JSON object) — the load is stopped until `scheme-response`/`scheme-abort`; the session aborts when no host listens, because the component does not invent page data |
+| `scheme-closed` | `id`, `browser` (the browser went away mid-request) |
 | `request-intercept` | `request_id`, `url`, `method`, `resource_type`, `is_main_frame`, `headers` (one JSON object) — the request is stopped until `request-respond`; no default, no timeout |
 | `request-intercept-closed` | `request_id` (the browser closed while the question was parked; the request was cancelled with it) |
 | `cdp-result` | `id` (the execute's own), `ok`, `json` (the result or error dictionary as text), `message` (`cdp-too-large` when the answer could not fit the channel's line) |
@@ -123,9 +152,13 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `status` | `message` (`extension-path-escape`: a `cefnest-extension://` request landed outside its root and was refused with 403) |
 | `closed` | — |
 
-Page-carrying helper → host events all carry a `browser` field. Only
-`select-browser`, `close-browser`, `load`, `js`, `mute` and the `cdp-*`
-family read one; every other command acts on the active browser.
+Page-carrying helper → host events all carry a `browser` field. The
+commands that read one: `select-browser`, `close-browser`, `load`, `js`,
+`mute`, the whole navigation, zoom and find families, `view-source`,
+`history`, `page-text`, `print-pdf`, `history-go`, `tls-info`,
+`capture-screenshot`, `ua-set` (where absent means the session-wide form),
+`script-add` (absent = all browsers) and the `cdp-*` family. Every other
+command acts on the active browser.
 
 ## The four interaction shapes
 

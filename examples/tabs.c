@@ -138,7 +138,7 @@ on_entry_activate (GtkEntry *entry, gpointer data)
   const char *text = gtk_editable_get_text (GTK_EDITABLE (entry));
 
   if (text && *text)
-    chromium_session_load_uri (tabs.session, text);
+    chromium_session_load_uri (tabs.session, 0, text);
 }
 
 static gboolean

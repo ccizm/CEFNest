@@ -33,7 +33,7 @@
 | `select-browser` | `browser` | 激活该标签页；窗口模式下还会聚焦窗口 |
 | `close-browser` | `browser`（可选；默认当前激活） | 只关闭这一个；关闭最后一个会结束 helper |
 | `load` | `url` | 作用于当前激活的 browser |
-| `back` `forward` `reload` `stop` | `reload` 多一个 `hard` | 导航；作用于当前激活的 browser |
+| `back` `forward` `reload` `stop` | `reload` 多一个 `hard`；五个命令都接受可选 `browser`（缺省为激活） | 导航，可点名后台标签 |
 | `quit` | — | 关闭所有 browser 并结束 helper |
 | `zoom-in` `zoom-out` `zoom-reset` | — | 步进 0.5；reset 回到 0.0 |
 | `js` | `code`、`id` | 语句形式，在页面中求值（需要 CSP 允许 `unsafe-eval`） |
@@ -44,9 +44,12 @@
 | `download-accept` | `id`、`path` | 绝对路径；父目录由宿主创建 |
 | `download-reject` | `id` | 拒绝尚未开始的下载，或取消进行中的下载 |
 | `download-pause` / `download-resume` | `id` | 只对已经拿到 item 回调的下载有效 |
-| `find` | `pattern`、`forward`、`match_case`、`next` | 不返回 ack，结果以 `find-result` 事件送达 |
-| `find-stop` | `clear`（默认为 true） | 结束查找并清除高亮 |
-| `view-source` | — | 请求激活浏览器主 frame 的源码，以 `view-source-begin`/`-chunk`/`-end` 事件流回；菜单里的"查看网页源代码"走同一条路。无 ack——事件即应答 |
+| `find` | `pattern`、`forward`、`match_case`、`next`、可选 `browser` | 不返回 ack，结果以 `find-result` 事件送达 |
+| `find-stop` | `clear`（默认为 true）、可选 `browser` | 结束查找并清除高亮 |
+| `view-source` | 可选 `browser` | 请求该浏览器主 frame 的源码，以 `view-source-begin`/`-chunk`/`-end` 事件流回；菜单里的"查看网页源代码"走同一条路。无 ack——事件即应答 |
+| `history-go` | `index`、可选 `browser` | CEF 公开 API 没有的那一个历史跳转：helper 用自己的 DevTools 管道跑 `Page.getNavigationHistory` + `Page.navigateToHistoryEntry`——不要求宿主 `cdp-enable`，这是一次有范围的能力。跳转以常规 `address`/`load-*` 事件呈现；无独立回执 |
+| `zoom-set` | `level`、可选 `browser` | 一个显式 CEF zoom level（0.0 = 100%）；zoom 家族与 `stop` 同样接受可选 `browser` |
+| `ua-set` | `value`、可选 `browser` | 用户代理。不带 `browser` 是 session 级属性（现有每个 browser 都会收到，新建的在创建时继承）；带则只覆盖该 browser。空值 = 回到 Chromium 自身（经 `Browser.getVersion` 捕获）。每次加载开始都会重放，渲染进程崩溃不会丢 |
 | `context-menu-select` | `id`、`flags`（可选） | 应答 `context-menu`；helper 一次只保留一个请求 |
 | `context-menu-dismiss` | — | 关闭菜单，不选择任何项 |
 | `permission-respond` | `id`、`result`（`accept`/`deny`/`dismiss`） | 应答 `permission-request`；media 的 `accept` 必须授予整个权限掩码 |
@@ -54,6 +57,20 @@
 | `file-dialog-respond` | `id`、`paths[]` | 应答 `file-dialog`；空列表即取消 |
 | `certificate-respond` | `id`、`allow` | 应答 `certificate-error`；默认（宿主未连接）是拒绝 |
 | `certificate-authorize` | `fingerprint` | 该证书在本 helper 生命周期内免询问放行；只存内存，跨重启的持久化归宿主自己的策略存储 |
+| `auth-respond` | `id`、`user`、`password` | 应答 `auth-required`：请求以这组凭据继续 |
+| `auth-cancel` | `id` | 取消 `auth-required`——请求以 401 失败，即 Chrome 自己的默认 |
+| `client-cert-respond` | `id`、`index` | 应答 `client-cert-request`；-1 表示不选证书继续握手，也是默认值 |
+| `tls-info` | `id`（宿主自己的）、可选 `browser` | 读一次已加载页面的证书事实，走组件自己的管道（`Security.enable` + `visibleSecurityStateChanged`；CEF 156 没有 `getVisibleSecurityState`）。由 `tls-info` 应答；五秒无人应答的提问以 `ok` 假收场 |
+| `capture-screenshot` | `id`（宿主自己的）、可选 `browser` | 页面的一张 PNG（`Page.captureScreenshot`），由 `screenshot-result` 应答；超约 3 MiB 以 `screenshot-too-large` 拒发而非发出不可读的行 |
+| `clear-data` | `types`（位掩码：1 缓存，2 cookies，4 HTTP 认证缓存，8 源存储）、`origins[]`（仅源存储需要） | 同一条管道上的分类型清除（`Network.clearBrowserCache` / `clearBrowserCookies` / `clearHttpAuthCache`，源存储逐 origin 跑 `Storage.clearDataForOrigin`）。即发即忘；每次调用自己记录结果 |
+| `script-add` | `id`、`patterns[]`、`code`、`run_at`（`document_start`/`document_end`/`document_idle`，默认 idle）、`all_frames`、可选 `browser`（缺省全部浏览器） | 登记一条宿主脚本；同 id 再发是整体替换。`document_start` 在渲染进程里、先于页面内联脚本注入；其余两个搭主框架加载结束的车。没有隔离世界——脚本就在页面自己的 JavaScript 域里跑 |
+| `script-remove` | `id` | 摘掉这条脚本 |
+| `scheme-register` | `name`、`flags`（可选，只对下一次 start 生效） | 立即挂上该 scheme 的宿主数据工厂；**选项**只在进程启动时从 `CHROMIUM_HELPER_SCHEMES` 读，此刻带来的 `flags` 只记日志说明已延后。名字必须匹配 `[a-z][a-z0-9+.-]*`；内建 scheme 与 `cefnest-extension` 一律拒收 |
+| `scheme-unregister` | `name` | 摘掉该工厂 |
+| `scheme-response` | `id`、`status`、`reason`、`content_type`、`headers`（可选 JSON 对象） | 应答 `scheme-request`：报出响应，打开 body |
+| `scheme-chunk` | `id`、`data`（base64，每片 48 KiB 原始字节） | 一段 body |
+| `scheme-end` | `id` | 收口 body |
+| `scheme-abort` | `id` | 宿主收回该请求；加载随之取消 |
 | `intercept-add` | `id`、`patterns[]`（match pattern）、`resource_types[]`（可选：`main_frame`、`image`、`xhr`…） | 在宿主自己的 id 下登记一条拦截规则；同 id 再发是整体替换。无规则注册 = 功能关闭、零开销 |
 | `intercept-remove` | `id` | 摘掉这条规则 |
 | `intercept-mode` | `passive` | passive 只上报不阻塞；默认 blocking |
@@ -72,7 +89,7 @@
 
 | 事件 | 载荷 |
 | --- | --- |
-| `ready` | `cef`、`pid`、`url`（握手） |
+| `ready` | `version`（本 helper 说话的控制通道契约；大版本与 session 不符的 helper 会被就地停掉）、`cef`、`pid`、`url`（握手） |
 | `browser-created` | `browser`、`url`、`windowed`、`devtools`、`background`（CEF 为 `ShowDevTools` 创建的开发者工具 browser：始终是 windowed，窗口归 CEF 所有，永远不会成为激活 browser；`background` 为真标记常驻隐藏页——无 surface、永不激活、不进 `browsers` 表） |
 | `browser-selected` | `browser`、`windowed` |
 | `browser-closed` | `browser` |
@@ -83,8 +100,9 @@
 | `view-source-error` | `browser`、`id`、`message`（可单独到来——frame 可能在流出任何内容前就已失效） |
 | `address` / `title` | `url` / `title`（`address` 只在导航真正提交后发出） |
 | `loading` | `loading`、`can_go_back`、`can_go_forward` |
-| `load-end` | `url`、`http_code`（**失败时也会触发，此时 `http_code` 为 0**） |
-| `load-error` | `error_code`、`url`、`message` |
+| `load-started` | `browser`、`url`、`transition`（Chromium 位掩码）、`is_main_frame`——每次完成提交的导航一条；提交前就失败的导航到不了这里 |
+| `load-end` | `browser`、`url`、`http_code`（**失败时也会触发，此时 `http_code` 为 0**）——每次导航恰一条 |
+| `load-error` | `browser`、`error_code`、`url`、`message`——每次失败导航恰一条：Chromium 晚几秒跟进的 ERR_ABORTED 回声由 helper 丢弃 |
 | `renderer-exited` | `status`、`error_code`、`message`（只上报渲染进程的退出） |
 | `muted` | `browser`、`muted`（回读；`browser` 名下真正被静音的那个——后台标签页安静了不代表当前视图变了） |
 | `zoom` | `level`（回读；每次主框架加载后也会触发一次——Chromium 按 origin 持久化缩放级别） |
@@ -108,6 +126,16 @@
 | `file-dialog-closed` | `id`（选择器还挂着时 browser 关闭了） |
 | `certificate-error` | `id`、`error`（Chromium 的 net-error 名）、`url`、`subject`、`issuer`、`fingerprint`（叶子证书 DER 的 SHA-256，十六进制）——导航停住等待应答；默认拒绝 |
 | `certificate-error-closed` | `id`（问题还挂着时 browser 导航或关闭了） |
+| `auth-required` | `id`、`browser`、`is_proxy`、`scheme`（`basic`/`digest`…）、`realm`、`origin`——请求停住等待 `auth-respond`/`auth-cancel`；无人接听时 session 取消，请求以 401 失败 |
+| `auth-closed` | `id`、`browser`（问题还挂着时 browser 导航或关闭了） |
+| `client-cert-request` | `id`、`browser`、`origin`（`host:port`）、`certs[]`（`subject`、`issuer`、`fingerprint`）——握手停住等待 `client-cert-respond`；默认不选 |
+| `client-cert-closed` | `id`、`browser` |
+| `tls-info` | `id`（提问的）、`browser`、`ok`、`security_state`（`secure`/`insecure`/`insecure-broken`…）、`subject`、`issuer`、`fingerprint`（叶证书 DER 的 SHA-256 十六进制；状态不带证书时为空串）、`valid_from`、`valid_to`（Unix 秒） |
+| `screenshot-result` | `id`、`browser`、`ok`、`data`（base64 PNG；`ok` 时才有）、`message`（触顶时为 `screenshot-too-large`） |
+| `window-properties` | `browser`、`x`、`y`、`w`、`h`、`toolbar`、`menubar`、`status`、`resizable`、`fullscreen`——窗口化浏览器的窗口在创建时与边界/全屏变化时上报；本 helper 的窗口无框，toolbar/menubar/status 恒为 false |
+| `browsers-changed` | `browsers[]`（`id`、`url`、`title`、`active`、`windowed`、`muted`、`zoom`——整表，创建/关闭/选中/标题/地址/静音/缩放时重推） |
+| `scheme-request` | `id`、`browser`、`url`、`method`、`headers`（一个 JSON 对象）——加载停住等待 `scheme-response`/`scheme-abort`；无人接听时 session 中止，因为组件不编造页面数据 |
+| `scheme-closed` | `id`、`browser`（请求中途 browser 没了） |
 | `request-intercept` | `request_id`、`url`、`method`、`resource_type`、`is_main_frame`、`headers`（一个 JSON 对象）——请求停住等待 `request-respond`；无默认值、无超时 |
 | `request-intercept-closed` | `request_id`（问题还挂着时 browser 关闭；请求随之取消） |
 | `cdp-result` | `id`（execute 自己的）、`ok`、`json`（结果或错误字典的文本）、`message`（`cdp-too-large`：应答装不进通道的单行上限） |

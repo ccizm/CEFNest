@@ -633,18 +633,32 @@ session_zoom_changed (ChromiumSession *session, double level, gpointer data)
 }
 
 static void
-session_load_end (ChromiumSession *session, const char *uri, int http_code,
-                  gpointer data)
+session_load_started (ChromiumSession *session, int browser, const char *uri,
+                      int transition, gboolean is_main_frame, gpointer data)
 {
-  g_printerr ("demo: loaded %s (HTTP %d)\n", uri, http_code);
+  (void) session; (void) data;
+  g_printerr ("demo: load-started browser=%d %s transition=%d main=%d\n",
+              browser, uri, transition, is_main_frame ? 1 : 0);
 }
 
 static void
-session_load_error (ChromiumSession *session, int error_code, const char *uri,
-                    const char *message, gpointer data)
+session_load_end (ChromiumSession *session, int browser, const char *uri,
+                  int http_code, gpointer data)
 {
-  g_printerr ("demo: load failed %d %s %s\n", error_code, uri,
-              message ? message : "");
+  (void) session; (void) data;
+  /* browser at the end on purpose: the line's prefix is what the older
+   * gates match, and appending keeps every one of them working. */
+  g_printerr ("demo: loaded %s (HTTP %d) browser=%d\n", uri, http_code,
+              browser);
+}
+
+static void
+session_load_error (ChromiumSession *session, int browser, int error_code,
+                    const char *uri, const char *message, gpointer data)
+{
+  (void) session; (void) data;
+  g_printerr ("demo: load failed %d %s %s browser=%d\n", error_code, uri,
+              message ? message : "", browser);
 }
 
 static void
@@ -658,10 +672,179 @@ session_renderer_exited (ChromiumSession *session, int status, int error_code,
 }
 
 static void
-session_popup_requested (ChromiumSession *session, const char *url, gpointer data)
+session_popup_requested (ChromiumSession *session, const char *url,
+                         int disposition, gboolean gesture, int browser,
+                         gpointer data)
 {
   (void) session; (void) data;
-  g_printerr ("demo: popup-requested %s\n", url);
+  g_printerr ("demo: popup-requested browser=%d %s disposition=%d gesture=%d\n",
+              browser, url, disposition, gesture ? 1 : 0);
+}
+
+/* ---- the epiphany-gap batch: what a host's own UI reads ---- */
+
+/* The auth question the demo took (CEFNEST_AUTH=ask) and the scheme request
+   it is serving (CEFNEST_SCHEME_SERVE=1): ids the script steps answer. */
+static int demo_auth_id = 0;
+static int demo_scheme_id = 0;
+
+static void
+session_browsers_changed (ChromiumSession *session, gpointer data)
+{
+  ChromiumBrowserInfo *rows = NULL;
+  gsize n = 0, i;
+
+  (void) data;
+  rows = chromium_session_browsers_list (session, &n);
+  g_printerr ("demo: browsers-changed n=%zu\n", n);
+  for (i = 0; rows && i < n; i++)
+    g_printerr ("demo: browser-row id=%d url=%s title=%s active=%d "
+                "windowed=%d muted=%d zoom=%.2f\n",
+                rows[i].id, rows[i].url, rows[i].title,
+                rows[i].active ? 1 : 0, rows[i].windowed ? 1 : 0,
+                rows[i].muted ? 1 : 0, rows[i].zoom);
+  /* The array is one allocation of struct copies: free the strings, then the
+     array — browser_info_free() is for a heap row of its own. */
+  for (i = 0; i < n; i++)
+    {
+      g_free (rows[i].url);
+      g_free (rows[i].title);
+    }
+  g_free (rows);
+}
+
+static gboolean
+session_auth_required (ChromiumSession *session, int id, int browser,
+                       gboolean is_proxy, const char *scheme,
+                       const char *realm, const char *origin, gpointer data)
+{
+  (void) session; (void) data;
+  g_printerr ("demo: auth-required id=%d browser=%d proxy=%d scheme=%s "
+              "realm=%s origin=%s\n",
+              id, browser, is_proxy ? 1 : 0, scheme ? scheme : "",
+              realm ? realm : "", origin ? origin : "");
+  if (!g_getenv ("CEFNEST_AUTH"))
+    return FALSE;   /* the session's default: cancel */
+  demo_auth_id = id;
+  return TRUE;
+}
+
+static void
+session_auth_closed (ChromiumSession *session, int id, int browser,
+                     gpointer data)
+{
+  (void) session; (void) data;
+  if (demo_auth_id == id)
+    demo_auth_id = 0;
+  g_printerr ("demo: auth-closed id=%d browser=%d\n", id, browser);
+}
+
+static gboolean
+session_client_cert_request (ChromiumSession *session, int id, int browser,
+                             const char *origin, GList *certs, gpointer data)
+{
+  (void) session; (void) data;
+  g_printerr ("demo: client-cert-request id=%d browser=%d origin=%s n=%u\n",
+              id, browser, origin ? origin : "", g_list_length (certs));
+  for (GList *l = certs; l; l = l->next)
+    {
+      ChromiumClientCert *cert = l->data;
+      g_printerr ("demo: client-cert subject=%s issuer=%s fp=%s\n",
+                  cert->subject ? cert->subject : "",
+                  cert->issuer ? cert->issuer : "",
+                  cert->fingerprint ? cert->fingerprint : "");
+    }
+  return FALSE;   /* "none": the only default that cannot leak a key */
+}
+
+static void
+session_client_cert_closed (ChromiumSession *session, int id, int browser,
+                            gpointer data)
+{
+  (void) session; (void) data;
+  g_printerr ("demo: client-cert-closed id=%d browser=%d\n", id, browser);
+}
+
+static void
+session_tls_info (ChromiumSession *session, int id, int browser, gboolean ok,
+                  const char *security_state, const char *subject,
+                  const char *issuer, const char *fingerprint,
+                  int valid_from, int valid_to, gpointer data)
+{
+  (void) session; (void) data;
+  g_printerr ("demo: tls-info id=%d browser=%d ok=%d state=%s subject=%s "
+              "issuer=%s fp=%s from=%d to=%d\n",
+              id, browser, ok ? 1 : 0,
+              security_state ? security_state : "",
+              subject ? subject : "", issuer ? issuer : "",
+              fingerprint ? fingerprint : "", valid_from, valid_to);
+}
+
+static gboolean
+session_scheme_request (ChromiumSession *session, int id, int browser,
+                        const char *url, const char *method,
+                        const char *headers, gpointer data)
+{
+  (void) session; (void) data;
+  g_printerr ("demo: scheme-request id=%d browser=%d %s %s headers=%s\n",
+              id, browser, method ? method : "", url ? url : "",
+              headers ? headers : "{}");
+  if (!g_getenv ("CEFNEST_SCHEME_SERVE"))
+    return FALSE;   /* the session's default: abort */
+  demo_scheme_id = id;
+  return TRUE;
+}
+
+static void
+session_scheme_closed (ChromiumSession *session, int id, int browser,
+                       gpointer data)
+{
+  (void) session; (void) data;
+  if (demo_scheme_id == id)
+    demo_scheme_id = 0;
+  g_printerr ("demo: scheme-closed id=%d browser=%d\n", id, browser);
+}
+
+static void
+session_screenshot_result (ChromiumSession *session, int id, int browser,
+                           gboolean ok, GBytes *png, const char *message,
+                           gpointer data)
+{
+  (void) session; (void) data;
+  g_printerr ("demo: screenshot id=%d browser=%d ok=%d bytes=%zu %s\n",
+              id, browser, ok ? 1 : 0, png ? g_bytes_get_size (png) : 0,
+              message ? message : "");
+  /* The bytes go where CEFNEST_SCREENSHOT_OUT names, so a gate can read a
+     PNG back from disk instead of trusting a log line. */
+  const char *out = g_getenv ("CEFNEST_SCREENSHOT_OUT");
+  if (ok && png && out && *out)
+    {
+      GError *error = NULL;
+      gsize length = 0;
+      gconstpointer body = g_bytes_get_data (png, &length);
+
+      g_file_set_contents (out, body, (gssize) length, &error);
+      if (error)
+        {
+          g_printerr ("demo: screenshot write failed: %s\n", error->message);
+          g_error_free (error);
+        }
+      else
+        g_printerr ("demo: screenshot written %s\n", out);
+    }
+}
+
+static void
+session_window_properties (ChromiumSession *session, int browser, int x, int y,
+                           int w, int h, gboolean toolbar, gboolean menubar,
+                           gboolean status, gboolean resizable,
+                           gboolean fullscreen, gpointer data)
+{
+  (void) session; (void) data;
+  g_printerr ("demo: window-properties browser=%d x=%d y=%d w=%d h=%d "
+              "toolbar=%d menubar=%d status=%d resizable=%d fullscreen=%d\n",
+              browser, x, y, w, h, toolbar ? 1 : 0, menubar ? 1 : 0,
+              status ? 1 : 0, resizable ? 1 : 0, fullscreen ? 1 : 0);
 }
 
 /* A menu action that the helper executes is only half of a browser action:
@@ -1289,7 +1472,8 @@ find_bar_search (gboolean forward, gboolean next)
       return;
     }
 
-  chromium_session_find (demo.session, find_pattern, forward, find_match_case, next);
+  chromium_session_find (demo.session, 0, find_pattern, forward,
+                         find_match_case, next);
   g_printerr ("demo: find pattern=%s forward=%d match_case=%d next=%d\n",
               find_pattern, forward, find_match_case, next);
 }
@@ -1325,7 +1509,7 @@ static void
 find_bar_close (void)
 {
   if (demo.session)
-    chromium_session_stop_finding (demo.session, TRUE);
+    chromium_session_stop_finding (demo.session, 0, TRUE);
   g_printerr ("demo: find stop clear=1\n");
 
   if (demo.find_bar)
@@ -1353,17 +1537,17 @@ find_key_pressed (GtkEventControllerKey *controller, guint keyval,
     {
       if (keyval == GDK_KEY_plus || keyval == GDK_KEY_equal || keyval == GDK_KEY_KP_Add)
         {
-          chromium_session_zoom (demo.session, "in");
+          chromium_session_zoom (demo.session, 0, "in");
           return TRUE;
         }
       if (keyval == GDK_KEY_minus || keyval == GDK_KEY_KP_Subtract)
         {
-          chromium_session_zoom (demo.session, "out");
+          chromium_session_zoom (demo.session, 0, "out");
           return TRUE;
         }
       if (keyval == GDK_KEY_0 || keyval == GDK_KEY_KP_0)
         {
-          chromium_session_zoom (demo.session, "reset");
+          chromium_session_zoom (demo.session, 0, "reset");
           return TRUE;
         }
     }
@@ -1929,8 +2113,9 @@ static void
 session_cdp_event (ChromiumSession *session, int browser, const char *method,
                    const char *params, const char *message, gpointer data)
 {
-  g_printerr ("demo: cdp-event browser=%d method=%s message=%s\n",
-              browser, method ? method : "", message ? message : "");
+  g_printerr ("demo: cdp-event browser=%d method=%s params=%s message=%s\n",
+              browser, method ? method : "", params ? params : "",
+              message ? message : "");
 }
 
 /* The intercept question: the demo prints what arrived and answers nothing.
@@ -2580,25 +2765,25 @@ address_activate (GtkEntry *entry, gpointer data)
 
   /* A bare hostname still needs a scheme before Chromium will take it. */
   uri = strchr (text, ':') ? g_strdup (text) : g_strconcat ("https://", text, NULL);
-  chromium_session_load_uri (demo.session, uri);
+  chromium_session_load_uri (demo.session, 0, uri);
 }
 
 static void
 go_back_clicked (GtkButton *button, gpointer data)
 {
-  chromium_session_go_back (demo.session);
+  chromium_session_go_back (demo.session, 0);
 }
 
 static void
 go_forward_clicked (GtkButton *button, gpointer data)
 {
-  chromium_session_go_forward (demo.session);
+  chromium_session_go_forward (demo.session, 0);
 }
 
 static void
 reload_clicked (GtkButton *button, gpointer data)
 {
-  chromium_session_reload (demo.session, FALSE);
+  chromium_session_reload (demo.session, 0, FALSE);
 }
 
 static const char *
@@ -2681,6 +2866,8 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_view_source), NULL);
   g_signal_connect (demo.session, "view-source-error",
                     G_CALLBACK (session_view_source_error), NULL);
+  g_signal_connect (demo.session, "load-started",
+                    G_CALLBACK (session_load_started), NULL);
   g_signal_connect (demo.session, "load-end", G_CALLBACK (session_load_end), NULL);
   g_signal_connect (demo.session, "load-error",
                     G_CALLBACK (session_load_error), NULL);
@@ -2692,6 +2879,26 @@ build_toolbar (GtkHeaderBar *header)
                     G_CALLBACK (session_page_message), NULL);
   g_signal_connect (demo.session, "popup-requested",
                     G_CALLBACK (session_popup_requested), NULL);
+  g_signal_connect (demo.session, "browsers-changed",
+                    G_CALLBACK (session_browsers_changed), NULL);
+  g_signal_connect (demo.session, "auth-required",
+                    G_CALLBACK (session_auth_required), NULL);
+  g_signal_connect (demo.session, "auth-closed",
+                    G_CALLBACK (session_auth_closed), NULL);
+  g_signal_connect (demo.session, "client-cert-request",
+                    G_CALLBACK (session_client_cert_request), NULL);
+  g_signal_connect (demo.session, "client-cert-closed",
+                    G_CALLBACK (session_client_cert_closed), NULL);
+  g_signal_connect (demo.session, "tls-info",
+                    G_CALLBACK (session_tls_info), NULL);
+  g_signal_connect (demo.session, "scheme-request",
+                    G_CALLBACK (session_scheme_request), NULL);
+  g_signal_connect (demo.session, "scheme-closed",
+                    G_CALLBACK (session_scheme_closed), NULL);
+  g_signal_connect (demo.session, "screenshot-result",
+                    G_CALLBACK (session_screenshot_result), NULL);
+  g_signal_connect (demo.session, "window-properties",
+                    G_CALLBACK (session_window_properties), NULL);
   g_signal_connect (demo.session, "download-begin",
                     G_CALLBACK (session_download_begin), NULL);
   g_signal_connect (demo.session, "download-progress",
@@ -2794,6 +3001,39 @@ build_toolbar (GtkHeaderBar *header)
         chromium_session_set_auto_resize_bounds (demo.session, min_w, min_h,
                                                  max_w, max_h);
       chromium_session_set_auto_resize (demo.session, TRUE);
+    }
+  /* CEFNEST_SCHEMES: "name=flag,flag;name2" — the start-time half of the
+     host-served schemes; the data factories ride the script. */
+  if (g_getenv ("CEFNEST_SCHEMES"))
+    {
+      g_auto (GStrv) entries = g_strsplit (g_getenv ("CEFNEST_SCHEMES"), ";", -1);
+
+      for (guint i = 0; entries[i]; i++)
+        {
+          g_auto (GStrv) halves = g_strsplit (entries[i], "=", 2);
+          guint flags = 0;
+          struct { const char *name; guint bit; } bits[] = {
+            { "local", CHROMIUM_SCHEME_LOCAL },
+            { "display_isolated", CHROMIUM_SCHEME_DISPLAY_ISOLATED },
+            { "secure", CHROMIUM_SCHEME_SECURE },
+            { "cors", CHROMIUM_SCHEME_CORS },
+            { "fetch", CHROMIUM_SCHEME_FETCH },
+          };
+
+          if (!halves[0] || !*halves[0])
+            continue;
+          if (halves[1])
+            {
+              g_auto (GStrv) words = g_strsplit (halves[1], ",", -1);
+              for (guint w = 0; words[w]; w++)
+                for (gsize b = 0; b < G_N_ELEMENTS (bits); b++)
+                  if (g_strcmp0 (words[w], bits[b].name) == 0)
+                    flags |= bits[b].bit;
+            }
+          chromium_session_scheme_register (demo.session, halves[0], flags);
+          g_printerr ("demo: scheme registered %s flags=%u\n", halves[0],
+                      flags);
+        }
     }
 
   /* Scan and enable before start(): the .so files load against the model
@@ -3244,6 +3484,16 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
  * "request-respond <id> <allow|cancel|redirect> [url]",
  * "cdp-enable [browser]", "cdp-disable [browser]",
  * "cdp-execute <id> <method> [json-params]",
+ * "load-browser <id> <url>", "back-browser <id>", "forward-browser <id>",
+ * "reload-browser <id>", "zoom-browser <id> <action>", "new-window-geom <x> <y> <w> <h> [url]",
+ * "browsers", "history-go <index>", "helper-version",
+ * "auth-respond <user> <pass>", "auth-cancel", "client-cert-respond <id> <index>",
+ * "tls-info", "screenshot", "scheme-register <name> [flags]",
+ * "scheme-response <status> <content-type>", "scheme-body <b64>", "scheme-end",
+ * "script-add <id> <run_at> <pattern> <code-b64>",
+ * "script-add-for <id> <browser> <run_at> <pattern> <code-b64>", "script-remove <id>",
+ * "ua-set <value>", "ua-clear", "clear-cookies", "clear-cache", "clear-auth-cache",
+ * "clear-origin <origin>",
  * "popup-mode <window|popover>", "plugin-action <id>",
  * "file-dialog-respond <id> [path[;path…]]",
  * "close", "quit". This is how a headless run proves navigation, history and
@@ -3601,7 +3851,23 @@ script_run_next (void)
                             !strcmp (line, "clear-data") ||
                             !strncmp (line, "new-", 4) ||
                             !strncmp (line, "select-browser", 14) ||
-                            !strncmp (line, "close-browser", 13)))
+                            !strncmp (line, "close-browser", 13) ||
+                            !strncmp (line, "load-browser", 12) ||
+                            !strncmp (line, "back-browser", 12) ||
+                            !strncmp (line, "forward-browser", 15) ||
+                            !strncmp (line, "reload-browser", 14) ||
+                            !strncmp (line, "zoom-browser", 12) ||
+                            !strncmp (line, "scheme-", 7) ||
+                            !strncmp (line, "script-", 7) ||
+                            !strncmp (line, "auth-", 5) ||
+                            !strncmp (line, "client-cert-", 12) ||
+                            !strcmp (line, "tls-info") ||
+                            !strcmp (line, "screenshot") ||
+                            !strcmp (line, "browsers") ||
+                            !strncmp (line, "history-go", 10) ||
+                            !strcmp (line, "helper-version") ||
+                            !strncmp (line, "ua-set", 6) ||
+                            !strncmp (line, "clear-", 6)))
         {
           /* Not a step that was skipped: without a session no later line of this
            * script can show a page either, so the run has already failed. Print
@@ -3623,7 +3889,7 @@ script_run_next (void)
         }
       else if (!strncmp (line, "load ", 5))
         {
-          chromium_session_load_uri (demo.session, line + 5);
+          chromium_session_load_uri (demo.session, 0, line + 5);
           continue;
         }
       else if (!strcmp (line, "frames"))
@@ -3752,6 +4018,260 @@ script_run_next (void)
           chromium_session_close_browser (demo.session, atoi (line + 14));
           continue;
         }
+      else if (!strncmp (line, "load-browser ", 13) ||
+               !strncmp (line, "back-browser ", 13) ||
+               !strncmp (line, "forward-browser ", 16) ||
+               !strncmp (line, "reload-browser ", 15) ||
+               !strncmp (line, "zoom-browser ", 13))
+        {
+          /* The A.1 shape: navigation aimed at a background tab. */
+          g_auto (GStrv) parts = g_strsplit (line, " ", 3);
+          int id = parts[1] ? atoi (parts[1]) : 0;
+
+          if (g_str_has_prefix (line, "load-browser "))
+            chromium_session_load_uri (demo.session, id,
+                                       parts[2] ? parts[2] : "about:blank");
+          else if (g_str_has_prefix (line, "back-browser "))
+            chromium_session_go_back (demo.session, id);
+          else if (g_str_has_prefix (line, "forward-browser "))
+            chromium_session_go_forward (demo.session, id);
+          else if (g_str_has_prefix (line, "reload-browser "))
+            chromium_session_reload (demo.session, id, FALSE);
+          else if (parts[2])
+            chromium_session_zoom (demo.session, id, parts[2]);
+          continue;
+        }
+      else if (!strncmp (line, "new-window-geom ", 16))
+        {
+          /* new-window-geom <x> <y> <w> <h> [url] — the window.open features
+             a host's own policy would translate into this call. */
+          g_auto (GStrv) parts = g_strsplit (line + 16, " ", 5);
+          int x = parts[0] ? atoi (parts[0]) : 0;
+          int y = parts[1] ? atoi (parts[1]) : 0;
+          int w = parts[2] ? atoi (parts[2]) : 0;
+          int h = parts[3] ? atoi (parts[3]) : 0;
+
+          chromium_session_new_browser_with_geometry
+            (demo.session, parts[4] ? parts[4] : "about:blank", TRUE,
+             x, y, w, h);
+          continue;
+        }
+      else if (!strcmp (line, "browsers"))
+        {
+          /* The cache as it stands right now; ::browsers-changed logs the
+             pushes as they land. */
+          session_browsers_changed (demo.session, NULL);
+          continue;
+        }
+      else if (!strncmp (line, "history-go ", 11))
+        {
+          chromium_session_history_go (demo.session, 0, atoi (line + 11));
+          continue;
+        }
+      else if (!strcmp (line, "helper-version"))
+        {
+          g_printerr ("demo: helper-version %d\n",
+                      chromium_session_get_helper_version (demo.session));
+          continue;
+        }
+      else if (!strncmp (line, "auth-respond ", 13))
+        {
+          g_auto (GStrv) parts = g_strsplit (line + 13, " ", 2);
+
+          if (demo_auth_id == 0)
+            g_warning ("demo: no auth request is being held");
+          else
+            chromium_session_auth_respond (demo.session, demo_auth_id,
+                                           parts[0] ? parts[0] : "",
+                                           parts[1] ? parts[1] : "");
+          continue;
+        }
+      else if (!strcmp (line, "auth-cancel"))
+        {
+          if (demo_auth_id == 0)
+            g_warning ("demo: no auth request is being held");
+          else
+            chromium_session_auth_cancel (demo.session, demo_auth_id);
+          continue;
+        }
+      else if (!strncmp (line, "client-cert-respond ", 20))
+        {
+          g_auto (GStrv) parts = g_strsplit (line + 20, " ", 2);
+
+          chromium_session_client_cert_respond (demo.session,
+                                                parts[0] ? atoi (parts[0]) : 0,
+                                                parts[1] ? atoi (parts[1]) : -1);
+          continue;
+        }
+      else if (!strcmp (line, "tls-info"))
+        {
+          chromium_session_get_tls_info (demo.session,
+                                         (int) session_script.index, 0);
+          continue;
+        }
+      else if (!strncmp (line, "scheme-register ", 16))
+        {
+          /* scheme-register <name> [flags] — flags are the flag words
+             comma-joined (local,display_isolated,secure,cors,fetch). */
+          g_auto (GStrv) parts = g_strsplit (line + 16, " ", 2);
+          guint flags = 0;
+          struct { const char *name; guint bit; } bits[] = {
+            { "local", CHROMIUM_SCHEME_LOCAL },
+            { "display_isolated", CHROMIUM_SCHEME_DISPLAY_ISOLATED },
+            { "secure", CHROMIUM_SCHEME_SECURE },
+            { "cors", CHROMIUM_SCHEME_CORS },
+            { "fetch", CHROMIUM_SCHEME_FETCH },
+          };
+
+          if (parts[1])
+            {
+              g_auto (GStrv) words = g_strsplit (parts[1], ",", -1);
+              for (guint w = 0; words[w]; w++)
+                for (gsize b = 0; b < G_N_ELEMENTS (bits); b++)
+                  if (g_strcmp0 (words[w], bits[b].name) == 0)
+                    flags |= bits[b].bit;
+            }
+          chromium_session_scheme_register (demo.session,
+                                            parts[0] ? parts[0] : "", flags);
+          g_printerr ("demo: scheme-register %s flags=%u\n",
+                      parts[0] ? parts[0] : "", flags);
+          continue;
+        }
+      else if (!strncmp (line, "scheme-response ", 16))
+        {
+          /* scheme-response <status> <content-type> */
+          g_auto (GStrv) parts = g_strsplit (line + 16, " ", 2);
+
+          if (demo_scheme_id == 0)
+            g_warning ("demo: no scheme request is being served");
+          else
+            chromium_session_scheme_response
+              (demo.session, demo_scheme_id,
+               parts[0] ? atoi (parts[0]) : 200, "OK",
+               parts[1] && *parts[1] ? parts[1] : "text/html", NULL);
+          continue;
+        }
+      else if (!strncmp (line, "scheme-body ", 12))
+        {
+          /* The body rides base64, the same way script-add's code does: a
+             page is exactly the thing with spaces in it. */
+          gsize length = 0;
+          g_autofree guchar *body = g_base64_decode (line + 12, &length);
+          GBytes *bytes = g_bytes_new_take (g_steal_pointer (&body), length);
+
+          if (demo_scheme_id == 0)
+            g_warning ("demo: no scheme request is being served");
+          else
+            chromium_session_scheme_write (demo.session, demo_scheme_id,
+                                           bytes);
+          g_bytes_unref (bytes);
+          continue;
+        }
+      else if (!strcmp (line, "scheme-end"))
+        {
+          if (demo_scheme_id != 0)
+            {
+              chromium_session_scheme_end (demo.session, demo_scheme_id);
+              demo_scheme_id = 0;
+            }
+          else
+            g_warning ("demo: no scheme request is being served");
+          continue;
+        }
+      else if (!strncmp (line, "script-add-for ", 15) ||
+               !strncmp (line, "script-add ", 11))
+        {
+          /* script-add <id> <run_at> <pattern> <code-b64>, or the per-browser
+             form script-add-for <id> <browser> <run_at> <pattern> <code-b64>
+             — the code rides base64 because a script is exactly the thing
+             with spaces in it. */
+          gboolean scoped = line[10] == '-';
+          g_auto (GStrv) parts = g_strsplit (line + (scoped ? 15 : 11), " ", 5);
+          gsize length = 0;
+          g_autofree guchar *code = NULL;
+          int browser = 0;
+          const char *run_at;
+          const char *pattern;
+          const char *encoded;
+
+          if (g_strv_length (parts) < (scoped ? 5u : 4u))
+            {
+              g_warning ("demo: script-add wants <id> <run_at> <pattern> "
+                         "<code-b64>");
+              continue;
+            }
+          if (scoped)
+            {
+              browser = atoi (parts[1]);
+              run_at = parts[2];
+              pattern = parts[3];
+              encoded = parts[4];
+            }
+          else
+            {
+              run_at = parts[1];
+              pattern = parts[2];
+              encoded = parts[3];
+            }
+          code = g_base64_decode (encoded, &length);
+          {
+            g_autofree char *code_text = g_strndup ((gchar *) code, length);
+            const char *patterns[] = { pattern, NULL };
+
+            chromium_session_script_add (demo.session,
+                                         (guint) atoi (parts[0]), browser,
+                                         patterns, code_text, run_at, FALSE);
+          }
+          g_printerr ("demo: script-add id=%s browser=%d run_at=%s bytes=%zu\n",
+                      parts[0], browser, run_at, length);
+          continue;
+        }
+      else if (!strncmp (line, "script-remove ", 14))
+        {
+          chromium_session_script_remove (demo.session,
+                                          (guint) atoi (line + 14));
+          continue;
+        }
+      else if (!strncmp (line, "ua-set ", 7))
+        {
+          chromium_session_set_user_agent (demo.session, line + 7);
+          g_printerr ("demo: ua-set %s\n", line + 7);
+          continue;
+        }
+      else if (!strncmp (line, "ua-clear", 8))
+        {
+          chromium_session_set_user_agent (demo.session, "");
+          g_printerr ("demo: ua-set (cleared)\n");
+          continue;
+        }
+      else if (!strcmp (line, "screenshot"))
+        {
+          chromium_session_capture_screenshot (demo.session,
+                                               (int) session_script.index, 0);
+          continue;
+        }
+      else if (!strcmp (line, "clear-cookies") || !strcmp (line, "clear-cache") ||
+               !strcmp (line, "clear-auth-cache"))
+        {
+          guint types = !strcmp (line, "clear-cookies")
+                          ? CHROMIUM_CLEAR_COOKIES
+                          : !strcmp (line, "clear-cache")
+                              ? CHROMIUM_CLEAR_CACHE
+                              : CHROMIUM_CLEAR_HTTP_AUTH_CACHE;
+
+          chromium_session_clear_data_types (demo.session, types, NULL);
+          g_printerr ("demo: clear-data-types %s\n", line);
+          continue;
+        }
+      else if (!strncmp (line, "clear-origin ", 13))
+        {
+          const char *origins[] = { line + 13, NULL };
+
+          chromium_session_clear_data_types
+            (demo.session, CHROMIUM_CLEAR_ORIGIN_STORAGE, origins);
+          g_printerr ("demo: clear-data-types origin %s\n", line + 13);
+          continue;
+        }
       else if (!strncmp (line, "js-expr ", 8))
         {
           chromium_session_run_javascript_expression (demo.session, line + 8,
@@ -3827,12 +4347,12 @@ script_run_next (void)
         }
       else if (!strcmp (line, "history"))
         {
-          chromium_session_history (demo.session, (int) session_script.index);
+          chromium_session_history (demo.session, 0, (int) session_script.index);
           continue;
         }
       else if (!strcmp (line, "page-text"))
         {
-          chromium_session_page_text (demo.session, (int) session_script.index);
+          chromium_session_page_text (demo.session, 0, (int) session_script.index);
           continue;
         }
       else if (!strncmp (line, "print-pdf", 9))
@@ -3847,50 +4367,50 @@ script_run_next (void)
 
               settings.max_bytes = max_bytes;
               chromium_session_print_pdf_with_settings (
-                demo.session, (int) session_script.index, &settings);
+                demo.session, 0, (int) session_script.index, &settings);
             }
           else
-            chromium_session_print_pdf (demo.session,
+            chromium_session_print_pdf (demo.session, 0,
                                         (int) session_script.index);
           continue;
         }
       else if (!strcmp (line, "back"))
         {
-          chromium_session_go_back (demo.session);
+          chromium_session_go_back (demo.session, 0);
           continue;
         }      else if (!strcmp (line, "forward"))
         {
-          chromium_session_go_forward (demo.session);
+          chromium_session_go_forward (demo.session, 0);
           continue;
         }
       else if (!strcmp (line, "reload"))
         {
-          chromium_session_reload (demo.session, FALSE);
+          chromium_session_reload (demo.session, 0, FALSE);
           continue;
         }
       else if (!strcmp (line, "reload-hard"))
         {
-          chromium_session_reload (demo.session, TRUE);
+          chromium_session_reload (demo.session, 0, TRUE);
           continue;
         }
       else if (!strcmp (line, "stop"))
         {
-          chromium_session_stop_loading (demo.session);
+          chromium_session_stop_loading (demo.session, 0);
           continue;
         }
       else if (!strcmp (line, "zoom-in"))
         {
-          chromium_session_zoom (demo.session, "in");
+          chromium_session_zoom (demo.session, 0, "in");
           continue;
         }
       else if (!strcmp (line, "zoom-out"))
         {
-          chromium_session_zoom (demo.session, "out");
+          chromium_session_zoom (demo.session, 0, "out");
           continue;
         }
       else if (!strcmp (line, "zoom-reset"))
         {
-          chromium_session_zoom (demo.session, "reset");
+          chromium_session_zoom (demo.session, 0, "reset");
           continue;
         }
       else if (!strncmp (line, "zoom-set ", 9))
@@ -3903,7 +4423,7 @@ script_run_next (void)
               g_warning ("demo: zoom-set wants one level, got '%s'", line);
               continue;
             }
-          chromium_session_set_zoom_level (demo.session, level);
+          chromium_session_set_zoom_level (demo.session, 0, level);
           continue;
         }
       else if (!strncmp (line, "auto-resize ", 12))
@@ -4078,7 +4598,7 @@ script_run_next (void)
           /* The same request the context menu's 查看网页源代码 makes; the
            * answer is the ::view-source line below, which is what the source
            * gate grades. */
-          chromium_session_view_source (demo.session);
+          chromium_session_view_source (demo.session, 0);
           g_printerr ("demo: view-source requested\n");
           continue;
         }

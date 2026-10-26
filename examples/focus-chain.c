@@ -283,7 +283,7 @@ static void
 step_tab_backward_5 (void)
 {
   check ("shift-tab past the page's edge", "gtk2", focus_name ());
-  chromium_session_load_uri (session, PAGE_WITH_NOTHING);
+  chromium_session_load_uri (session, 0, PAGE_WITH_NOTHING);
   wait_then (loading_done, step_empty_page_2);
 }
 

@@ -66,7 +66,7 @@ storage 只在内存,随进程消失。
 | 领域 | 原生(`.so`) | Web(内容脚本 + `chrome.*`) |
 | --- | --- | --- |
 | 右键菜单 | `add_menu_item(label, slot, cb, user_data)`——slot 0–199,菜单 id 26600+slot | `chrome.contextMenus.create({title, onclick})`——slot 由宿主分配 |
-| 会话信号 | `subscribe("load-end", cb, …)`——按名字订阅任意 session 信号 | — |
+| 会话信号 | `subscribe("load-end", cb, …)`——按名字订阅任意 session 信号。回调携带信号自己的参数（`load-end` 是 `(session, browser, url, http_code, user_data)`），按旧签名写下的处理器必须跟着当前签名改 | — |
 | Action | `set_action(widget)`——宿主决定摆在哪 | `chrome.action.onClicked.addListener` |
 | 存储 | `storage_get` / `storage_set`(每 key 一段 JSON) | `chrome.storage.{local,session}`——`sync` 按本地实现并警告一次 |
 | 页面 | — | `chrome.runtime.{id, sendMessage, getURL, onMessage}`、`chrome.tabs.{query, update}`(id/url/title/active/windowed/muted/zoom) |

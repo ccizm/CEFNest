@@ -251,6 +251,9 @@ area, log domains that print nothing, teardown order — is in
 - `docs/control-channel.md` — the NDJSON protocol between session and helper
   (commands, events, the four interaction shapes). Only needed for custom
   helpers or direct channel work.
+- `docs/cef-features.zh-CN.md` — (简体中文) the CEF 156 interface-by-interface
+  status table: every handler, what is implemented, what is not, what is out
+  of scope, and the consequence of each gap.
 - `site/` — the project page (Vite + Vue + Bootstrap); `npm run dev` and
   `npm run build` inside it.
 

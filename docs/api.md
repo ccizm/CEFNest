@@ -15,22 +15,29 @@ samples for every group live in the [examples](../examples/README.md).
 | Group | Calls |
 | --- | --- |
 | Lifecycle | `chromium_session_new()` · `set_view()` · `start()` · `stop()` |
-| Data | `set_data_directory()` · `get_data_directory()` · `clear_data()`; the `data-directory` property — see [data-directory.md](data-directory.md) |
-| Navigation | `load_uri()` · `go_back()` · `go_forward()` · `reload()` · `stop_loading()` |
-| State | `get_uri()` · `get_title()` · `get_loading()` · `get_can_go_back()` · `get_can_go_forward()` · `get_running()` · `get_muted()` · `get_zoom_level()` · `get_frame_count()` · `get_helper_path()` |
+| Data | `set_data_directory()` · `get_data_directory()` · `clear_data()` (the whole directory); typed: `clear_data_types(types, origins)` — cache / cookies / HTTP auth cache / origin storage, the “清除数据” dialog's granularity; the `data-directory` property — see [data-directory.md](data-directory.md) |
+| Navigation | `load_uri(browser, uri)` · `go_back(browser)` · `go_forward(browser)` · `reload(browser, hard)` · `stop_loading(browser)` · `history_go(browser, index)` (the history jump the component implements over its own pipe; @browser 0 = active, an id names a background tab) |
+| State | `get_uri()` · `get_title()` · `get_loading()` · `get_can_go_back()` · `get_can_go_forward()` · `get_running()` · `get_muted()` · `get_zoom_level()` · `get_frame_count()` · `get_helper_path()` · `get_helper_version()` (the control-channel major the running helper reported) |
 | JavaScript | `run_javascript()` · `run_javascript_expression()` → answer on `::script-result` |
 | Downloads | answer `::download-begin` with `accept_download()` / `reject_download()`; in flight: `pause_download()` / `resume_download()` |
-| Find | `find()` · `stop_finding()` → answers on `::find-result` |
+| Find | `find(browser, …)` · `stop_finding(browser, clear)` → answers on `::find-result` |
 | Context menu | answer `::context-menu` with `context_menu_select()` / `context_menu_dismiss()` |
 | Permissions | answer `::permission-request` with `permission_respond()` |
 | Dialogs | answer `::js-dialog` with `js_dialog_respond()`; `::file-dialog` with `file_dialog_respond()` |
-| Tabs / windows | `new_browser()` · `new_background_browser()` (a resident hidden page: no window, no surface, never active) · `select_browser()` · `close_browser()` · `get_browser_surface()` (the session's measured id→surface pairing) |
-| View source | `view_source()` → answered by `::view-source` / `::view-source-error`; the `auto-source-window` property (default on) decides whether the component's window opens |
-| Page / misc | `set_muted()` · `set_zoom_level()` · `set_accessibility()` · `set_proxy()` / `set_proxy_bypass()` (before `start()`) · `set_accept_language()` (before `start()`) · `set_auto_resize()` / `set_auto_resize_bounds()` |
+| HTTP auth | answer `::auth-required` with `auth_respond(id, user, password)` / `auth_cancel(id)`; declined, the session cancels — the request dies with its 401, Chrome's own default |
+| Client certificates | answer `::client-cert-request` with `client_cert_respond(id, index)`; -1 (and the default) continues without a certificate |
+| TLS info | `get_tls_info(id, browser)` → `::tls-info` — the certificate facts about a loaded page (the address-bar lock's other half), over the component's own pipe |
+| Tabs / windows | `new_browser()` · `new_browser_with_geometry(url, windowed, x, y, w, h)` (the window.open features) · `new_background_browser()` (a resident hidden page: no window, no surface, never active) · `select_browser()` · `close_browser()` · `get_browser_surface()` · `browsers_list()` → a snapshot of the pushed table (see `::browsers-changed`) |
+| View source | `view_source(browser)` → answered by `::view-source` / `::view-source-error`; the `auto-source-window` property (default on) decides whether the component's window opens |
+| Page / misc | `set_muted()` · `set_zoom_level(browser, level)` · `zoom(browser, action)` · `set_accessibility()` · `set_proxy()` / `set_proxy_bypass()` (before `start()`) · `set_accept_language()` (before `start()`) · `set_auto_resize()` / `set_auto_resize_bounds()` |
+| User agent | the `user-agent` property (session-wide, live) · `browser_set_user_agent(browser, ua)` (one browser) — applied over the component's own pipe, survives renderer crashes, "" is Chromium's own |
+| Screenshots | `capture_screenshot(id, browser)` → `::screenshot-result` with the PNG bytes |
 | Cookies | `cookies_get()` / `cookies_set()` / `cookies_delete()` → answered by `::cookies-result` |
-| Page content | `page_text()` · `history()` · `print_pdf()` → answered by the `::page-text-*` / `::history-result` / `::pdf-*` families |
+| Page content | `page_text(browser, id)` · `history(browser, id)` · `print_pdf(browser, id)` → answered by the `::page-text-*` / `::history-result` / `::pdf-*` families |
+| Schemes | `scheme_register(name, flags)` · `scheme_unregister(name)`; answer `::scheme-request` with `scheme_response()` + `scheme_write()` + `scheme_end()` (or `scheme_abort()`); the flags ride `start()` like the proxy — see [control-channel.md](control-channel.md) |
+| Host scripts | `script_add(id, browser, patterns, code, run_at, all_frames)` · `script_remove(id)` — the user-script half; `document_start` runs before the page's inline scripts, and there is no isolated world |
 | Developer tools | `set_devtools_enabled()` · `get_devtools_enabled()`; the `devtools-enabled` property (default off) — see [Developer tools](../README.md#developer-tools) |
-| CDP pipe | `cdp_enable(browser)` opens it (one switch, per browser) · `cdp_execute(id, browser, method, params_json)` → `::cdp-result` · `cdp_disable(browser)`; every protocol event arrives on `::cdp-event` while the observer is on |
+| CDP pipe | `cdp_enable(browser)` opens it (one switch, per browser) · `cdp_execute(id, browser, method, params_json)` → `::cdp-result` · `cdp_disable(browser)`; every protocol event arrives on `::cdp-event` while the observer is on. The component's own features (history jumps, TLS info, UA, screenshots, typed clearing) never need this switch |
 | Certificates | answer `::certificate-error` with `certificate_respond(id, allow)`; `certificate_authorize(fingerprint)` trusts one certificate for this helper's lifetime |
 | Interception | `intercept_add(id, patterns, resource_types)` · `intercept_remove(id)` · `intercept_set_passive()`; answer `::request-intercept` with `request_respond(request_id, action, url)` |
 | Plugins | answer `::grant-request` (see below) |
@@ -40,9 +47,10 @@ samples for every group live in the [examples](../examples/README.md).
 | Signal | Carries | Notes |
 | --- | --- | --- |
 | `::changed` | — | uri / title / loading / back-forward / mute state moved |
-| `::ready` | — | helper handshake done |
-| `::load-end` | `url, http_code` | fires on failure too, with code 0 |
-| `::load-error` | `error_code, url, message` | a navigation that never committed |
+| `::ready` | — | helper handshake done; a helper whose protocol major differs from this session's is stopped here |
+| `::load-started` | `browser, url, transition, is_main_frame` | a navigation committed; the earliest fact a navigation offers |
+| `::load-end` | `browser, url, http_code` | exactly one end per navigation; fires on failure too, with code 0 |
+| `::load-error` | `browser, error_code, url, message` | exactly one error per failed navigation — Chromium's ERR_ABORTED echo is dropped |
 | `::renderer-exited` | `status, error_code, message` | the page's render process died |
 | `::script-result` | `id, ok, value, message` | answer to a `run_javascript` call |
 | `::download-begin` | `id, url, suggested_name, mime_type, total_bytes` | must be answered |
@@ -58,8 +66,10 @@ samples for every group live in the [examples](../examples/README.md).
 | `::loading-progress` | `progress` | 0.0–1.0; the final 1.0 may arrive more than once |
 | `::fullscreen-changed` | `fullscreen` | the page entered or left fullscreen; the helper also resizes its own CEF window |
 | `::browser-created` / `::browser-selected` / `::browser-closed` | `id, …` | tab and window lifecycle; `browser-created` carries `url, windowed, devtools, background` |
+| `::browsers-changed` | — | the browser table moved; `browsers_list()` now returns the new picture — the answer to "what are my background tabs doing" |
 | `::browser-surface` | `browser, surface` | the session's measured id→surface pairing; NULL when the surface goes away |
-| `::popup-requested` | `url` | target=_blank; foreground ones already navigated in place |
+| `::popup-requested` | `url, disposition, gesture, browser` | target=_blank / window.open / middle-click; the disposition tells a background tab from a foreground one. Foreground asks already navigated the asking browser in place |
+| `::window-properties` | `browser, x, y, w, h, toolbar, menubar, status, resizable, fullscreen` | a windowed browser's window, at creation and on bounds/fullscreen changes; this helper's windows are frameless, so toolbar/menubar/status are always FALSE |
 | `::page-message` | `json` | page called `cefnestPostMessage()`; reply via `run_javascript` |
 | `::primary-selection` / `::copy-text` / `::open-url` | `text` / `text` / `url` | selection bridge, menu copy, menu "open in new window" |
 | `::zoom-changed` | `level` | 0.0 = 100 %; also after each main-frame load |
@@ -69,6 +79,14 @@ samples for every group live in the [examples](../examples/README.md).
 | `::helper-exited` | — | the process has been reaped; destroy the display here |
 | `::certificate-error` → gboolean | `id, browser, error, url, subject, issuer, fingerprint` | the navigation is stopped until answered; return TRUE to decide, FALSE — or nothing connected — denies |
 | `::certificate-error-closed` | `id, browser` | the browser took the question away |
+| `::auth-required` → gboolean | `id, browser, is_proxy, scheme, realm, origin` | the request is stopped until answered; return TRUE to draw your own prompt, FALSE — or nothing connected — cancels, so the request dies with its 401 |
+| `::auth-closed` | `id, browser` | the question went away; answering it afterwards does nothing |
+| `::client-cert-request` → gboolean | `id, browser, origin, certs` | `certs` is a GList of `ChromiumClientCert` valid only during the emission; return TRUE to show your own picker, FALSE — or nothing connected — answers "none" |
+| `::client-cert-closed` | `id, browser` | the handshake went away |
+| `::tls-info` | `id, browser, ok, security_state, subject, issuer, fingerprint, valid_from, valid_to` | the answer to one `get_tls_info()`; the certificate fields are "" when the state carries none (plain http) |
+| `::scheme-request` → gboolean | `id, browser, url, method, headers` | a request to a scheme the host registered; return TRUE to serve it (response → writes → end), FALSE — or nothing connected — aborts it |
+| `::scheme-closed` | `id, browser` | the browser went away mid-request |
+| `::screenshot-result` | `id, browser, ok, png, message` | the answer to one `capture_screenshot()`; `png` is NULL on failure, with `message` naming why |
 | `::request-intercept` | `request_id, browser, url, method, resource_type, is_main_frame, headers` | the request is stopped until `request_respond()`; no default, no timeout |
 | `::request-intercept-closed` | `request_id, browser` | the browser closed under a held request |
 | `::cdp-result` | `id, ok, json, message` | the answer to one `cdp_execute()`; `message` is `cdp-too-large` past the channel's line limit |
@@ -130,8 +148,7 @@ inline scripts — measured), `document_end`/`document_idle` at load end. The
 component provides the `chrome.*` shim on top of one bridge function; the
 host adjudicates every call against the permission table. The subset, its
 seams, the payload ceiling and the isolation facts are in
-[docs/plugins.md](plugins.md) — read that before writing a plugin. The
-remaining work (surface pairing, background pages, `tabs` expansion) is
-planned in
-[`docs/plans/work-plan-2026-10-26.md`](plans/work-plan-2026-10-26.md).
+[docs/plugins.md](plugins.md) — read that before writing a plugin. Session
+restore needs nothing more from the component — see
+[docs/session-restore.md](session-restore.md) for the host-side recipe.
 

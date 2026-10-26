@@ -18,8 +18,11 @@ DEMO="$ROOT/builddir/src/cefnest-demo"
 . "$ROOT/test/helper-path.sh"
 PAGE="file://$ROOT/test/menu-page.html"
 TAB_PAGE="file://$ROOT/test/spellcheck-page.html"
+THIRD="file://$ROOT/test/find-page.html"
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+KEEP=${KEEP_LOGS:-0}
+trap '[ "$KEEP" = 1 ] && echo "  note: transcripts kept in $WORK" || rm -rf "$WORK"' 
+
 fails=0
 ok()  { printf '  ok   %s\n' "$1"; }
 bad() { printf '  FAIL %s\n' "$1"; fails=$((fails + 1)); }
@@ -55,6 +58,14 @@ expect() {
   fi
 }
 
+# The later scenarios have their own logs; the same assertion, a file argument.
+expect_in() { # expect_in <logfile> <pattern> <tag>
+  if grep -aqE "$2" "$1"; then ok "$3"; else
+    bad "$3"
+    tail -20 "$1" | sed 's/^/         /'
+  fi
+}
+
 expect 'browser created, id=1 ' 'first browser created'
 expect 'browser created, id=2 ' 'second browser created'
 expect 'new tab slot 2 in tab window' 'second browser is a tab'
@@ -67,6 +78,66 @@ expect 'browser 3 standalone window' 'third browser got a host window'
 expect 'new window slot 3' 'third browser is a standalone CefWindow'
 expect 'script 5 ok value=true' 'active tab is the spellcheck page'
 expect 'script 9 ok value=true' 'the remaining tab still answers after the close'
+
+
+# --- A.1: a background tab navigates on its own ------------------------------
+
+cat >"$WORK/inactive.session" <<SESSION
+load $PAGE
+wait 2000
+new-tab $TAB_PAGE
+wait 2000
+select-browser 1
+wait 800
+load-browser 2 $THIRD
+wait 3000
+back-browser 2
+wait 2500
+forward-browser 2
+wait 2500
+quit
+SESSION
+
+echo "== navigation aimed at a background tab"
+timeout --kill-after=10s 90 env GDK_BACKEND=wayland CHROMIUM_HELPER="$HELPER" \
+  CHROMIUM_SESSION_SCRIPT="$WORK/inactive.session" "$DEMO" \
+  >"$WORK/out2" 2>"$WORK/err2"
+rc=$?
+cat "$WORK/err2" >>"$WORK/out2"
+if [ $rc != 0 ]; then bad "inactive: demo exited $rc"; fi
+
+expect_in "$WORK/out2" 'browser-row id=2 url=.*find-page.html .*active=0' 'the background tab took the third page'
+expect_in "$WORK/out2" 'browser-row id=2 url=.*spellcheck-page.html .*active=0' 'back-browser 2 went back'
+expect_in "$WORK/out2" 'browser-row id=1 url=.*menu-page.html' 'browser 1 never moved'
+
+# --- A.3: the popup question carries disposition, gesture and browser --------
+
+POPUP_PAGE="file://$ROOT/test/popup-gate-page.html"
+
+cat >"$WORK/popup.session" <<SESSION
+load $POPUP_PAGE
+wait 2500
+click 200 150 274
+wait 1500
+click 200 150 272
+wait 2000
+quit
+SESSION
+
+echo "== popup-requested: middle click vs target=_blank"
+timeout --kill-after=10s 90 env GDK_BACKEND=wayland CHROMIUM_HELPER="$HELPER" \
+  CHROMIUM_SESSION_SCRIPT="$WORK/popup.session" "$DEMO" \
+  >"$WORK/out3" 2>"$WORK/err3"
+rc=$?
+cat "$WORK/err3" >>"$WORK/out3"
+if [ $rc != 0 ]; then bad "popup: demo exited $rc"; fi
+
+expect_in "$WORK/out3" 'demo: popup-requested browser=1 .*popup-target.html disposition=[0-9]+ gesture=1' \
+       'both asks name the asking browser and the gesture'
+BG=$(grep -aoE 'popup-requested browser=1 [^ ]* disposition=[0-9]+' "$WORK/out3" |
+     grep -oE 'disposition=[0-9]+' | sort -u | wc -l)
+if [ "$BG" -ge 2 ]; then ok 'the two dispositions differ'
+else bad "the two dispositions differ ($(grep -a 'popup-requested' "$WORK/out3" | head -2 | tr '\n' ' '))"; fi
 
 echo
 if [ $fails = 0 ]; then printf 'multi-browser gate: all checks passed\n'

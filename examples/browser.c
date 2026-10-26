@@ -115,37 +115,37 @@ on_entry_activate (GtkEntry *entry, gpointer data)
   const char *text = gtk_editable_get_text (GTK_EDITABLE (entry));
 
   if (text && *text)
-    chromium_session_load_uri (browser.session, text);
+    chromium_session_load_uri (browser.session, 0, text);
 }
 
 static void
 on_back (GtkButton *button, gpointer data)
 {
-  chromium_session_go_back (browser.session);
+  chromium_session_go_back (browser.session, 0);
 }
 
 static void
 on_forward (GtkButton *button, gpointer data)
 {
-  chromium_session_go_forward (browser.session);
+  chromium_session_go_forward (browser.session, 0);
 }
 
 static void
 on_reload (GtkButton *button, gpointer data)
 {
-  chromium_session_reload (browser.session, FALSE);
+  chromium_session_reload (browser.session, 0, FALSE);
 }
 
 static void
 on_stop (GtkButton *button, gpointer data)
 {
-  chromium_session_stop_loading (browser.session);
+  chromium_session_stop_loading (browser.session, 0);
 }
 
 static void
 on_zoom_out (GtkButton *button, gpointer data)
 {
-  chromium_session_zoom (browser.session, "out");
+  chromium_session_zoom (browser.session, 0, "out");
 }
 
 static void
@@ -153,13 +153,13 @@ on_zoom_reset (GtkButton *button, gpointer data)
 {
   /* Chromium persists zoom per origin, so "reset" writes this origin's stored
    * level back to 100 % — the next visit starts there. */
-  chromium_session_zoom (browser.session, "reset");
+  chromium_session_zoom (browser.session, 0, "reset");
 }
 
 static void
 on_zoom_in (GtkButton *button, gpointer data)
 {
-  chromium_session_zoom (browser.session, "in");
+  chromium_session_zoom (browser.session, 0, "in");
 }
 
 static void

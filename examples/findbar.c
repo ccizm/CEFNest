@@ -61,7 +61,7 @@ do_find (gboolean forward, gboolean next)
   /* match_case FALSE: search case-insensitively, which is what a toolbar
    * usually means. @next FALSE starts a new search, TRUE steps the running
    * one. */
-  chromium_session_find (find.session, pattern, forward, FALSE, next);
+  chromium_session_find (find.session, 0, pattern, forward, FALSE, next);
 }
 
 static void
@@ -87,7 +87,7 @@ on_close_find (GtkButton *button, gpointer data)
 {
   /* Ends the search; clear_selection=TRUE also drops the highlight Chromium
    * painted on the match. stop_finding answers nothing. */
-  chromium_session_stop_finding (find.session, TRUE);
+  chromium_session_stop_finding (find.session, 0, TRUE);
   set_status ("");
   gtk_revealer_set_reveal_child (GTK_REVEALER (find.bar), FALSE);
 }

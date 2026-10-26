@@ -229,6 +229,8 @@ demo 还接受 `--data-dir=<绝对路径>`（见
   `chrome.*` 子集与它的接缝、隔离事实。
 - `docs/control-channel.zh-CN.md` —— session 与 helper 之间的 NDJSON 协议
   （命令、事件、四种交互形态）。只有自行编写 helper 或直接驱动通道时才需要。
+- `docs/cef-features.zh-CN.md` —— CEF 156 逐接口的实现状态表：接了哪些 handler、
+  哪些没接、哪些明确不做，以及每个缺口的实际后果。
 - `site/` —— 项目主页（Vite + Vue + Bootstrap）；在目录里运行 `npm run dev`
   或 `npm run build`。
 

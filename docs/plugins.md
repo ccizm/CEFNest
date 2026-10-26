@@ -77,7 +77,7 @@ in memory and dies with the process.
 | Area | Native (`.so`) | Web (content scripts + `chrome.*`) |
 | --- | --- | --- |
 | Context menu | `add_menu_item(label, slot, cb, user_data)` — slot 0–199, menu id 26600+slot | `chrome.contextMenus.create({title, onclick})` — the host allocates the slot |
-| Session signals | `subscribe("load-end", cb, …)` — any session signal by name | — |
+| Session signals | `subscribe("load-end", cb, …)` — any session signal by name. The callback carries the signal's own parameters (`load-end` is `(session, browser, url, http_code, user_data)`), so a handler written against an older signature has to follow the current one | — |
 | Action | `set_action(widget)` — the host places it | `chrome.action.onClicked.addListener` |
 | Storage | `storage_get` / `storage_set` (JSON per key) | `chrome.storage.{local,session}` — `sync` aliases local and warns once |
 | Pages | — | `chrome.runtime.{id, sendMessage, getURL, onMessage}`, `chrome.tabs.{query, update}` (id/url/title/active/windowed/muted/zoom) |

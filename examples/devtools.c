@@ -265,25 +265,25 @@ on_entry_activate (GtkEntry *entry, gpointer data)
   const char *text = gtk_editable_get_text (GTK_EDITABLE (entry));
 
   if (text && *text)
-    chromium_session_load_uri (devtools.session, text);
+    chromium_session_load_uri (devtools.session, 0, text);
 }
 
 static void
 on_back (GtkButton *button, gpointer data)
 {
-  chromium_session_go_back (devtools.session);
+  chromium_session_go_back (devtools.session, 0);
 }
 
 static void
 on_forward (GtkButton *button, gpointer data)
 {
-  chromium_session_go_forward (devtools.session);
+  chromium_session_go_forward (devtools.session, 0);
 }
 
 static void
 on_reload (GtkButton *button, gpointer data)
 {
-  chromium_session_reload (devtools.session, FALSE);
+  chromium_session_reload (devtools.session, 0, FALSE);
 }
 
 static GtkWidget *

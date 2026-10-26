@@ -142,10 +142,26 @@ void               chromium_session_get_commit_stats (ChromiumSession *self,
  * is what makes ::browser-closed land for the first tab too
  * (measured by test/multi-browser-gate.sh).
  * An unknown @id answers status: no-such-browser, which is how a host can tell
- * "already gone" from "nothing was asked". */
+ * "already gone" from "nothing was asked".
+ *
+ * chromium_session_new_browser_with_geometry () is the windowed form that
+ * opens the CEF window at a size and place — the window.open features a
+ * host's own popup policy arrives with. @x/@y/@width/@height are logical
+ * pixels; a @width or @height of 0 keeps the helper's default window bounds.
+ * The window answers with ::window-properties (browser, x, y, w, h, toolbar,
+ * menubar, status, resizable, fullscreen) as it is created and whenever its
+ * bounds or fullscreen state change: this helper's windows are frameless, so
+ * toolbar/menubar/status are always FALSE and @resizable TRUE — the fields
+ * are the host's window.open picture, reported, not granted. */
 void               chromium_session_new_browser   (ChromiumSession *self,
                                                    const char *url,
                                                    gboolean windowed);
+void               chromium_session_new_browser_with_geometry
+                                                  (ChromiumSession *self,
+                                                   const char *url,
+                                                   gboolean windowed,
+                                                   int x, int y,
+                                                   int width, int height);
 /* A background page: the browser runs with no window and no surface, hidden
  * from Chromium's own point of view, so timers and network keep running but
  * nothing is drawn and no toplevel appears on the nested compositor. This is
@@ -173,24 +189,69 @@ void               chromium_session_close_browser  (ChromiumSession *self,
 NestedSurface     *chromium_session_get_browser_surface (ChromiumSession *self,
                                                          int id);
 
-void               chromium_session_load_uri      (ChromiumSession *self,
-                                                   const char *uri);
-void               chromium_session_go_back       (ChromiumSession *self);
-void               chromium_session_go_forward    (ChromiumSession *self);
-void               chromium_session_reload        (ChromiumSession *self,
-                                                   gboolean hard);
-void               chromium_session_stop_loading  (ChromiumSession *self);
-/* ::load-error (error_code, url, message) is a navigation that never committed:
- * Chromium's own net error code (negative) and its name ("ERR_NAME_NOT_RESOLVED").
- * ::load-end still fires for the same navigation with HTTP code 0, so a host that
- * needs to tell "loaded" from "did not load" has to listen here — and one failure
- * reports twice, the real code first and then ERR_ABORTED (-3) about a second
- * later. Both are passed through as they arrive, unfiltered.
+/* The browser table, the session-side twin of the helper's slot list and the
+ * answer to "what are my background tabs doing right now". The helper pushes
+ * the whole table on every change — a browser created, closed or selected, a
+ * title or address changing, a mute or zoom landing — and ::browsers-changed
+ * says the copy below is new; the reads between changes come from the
+ * session's cache, so a host polling background-tab state never has to select
+ * anything first. DevTools and background browsers are not in the table: the
+ * first is not a tab, the second shows nothing.
  *
- * ::renderer-exited (status, error_code, message) is the render process dying:
- * status 0 abnormal exit, 1 killed, 2 crashed (SIGSEGV), 3 out of memory. Nothing
- * else reports it — the surface keeps the last frame and every later command goes
- * unanswered, so a page that stops moving is what it looks like from outside. */
+ * The returned array is newly allocated and holds @length entries in the
+ * helper's own order; free each row with
+ * chromium_session_browser_info_free (). NULL (with @length 0) means no
+ * helper is running or none has reported yet. */
+typedef struct {
+  int       id;
+  char     *url;
+  char     *title;
+  gboolean  active;
+  gboolean  windowed;
+  gboolean  muted;
+  double    zoom;      /* CEF zoom level, 0.0 = 100 % */
+} ChromiumBrowserInfo;
+
+ChromiumBrowserInfo *chromium_session_browsers_list (ChromiumSession *self,
+                                                     gsize *length);
+void               chromium_session_browser_info_free
+                                                  (ChromiumBrowserInfo *info);
+
+/* Navigation, zoom, find and view-source name the browser they mean: @browser
+ * 0 is the active one (the convention the multi-browser commands already
+ * keep), any other id is that browser — including a background tab, which is
+ * the point. An unknown id answers status: no-such-browser on the channel and
+ * nothing else; the navigation simply does not happen. */
+void               chromium_session_load_uri      (ChromiumSession *self,
+                                                   int browser,
+                                                   const char *uri);
+void               chromium_session_go_back       (ChromiumSession *self,
+                                                   int browser);
+void               chromium_session_go_forward    (ChromiumSession *self,
+                                                   int browser);
+void               chromium_session_reload        (ChromiumSession *self,
+                                                   int browser,
+                                                   gboolean hard);
+void               chromium_session_stop_loading  (ChromiumSession *self,
+                                                   int browser);
+/* ::load-started (browser, url, transition, is_main_frame) is a navigation
+ * that committed — main frame or not, with the @transition bitmask Chromium
+ * assigned it and @is_main_frame to sort the two apart. It is the earliest
+ * fact a navigation offers: CEF has no "about to start" callback that
+ * survives a navigation which fails before commit, and a failed one never
+ * reaches here at all. Fire-and-forget.
+ *
+ * ::load-end (browser, url, http_code) and ::load-error (browser, error_code,
+ * url, message) close the navigation. The contract since the lifecycle landed:
+ * exactly one ::load-error per failed navigation — Chromium's own net-error
+ * code (negative) and its name ("ERR_NAME_NOT_RESOLVED") — followed by exactly
+ * one ::load-end with HTTP code 0, and never the ERR_ABORTED echo Chromium
+ * sends a second behind the real error. A successful navigation is a
+ * ::load-end with the HTTP code and no error. ::renderer-exited (status,
+ * error_code, message) is the render process dying: status 0 abnormal exit,
+ * 1 killed, 2 crashed (SIGSEGV), 3 out of memory. Nothing else reports it —
+ * the surface keeps the last frame and every later command goes unanswered,
+ * so a page that stops moving is what it looks like from outside. */
 /* Results arrive on the ::script-result signal, with the same @id:
  * (id, ok, value, message), where @value is the result as JSON text — "null"
  * for a script that returned nothing. @ok is TRUE only when the script ran
@@ -231,12 +292,16 @@ void               chromium_session_run_javascript_expression (ChromiumSession *
  * very large payload does *inside* CEF's process-to-process message has never
  * been measured here, so treat delivery of an oversized one as unverified. */
 
-/* ::popup-requested (url) — a target=_blank, window.open or middle-click that
- * asks for a new window. Only the URL is in the signal: the disposition and the
- * gesture stay on the socket event, so the host cannot tell from here whether the
- * page wanted a background tab or a foreground window, and the helper has already
- * acted — foreground requests navigate this view in place, a background tab is
- * reported and left alone (docs/control-channel.md). */
+/* ::popup-requested (url, disposition, gesture, browser) — a target=_blank,
+ * window.open or middle-click that asks for a new window. @disposition is
+ * Chromium's own numeric window-open disposition (1 = foreground tab,
+ * 2 = background tab, 4 = new window among them), @gesture says whether a
+ * user action asked, and @browser names the tab that opened it — a popup can
+ * be requested from a background tab, and epiphany telling a middle-click
+ * background tab from a target=_blank foreground one reads these three.
+ * The helper has already acted: foreground requests navigate the asking
+ * browser in place, a background tab is reported and left alone
+ * (docs/control-channel.md). */
 
 /* The page's sound leaves the helper through its own audio process and lands on
  * the host's speakers, so this is the only switch the
@@ -251,14 +316,17 @@ void               chromium_session_set_muted     (ChromiumSession *self,
  * Chromium persists zoom per origin, so a navigation to an origin with a stored
  * level is what the page gets, not necessarily 0. The helper answers with
  * ::zoom-changed (level) after a zoom command and after each main-frame load,
- * and chromium_session_get_zoom_level () returns the last level it reported.
- * 0.0 is 100 %. */
+ * and chromium_session_get_zoom_level () returns the last level the *active*
+ * browser reported; a background tab's level arrives through the browsers
+ * table instead. 0.0 is 100 %. */
 void               chromium_session_zoom             (ChromiumSession *self,
+                                                      int browser,
                                                       const char *action);
 /* Set one explicit zoom level (0.0 = 100 %, 0.5 = one Chrome UI step). The
  * helper reads it back and answers with ::zoom-changed, exactly like the
  * relative commands. */
 void               chromium_session_set_zoom_level   (ChromiumSession *self,
+                                                      int browser,
                                                       double level);
 double             chromium_session_get_zoom_level   (ChromiumSession *self);
 
@@ -320,7 +388,8 @@ void               chromium_session_resume_download (ChromiumSession *self,
  * opens its own read-only source window; set it to FALSE to keep only the
  * signal and draw a window of your own. The @source string is only valid
  * during the signal emission — copy it to keep it. */
-void               chromium_session_view_source   (ChromiumSession *self);
+void               chromium_session_view_source   (ChromiumSession *self,
+                                                   int browser);
 
 /* Browser data and page extraction. Each call is answered by one signal keyed
  * by the @id the host passes in — the helper is free to take its time, and two
@@ -379,14 +448,30 @@ void               chromium_session_cookies_delete (ChromiumSession *self,
                                                      int id,
                                                      const char *url,
                                                      const char *name);
+/* The browser a read names: @browser 0 is the active one, any other id is
+ * that browser — a background tab's text, history or PDF is the point. */
 void               chromium_session_page_text      (ChromiumSession *self,
+                                                     int browser,
                                                      int id);
 void               chromium_session_history        (ChromiumSession *self,
+                                                     int browser,
                                                      int id);
+/* The one history jump CEF's public API has no button for, implemented inside
+ * the component over its own DevTools pipe — the host never enables cdp for
+ * it and never sees the protocol. @index is the same number space
+ * ::history-result reports: 0 is the oldest entry the helper still holds, and
+ * `current_index` from the last ::history-result is where the page sits now.
+ * There is no receipt: the jump lands as the usual ::address /
+ * ::load-started / ::load-end run. */
+void               chromium_session_history_go     (ChromiumSession *self,
+                                                     int browser,
+                                                     int index);
 void               chromium_session_print_pdf      (ChromiumSession *self,
+                                                     int browser,
                                                      int id);
 void               chromium_session_print_pdf_with_settings
                                                    (ChromiumSession *self,
+                                                     int browser,
                                                      int id,
                                                      const ChromiumPdfSettings *settings);
 
@@ -405,11 +490,13 @@ void               chromium_session_print_pdf_with_settings
  * chromium_session_stop_finding () ends the search and answers nothing;
  * @clear_selection=TRUE also drops the highlight Chromium put on the match. */
 void               chromium_session_find          (ChromiumSession *self,
+                                                   int browser,
                                                    const char *pattern,
                                                    gboolean forward,
                                                    gboolean match_case,
                                                    gboolean next);
 void               chromium_session_stop_finding   (ChromiumSession *self,
+                                                   int browser,
                                                    gboolean clear_selection);
 
 /* The page's context menu. Chromium builds the model — every item it offers,
@@ -621,6 +708,204 @@ void               chromium_session_cdp_execute (ChromiumSession *self,
                                                    int id, int browser,
                                                    const char *method,
                                                    const char *params_json);
+
+/* HTTP authentication. A 401 (or a proxy's 407) stops the request where it
+ * stands and only the host can answer it:
+ *
+ * ::auth-required (id, browser, is_proxy, scheme, realm, origin) arrives
+ * parked. @scheme is "basic", "digest", … and @realm the challenge's realm;
+ * @origin is the URL that asked. A handler that draws its own prompt returns
+ * %TRUE and owes exactly one of the two calls below. Returning %FALSE — or
+ * connecting nothing — cancels, which is Chrome's own default: the request
+ * fails with its 401 and the page shows what a browser without the password
+ * would show.
+ *
+ * ::auth-closed (id, browser) says the question went away — the browser
+ * navigated, closed, or answered the challenge itself — and answering that
+ * @id afterwards does nothing. Unlike a certificate error, the same origin
+ * re-asks per request: a host that wants to remember takes the credentials
+ * into its own store. */
+void               chromium_session_auth_respond (ChromiumSession *self,
+                                                   int id,
+                                                   const char *user,
+                                                   const char *password);
+void               chromium_session_auth_cancel  (ChromiumSession *self,
+                                                   int id);
+
+/* Client certificate selection. An HTTPS server (or proxy) that asks for a
+ * client certificate parks this question:
+ *
+ * ::client-cert-request (id, browser, origin, certs) — @origin is
+ * "host:port", @certs a GList of ChromiumClientCert (owned by the session for
+ * the duration of the emission) already pruned by Chromium to the issuers the
+ * server trusts. The host answers by index with
+ * chromium_session_client_cert_respond (); -1 (and the default, when no
+ * handler returns TRUE) means "continue without a certificate", which is the
+ * Chrome answer and the only one that cannot leak a private key nobody asked
+ * the user about. */
+typedef struct {
+  char *subject;
+  char *issuer;
+  char *fingerprint;   /* SHA-256 of the DER, hex; "" when unreadable */
+} ChromiumClientCert;
+
+/* One certificate out of a ::client-cert-request list, and the list itself
+ * (a host that kept the list past the emission owns these frees). */
+void               chromium_client_cert_free       (ChromiumClientCert *cert);
+void               chromium_client_cert_list_free  (GList *certs);
+
+void               chromium_session_client_cert_respond
+                                                  (ChromiumSession *self,
+                                                   int id,
+                                                   int index);
+
+/* The certificate facts about a *successful* page — the address-bar lock's
+ * other half. Error paths have ::certificate-error; a normal https page has
+ * this one read. The answer is one ::tls-info (id, browser, ok,
+ * security_state, subject, issuer, fingerprint, valid_from, valid_to):
+ * @security_state is Chromium's own word ("secure", "insecure", …), the
+ * certificate fields describe the leaf ("" when the state carries none —
+ * plain http, for one), @fingerprint is the SHA-256 of the DER as hex, and
+ * @valid_from/@valid_to are Unix seconds. @ok FALSE means the read could not
+ * be made (no browser, no page); the fields are then all "". A page that is
+ * still loading answers with what it has at the moment of the call.
+ * @browser 0 is the active browser. */
+void               chromium_session_get_tls_info  (ChromiumSession *self,
+                                                   int id,
+                                                   int browser);
+
+/* Host-served schemes. epiphany's ephy-about:, ephy-reader: and friends are
+ * URLs Chromium would otherwise refuse; this registers the scheme with
+ * Chromium *and* names the host as its data source:
+ *
+ * chromium_session_scheme_register () declares the scheme — the flags are
+ * CEF's scheme options, and they are read by the next start() (the registrar
+ * CEF hands out exists only at process start, exactly like proxy and
+ * accept-language); the data factory half is attached to a running helper
+ * immediately and re-attached on every ::ready. With no flags set the scheme
+ * is standard + secure + fetchable, the shape an about-style page wants;
+ * add CHROMIUM_SCHEME_DISPLAY_ISOLATED to keep other origins from reading it
+ * (the about-page security model) and CHROMIUM_SCHEME_CORS to allow cross-
+ * origin reads. The name must match [a-z][a-z0-9+.-]* and may not override a
+ * built-in scheme or cefnest-extension.
+ *
+ * Every request to a registered scheme then parks:
+ *   ::scheme-request (id, browser, url, method, headers)  @headers is one
+ *     flat JSON object text; a handler returns TRUE and answers with
+ *     chromium_session_scheme_response () (status, reason, content_type and
+ *     optional response headers in the same flat shape), then streams the
+ *     body with chromium_session_scheme_write () — 48 KiB pieces or less —
+ *     and closes with chromium_session_scheme_end (). Returning FALSE — or
+ *     connecting nothing — aborts the request: the component does not invent
+ *     page data. chromium_session_scheme_abort () takes a request back before
+ *     the host has answered. ::scheme-closed (id, browser) says the browser
+ *     went away mid-request.
+ *
+ * Nothing is retained across helper restarts except the registration itself,
+ * which rides start() like the rest of the network identity. */
+typedef enum {
+  CHROMIUM_SCHEME_LOCAL            = 1 << 0,
+  CHROMIUM_SCHEME_DISPLAY_ISOLATED = 1 << 1,
+  CHROMIUM_SCHEME_SECURE           = 1 << 2,
+  CHROMIUM_SCHEME_CORS             = 1 << 3,
+  CHROMIUM_SCHEME_FETCH            = 1 << 4,
+} ChromiumSchemeFlags;
+
+void               chromium_session_scheme_register   (ChromiumSession *self,
+                                                       const char *name,
+                                                       guint flags);
+void               chromium_session_scheme_unregister (ChromiumSession *self,
+                                                       const char *name);
+void               chromium_session_scheme_response   (ChromiumSession *self,
+                                                       int id,
+                                                       int status,
+                                                       const char *reason,
+                                                       const char *content_type,
+                                                       const char *headers_json);
+void               chromium_session_scheme_write      (ChromiumSession *self,
+                                                       int id,
+                                                       GBytes *data);
+void               chromium_session_scheme_end        (ChromiumSession *self,
+                                                       int id);
+void               chromium_session_scheme_abort      (ChromiumSession *self,
+                                                       int id);
+
+/* Host scripts — the user-script half, the component-side twin of a plugin's
+ * content scripts. chromium_session_script_add () registers @id → @code with
+ * @patterns (Chrome match-pattern syntax) and a run time ("document_start",
+ * "document_end", "document_idle"; the default is "document_idle"). @browser
+ * 0 means every browser of this session, any other id only that one;
+ * @all_frames widens the run from main frames to every frame matching.
+ * Re-adding an id replaces it; chromium_session_script_remove () takes it
+ * back out. Nothing is retained across helper restarts.
+ *
+ * document_start runs before the page's own inline scripts (the renderer-side
+ * path the plugin content scripts measured); document_end and document_idle
+ * both land at main-frame load end. There is no isolated world: the script
+ * runs in the page's own JavaScript domain and can be read, broken or
+ * overwritten by the page — that is the point of a user script, and the
+ * boundary a host must not pretend is harder than it is. */
+void               chromium_session_script_add    (ChromiumSession *self,
+                                                   guint id,
+                                                   int browser,
+                                                   const char *const *patterns,
+                                                   const char *code,
+                                                   const char *run_at,
+                                                   gboolean all_frames);
+void               chromium_session_script_remove (ChromiumSession *self,
+                                                   guint id);
+
+/* The user agent, as a property instead of an environment variable. The
+ * global form covers every browser of this session, current and future; the
+ * per-browser form overrides one browser. An empty string is "Chromium's
+ * own". The component applies it over its own DevTools pipe — the host never
+ * enables cdp for it — and re-applies it after a renderer crash, so the
+ * switcher a UA-swap env var used to require a restart for is now a live
+ * property. Reading back returns the global form only. */
+void               chromium_session_set_user_agent (ChromiumSession *self,
+                                                    const char *user_agent);
+const char        *chromium_session_get_user_agent (ChromiumSession *self);
+void               chromium_session_browser_set_user_agent
+                                                  (ChromiumSession *self,
+                                                   int browser,
+                                                   const char *user_agent);
+
+/* A screenshot of one browser's page as PNG. The answer is one
+ * ::screenshot-result (id, browser, ok, png, message): @png holds the bytes
+ * on success (@ok TRUE) and is NULL otherwise, with @message saying why —
+ * including "screenshot-too-large", the channel's line ceiling. @browser 0 is
+ * the active browser. The image is the page as Chromium composes it, so a
+ * snapshot-service thumbnail does not need the compositor's texture readback
+ * to get one. */
+void               chromium_session_capture_screenshot (ChromiumSession *self,
+                                                        int id,
+                                                        int browser);
+
+/* Typed data clearing, the "清除数据" dialog's granularity. @types is a
+ * bitmask of the values below; @origins (used only with
+ * CHROMIUM_CLEAR_ORIGIN_STORAGE) is a list of origins ("https://example.com")
+ * whose storage to forget — an empty list clears nothing for that type. Cache,
+ * cookies and the HTTP auth cache are profile-wide facts, not per-tab ones.
+ * This runs over the component's own pipe and is fire-and-forget: a host
+ * confirms with its own reads (cookies-get, a refetched page). It coexists
+ * with chromium_session_clear_data (), which is the whole-directory form. */
+typedef enum {
+  CHROMIUM_CLEAR_CACHE            = 1 << 0,
+  CHROMIUM_CLEAR_COOKIES          = 1 << 1,
+  CHROMIUM_CLEAR_HTTP_AUTH_CACHE  = 1 << 2,
+  CHROMIUM_CLEAR_ORIGIN_STORAGE   = 1 << 3,
+} ChromiumClearDataType;
+
+void               chromium_session_clear_data_types (ChromiumSession *self,
+                                                      guint types,
+                                                      const char *const *origins);
+
+/* The control-channel version the running helper reported in ::ready — the
+ * major half of the handshake. 0 means no helper is running or none has
+ * reported. The session refuses a helper whose major differs from its own
+ * (the whole protocol has moved under the host); the minor is informational,
+ * which is what a host that only wants to log the mismatch reads. */
+int                chromium_session_get_helper_version (ChromiumSession *self);
 
 /* ::loading-progress (progress) reports a load in flight as a number between 0
  * and 1, for a host that draws its own progress bar. Fire-and-forget: the next

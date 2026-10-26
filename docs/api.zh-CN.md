@@ -12,22 +12,29 @@
 | 分组 | 调用 |
 | --- | --- |
 | 生命周期 | `chromium_session_new()` · `set_view()` · `start()` · `stop()` |
-| 数据目录 | `set_data_directory()` · `get_data_directory()` · `clear_data()`；`data-directory` 属性——见 [data-directory.zh-CN.md](data-directory.zh-CN.md) |
-| 导航 | `load_uri()` · `go_back()` · `go_forward()` · `reload()` · `stop_loading()` |
-| 状态 | `get_uri()` · `get_title()` · `get_loading()` · `get_can_go_back()` · `get_can_go_forward()` · `get_running()` · `get_muted()` · `get_zoom_level()` · `get_frame_count()` · `get_helper_path()` |
+| 数据目录 | `set_data_directory()` · `get_data_directory()` · `clear_data()`（整目录删）；分类型：`clear_data_types(types, origins)`——缓存 / cookies / HTTP 认证缓存 / 源存储，“清除数据”首选项的粒度；`data-directory` 属性——见 [data-directory.zh-CN.md](data-directory.zh-CN.md) |
+| 导航 | `load_uri(browser, uri)` · `go_back(browser)` · `go_forward(browser)` · `reload(browser, hard)` · `stop_loading(browser)` · `history_go(browser, index)`（组件全管道实现的历史跳转；browser 0=活动，id 指后台标签） |
+| 状态 | `get_uri()` · `get_title()` · `get_loading()` · `get_can_go_back()` · `get_can_go_forward()` · `get_running()` · `get_muted()` · `get_zoom_level()` · `get_frame_count()` · `get_helper_path()` · `get_helper_version()`（运行中 helper 上报的通道大版本） |
 | JavaScript | `run_javascript()` · `run_javascript_expression()` → 结果通过 `::script-result` 返回 |
 | 下载 | 用 `accept_download()` / `reject_download()` 应答 `::download-begin`；进行中的下载可用 `pause_download()` / `resume_download()` |
-| 查找 | `find()` · `stop_finding()` → 结果通过 `::find-result` 返回 |
+| 查找 | `find(browser, …)` · `stop_finding(browser, clear)` → 结果通过 `::find-result` 返回 |
 | 右键菜单 | 用 `context_menu_select()` / `context_menu_dismiss()` 应答 `::context-menu` |
 | 权限 | 用 `permission_respond()` 应答 `::permission-request` |
 | 对话框 | 用 `js_dialog_respond()` 应答 `::js-dialog`；用 `file_dialog_respond()` 应答 `::file-dialog` |
-| 标签页 / 窗口 | `new_browser()` · `new_background_browser()`（常驻隐藏页：无窗口、无 surface、永不激活） · `select_browser()` · `close_browser()` · `get_browser_surface()`（session 实测的 id→surface 配对） |
-| 查看源码 | `view_source()` → 结果经 `::view-source` / `::view-source-error` 返回；`auto-source-window` 属性（默认开）决定是否自动弹出组件源码窗口 |
-| 页面 / 其他 | `set_muted()` · `set_zoom_level()` · `set_accessibility()` · `set_proxy()` / `set_proxy_bypass()`（须在 `start()` 之前） · `set_accept_language()`（须在 `start()` 之前） · `set_auto_resize()` / `set_auto_resize_bounds()` |
+| HTTP 认证 | 用 `auth_respond(id, user, password)` / `auth_cancel(id)` 应答 `::auth-required`；不接时 session 取消——请求以 401 失败，即 Chrome 自己的默认 |
+| 客户端证书 | 用 `client_cert_respond(id, index)` 应答 `::client-cert-request`；-1（与默认）表示不选证书继续 |
+| TLS 信息 | `get_tls_info(id, browser)` → `::tls-info`——已加载页面的证书事实（地址栏锁的另一半），走组件自己的管道 |
+| 标签页 / 窗口 | `new_browser()` · `new_browser_with_geometry(url, windowed, x, y, w, h)`（window.open 特性） · `new_background_browser()`（常驻隐藏页：无窗口、无 surface、永不激活） · `select_browser()` · `close_browser()` · `get_browser_surface()`（session 实测的 id→surface 配对） · `browsers_list()` → 推送表的快照（见 `::browsers-changed`） |
+| 查看源码 | `view_source(browser)` → 结果经 `::view-source` / `::view-source-error` 返回；`auto-source-window` 属性（默认开）决定是否自动弹出组件源码窗口 |
+| 页面 / 其他 | `set_muted()` · `set_zoom_level(browser, level)` · `zoom(browser, action)` · `set_accessibility()` · `set_proxy()` / `set_proxy_bypass()`（须在 `start()` 之前） · `set_accept_language()`（须在 `start()` 之前） · `set_auto_resize()` / `set_auto_resize_bounds()` |
+| 用户代理 | `user-agent` 属性（session 级、实时生效） · `browser_set_user_agent(browser, ua)`（单浏览器）——走组件自己的管道，渲染进程崩溃后自动重放，空串即 Chromium 自身 |
+| 截图 | `capture_screenshot(id, browser)` → `::screenshot-result`，携带 PNG 字节 |
 | Cookies | `cookies_get()` / `cookies_set()` / `cookies_delete()` → 由 `::cookies-result` 返回 |
-| 页面内容 | `page_text()` · `history()` · `print_pdf()` → 分别经 `::page-text-*` / `::history-result` / `::pdf-*` 事件族返回 |
+| 页面内容 | `page_text(browser, id)` · `history(browser, id)` · `print_pdf(browser, id)` → 分别经 `::page-text-*` / `::history-result` / `::pdf-*` 事件族返回 |
+| Scheme | `scheme_register(name, flags)` · `scheme_unregister(name)`；用 `scheme_response()` + `scheme_write()` + `scheme_end()`（或 `scheme_abort()`）应答 `::scheme-request`；flags 与 proxy 一样由 `start()` 带入——见 [control-channel.zh-CN.md](control-channel.zh-CN.md) |
+| 宿主脚本 | `script_add(id, browser, patterns, code, run_at, all_frames)` · `script_remove(id)`——user-script 的一半；`document_start` 先于页面内联脚本，且没有隔离世界 |
 | 开发者工具 | `set_devtools_enabled()` · `get_devtools_enabled()`；`devtools-enabled` 属性（默认关）——见[开发者工具](../README.zh-CN.md#开发者工具) |
-| CDP 管道 | `cdp_enable(browser)` 打开（每 browser 一支开关） · `cdp_execute(id, browser, method, params_json)` → `::cdp-result` · `cdp_disable(browser)`；观察者开着期间，所有协议事件经 `::cdp-event` 到达 |
+| CDP 管道 | `cdp_enable(browser)` 打开（每 browser 一支开关） · `cdp_execute(id, browser, method, params_json)` → `::cdp-result` · `cdp_disable(browser)`；观察者开着期间，所有协议事件经 `::cdp-event` 到达。组件自身的功能（历史跳转、TLS 信息、UA、截图、分类型清数据）不需要这支开关 |
 | 证书 | 用 `certificate_respond(id, allow)` 应答 `::certificate-error`；`certificate_authorize(fingerprint)` 对该证书在本 helper 生命周期内免询问放行 |
 | 请求拦截 | `intercept_add(id, patterns, resource_types)` · `intercept_remove(id)` · `intercept_set_passive()`；用 `request_respond(request_id, action, url)` 应答 `::request-intercept` |
 | 插件 | 应答 `::grant-request`（见下） |
@@ -37,9 +44,10 @@
 | 信号 | 参数 | 说明 |
 | --- | --- | --- |
 | `::changed` | — | URI / 标题 / 加载状态 / 前进后退状态 / 静音状态发生变化 |
-| `::ready` | — | helper 握手完成 |
-| `::load-end` | `url, http_code` | 失败时也会触发，此时 `http_code` 为 0 |
-| `::load-error` | `error_code, url, message` | 一次未能完成提交的导航 |
+| `::ready` | — | helper 握手完成；协议大版本不一致的 helper 在此被停掉 |
+| `::load-started` | `browser, url, transition, is_main_frame` | 一次导航完成提交；导航能给出的最早事实 |
+| `::load-end` | `browser, url, http_code` | 每次导航恰一次；失败时也触发，此时 `http_code` 为 0 |
+| `::load-error` | `browser, error_code, url, message` | 每次失败导航恰一次——Chromium 的 ERR_ABORTED 回声已被丢弃 |
 | `::renderer-exited` | `status, error_code, message` | 页面的渲染进程已退出 |
 | `::script-result` | `id, ok, value, message` | `run_javascript` 调用的结果 |
 | `::download-begin` | `id, url, suggested_name, mime_type, total_bytes` | 必须应答 |
@@ -55,8 +63,10 @@
 | `::loading-progress` | `progress` | 0.0–1.0；最后的 1.0 可能到达不止一次 |
 | `::fullscreen-changed` | `fullscreen` | 页面进入或离开全屏；helper 同时调整它自己的 CEF 窗口 |
 | `::browser-created` / `::browser-selected` / `::browser-closed` | `id, …` | 标签页与窗口的生命周期；`browser-created` 附带 `url、windowed、devtools、background` |
+| `::browsers-changed` | — | 浏览器表变了；`browsers_list()` 此刻读到新表——“后台标签现在什么样”的答案 |
 | `::browser-surface` | `browser, surface` | session 实测的 id→surface 配对；surface 消失时以 NULL 再发一次 |
-| `::popup-requested` | `url` | target=_blank；前台弹窗已就地导航 |
+| `::popup-requested` | `url, disposition, gesture, browser` | target=_blank / window.open / 中键；disposition 区分前后台。前台请求已让发起浏览器就地导航 |
+| `::window-properties` | `browser, x, y, w, h, toolbar, menubar, status, resizable, fullscreen` | 窗口化浏览器窗口在创建时与边界/全屏变化时上报；本 helper 的窗口无框，toolbar/menubar/status 恒为 FALSE |
 | `::page-message` | `json` | 页面调用了 `cefnestPostMessage()`；用 `run_javascript` 回复 |
 | `::primary-selection` / `::copy-text` / `::open-url` | `text` / `text` / `url` | 选区桥接、菜单复制、菜单中的“在新窗口打开” |
 | `::zoom-changed` | `level` | 0.0 = 100%；每次主框架加载后也会触发一次 |
@@ -66,6 +76,14 @@
 | `::helper-exited` | — | 进程已被回收；此时再销毁自己的 display 对象 |
 | `::certificate-error` → gboolean | `id, browser, error, url, subject, issuer, fingerprint` | 导航停住等待应答；返回 TRUE 表示由你裁决，返回 FALSE——或不连接——即拒绝 |
 | `::certificate-error-closed` | `id, browser` | browser 收回了这个提问 |
+| `::auth-required` → gboolean | `id, browser, is_proxy, scheme, realm, origin` | 请求停住等待应答；返回 TRUE 自行绘制提示框，返回 FALSE——或不连接——即取消，请求以 401 失败 |
+| `::auth-closed` | `id, browser` | 提问已被收走；之后再应答无效 |
+| `::client-cert-request` → gboolean | `id, browser, origin, certs` | `certs` 是仅在发射期间有效的 `ChromiumClientCert` GList；返回 TRUE 自行展示选择器，返回 FALSE——或不连接——即“不选” |
+| `::client-cert-closed` | `id, browser` | 握手已收走 |
+| `::tls-info` | `id, browser, ok, security_state, subject, issuer, fingerprint, valid_from, valid_to` | 一次 `get_tls_info()` 的应答；状态不带证书时各证书字段为空串（如普通 http） |
+| `::scheme-request` → gboolean | `id, browser, url, method, headers` | 宿主注册过的 scheme 的请求；返回 TRUE 由你服务（response → 写 → end），返回 FALSE——或不连接——即中止 |
+| `::scheme-closed` | `id, browser` | browser 在请求中途关闭 |
+| `::screenshot-result` | `id, browser, ok, png, message` | 一次 `capture_screenshot()` 的应答；失败时 `png` 为 NULL，`message` 说明原因 |
 | `::request-intercept` | `request_id, browser, url, method, resource_type, is_main_frame, headers` | 请求停住直到 `request_respond()`；无默认值、无超时 |
 | `::request-intercept-closed` | `request_id, browser` | 请求还挂着时 browser 关闭了 |
 | `::cdp-result` | `id, ok, json, message` | 一次 `cdp_execute()` 的应答；超过通道单行上限时 `message` 为 `cdp-too-large` |
@@ -122,6 +140,6 @@ enable 时把那个 `.so` 加载进宿主进程，调用它唯一的导出符号
 Web 插件的内容脚本在 `document_start` 运行（先于页面自己的内联脚本——实测）、
 `document_end`/`document_idle` 在 load end 运行。组件在一根桥函数之上提供
 `chrome.*` shim；宿主按权限表裁决每一次调用。子集、接缝、载荷上限与隔离
-事实都在 [docs/plugins.zh-CN.md](plugins.zh-CN.md)——写插件前先读它。响应
-过滤（拦截二期）规划在
-[`docs/plans/response-filter-plan-2026-10-26.md`](plans/response-filter-plan-2026-10-26.md)。
+事实都在 [docs/plugins.zh-CN.md](plugins.zh-CN.md)——写插件前先读它。会话
+恢复不需要组件再做任何事：宿主侧配方见
+[docs/session-restore.zh-CN.md](session-restore.zh-CN.md)。
