@@ -239,16 +239,26 @@ constexpr int64_t kProgressByteStep = 256 * 1024;
 /* Default-off spellcheck. The user asked for no suggestion menu and no word
  * selection; the command-line switch alone is not enough on every CEF build, so
  * the renderer side also turns the attribute off and keeps new editable nodes
- * covered. CHROMIUM_SPELLCHECK=1 restores the old behavior. */
+ * covered. CHROMIUM_SPELLCHECK=1 restores the old behavior. The observer walks
+ * only the nodes a mutation added (the P1 performance batch's narrowing): a
+ * whole-document rescan per mutation is quadratic on editor-heavy pages, and
+ * re-stripping existing editors the page re-enabled is not part of the
+ * default-off ruling — new editors are. */
 constexpr char kDisableSpellcheckScript[] =
-    R"JS((function(){var fix=function(){var nodes=document.querySelectorAll("input,textarea,[contenteditable]");for(var i=0;i<nodes.length;i++){try{nodes[i].spellcheck=false;}catch(e){}}};fix();if(!window.__cefnestNoSpellcheck){window.__cefnestNoSpellcheck=1;new MutationObserver(fix).observe(document.documentElement,{childList:true,subtree:true});}})();)JS";
+    R"JS((function(){var fix=function(root){var nodes=root.querySelectorAll("input,textarea,[contenteditable]");for(var i=0;i<nodes.length;i++){try{nodes[i].spellcheck=false;}catch(e){}}};fix(document);if(!window.__cefnestNoSpellcheck){window.__cefnestNoSpellcheck=1;new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){var added=ms[i].addedNodes;for(var j=0;j<added.length;j++){var n=added[j];if(n.nodeType!==1)continue;try{if(n.matches("input,textarea,[contenteditable]"))n.spellcheck=false;}catch(e){}fix(n);}}}).observe(document.documentElement,{childList:true,subtree:true});}})();)JS";
 
 /* The page owns the selection; CEF on Wayland binds the primary-selection
  * device but does not create a primary source for a page selection. Push the
  * selected text to the host instead, and let the host own the primary selection
- * that the compositor mirrors back. This is the renderer-side half. */
+ * that the compositor mirrors back. This is the renderer-side half. The events
+ * ride a 32 ms throttle with an immediate lead (the P1 performance batch's
+ * other half): a drag across a large selection fires selectionchange per
+ * frame, and every one of them became a host round-trip — an isolated
+ * selection still reports the moment it happens, a burst coalesces to one
+ * trailing send per tick, and the value dedupe below keeps empty repeats
+ * from going out at all. */
 constexpr char kPrimarySelectionScript[] =
-    R"JS((function(){if(window.__cefnestPrimaryHooked)return;window.__cefnestPrimaryHooked=1;var sent=false,last=null;function read(){var a=document.activeElement;if(a&&typeof a.selectionStart==="number"&&typeof a.selectionEnd==="number"&&a.selectionEnd>a.selectionStart){return String(a.value||"").slice(a.selectionStart,a.selectionEnd);}var s=window.getSelection();return s?String(s):"";}function send(){var t=read();if(!sent&&!t)return;if(t===last)return;last=t;sent=true;if(t.length>65536)t=t.slice(0,65536);try{cefnestPrimarySelection(t);}catch(e){}}document.addEventListener("selectionchange",send,true);document.addEventListener("mouseup",send,true);document.addEventListener("keyup",send,true);send();})();)JS";
+    R"JS((function(){if(window.__cefnestPrimaryHooked)return;window.__cefnestPrimaryHooked=1;var sent=false,last=null;function read(){var a=document.activeElement;if(a&&typeof a.selectionStart==="number"&&typeof a.selectionEnd==="number"&&a.selectionEnd>a.selectionStart){return String(a.value||"").slice(a.selectionStart,a.selectionEnd);}var s=window.getSelection();return s?String(s):"";}function send(){var t=read();if(!sent&&!t)return;if(t===last)return;last=t;sent=true;if(t.length>65536)t=t.slice(0,65536);try{cefnestPrimarySelection(t);}catch(e){}}var timer=0,stamp=0;function fire(){timer=0;stamp=Date.now();send();}function pump(){if(timer)return;var now=Date.now();if(now-stamp>=32){fire();}else{timer=setTimeout(fire,32-(now-stamp));}}document.addEventListener("selectionchange",pump,true);document.addEventListener("mouseup",pump,true);document.addEventListener("keyup",pump,true);send();})();)JS";
 
 /* The component-provided chrome.* shim, one instance per plugin (__ID__ is
  * substituted with the plugin id). It rides into every context that gets
