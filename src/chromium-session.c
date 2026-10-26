@@ -4965,6 +4965,89 @@ chromium_session_intercept_set_passive (ChromiumSession *self,
   send_json (self, root);
 }
 
+static void
+filter_ops_send_json (JsonBuilder *builder, const ChromiumFilterOp *ops,
+                      gsize n_ops)
+{
+  json_builder_set_member_name (builder, "ops");
+  json_builder_begin_array (builder);
+  for (gsize i = 0; i < n_ops; i++)
+    {
+      json_builder_begin_object (builder);
+      json_builder_set_member_name (builder, "type");
+      json_builder_add_string_value (builder, ops[i].type ? ops[i].type : "");
+      if (ops[i].find)
+        {
+          json_builder_set_member_name (builder, "find");
+          json_builder_add_string_value (builder, ops[i].find);
+        }
+      if (ops[i].replace)
+        {
+          json_builder_set_member_name (builder, "replace");
+          json_builder_add_string_value (builder, ops[i].replace);
+        }
+      if (ops[i].css)
+        {
+          json_builder_set_member_name (builder, "css");
+          json_builder_add_string_value (builder, ops[i].css);
+        }
+      if (ops[i].name)
+        {
+          json_builder_set_member_name (builder, "name");
+          json_builder_add_string_value (builder, ops[i].name);
+        }
+      json_builder_end_object (builder);
+    }
+  json_builder_end_array (builder);
+}
+
+void
+chromium_session_filter_add (ChromiumSession *self, guint id,
+                             const char *const *patterns,
+                             const ChromiumFilterOp *ops, gsize n_ops)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+  const char *const *entry;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+  g_return_if_fail (patterns != NULL && *patterns != NULL);
+  g_return_if_fail (ops != NULL && n_ops > 0);
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "filter-add");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, (gint64) id);
+  json_builder_set_member_name (builder, "patterns");
+  json_builder_begin_array (builder);
+  for (entry = patterns; *entry; entry++)
+    json_builder_add_string_value (builder, *entry);
+  json_builder_end_array (builder);
+  filter_ops_send_json (builder, ops, n_ops);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
+void
+chromium_session_filter_remove (ChromiumSession *self, guint id)
+{
+  g_autoptr (JsonBuilder) builder = json_builder_new ();
+  g_autoptr (JsonNode) root = NULL;
+
+  g_return_if_fail (CHROMIUM_IS_SESSION (self));
+
+  json_builder_begin_object (builder);
+  command_add_string (builder, "cmd", "filter-remove");
+  json_builder_set_member_name (builder, "id");
+  json_builder_add_int_value (builder, (gint64) id);
+  json_builder_end_object (builder);
+
+  root = json_builder_get_root (builder);
+  send_json (self, root);
+}
+
 /* The DevTools protocol pipe. Fire-and-forget in both directions: the host's
    own id comes back inside the result, events arrive as they happen. Nothing
    here runs unless the host turned the observer on — cdp_enable is the one

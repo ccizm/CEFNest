@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+<title>filter probe</title>
+</head>
+<body>
+<div id="m">MARKER-FIND-XYZ</div>
+<script>
+// The header probe fetches this very document with a custom request header;
+// the server echoes it back as x-echo-marker, so the title records whether
+// the response header survived whatever the host registered against it.
+const probe = new URLSearchParams(location.search).get("probe") || "page";
+if (probe === "header") {
+  fetch(location.href, {cache: "no-store", headers: {"x-marker": "val123"}})
+    .then(r => { document.title = r.headers.get("x-echo-marker") || "MISSING"; })
+    .catch(() => { document.title = "FETCH-ERROR"; });
+}
+</script>
+</body>
+</html>

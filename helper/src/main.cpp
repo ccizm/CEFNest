@@ -3480,6 +3480,53 @@ const InterceptRule* MatchInterceptRule(const std::string& url,
   return nullptr;
 }
 
+/* 资源拦截二期, the helper half: declarative response filters. The host names
+ * patterns and ops, no callbacks cross the channel, and with no rule
+ * registered nothing exists at all — the same zero-overhead pass-through as
+ * phase one, under the same mutex. A request eats the first matching rule;
+ * re-adding an id replaces it. Two ops exist: replace and inject-css. The
+ * plan's third op, drop-header, has no face in CEF 156 — the response object
+ * is marked unmodifiable at every callback that carries one, and rewrites
+ * from both OnResourceResponse and GetResourceResponseFilter were measured
+ * (2026-10-26) not to reach the wire — so the op is refused by name at
+ * registration (filter-add-drop-header-unsupported) instead of silently
+ * doing nothing. CSP and HSTS stay with Chromium's pipeline either way. */
+struct FilterOp {
+  enum class Kind { Replace, InjectCss };
+  Kind kind = Kind::Replace;
+  std::string find;     // Replace
+  std::string replace;  // Replace
+  std::string css;      // InjectCss, wrapped in <style> by the engine
+};
+
+struct FilterRule {
+  uint32_t id = 0;
+  std::vector<MatchPattern> patterns;
+  std::vector<FilterOp> ops;
+};
+std::vector<FilterRule> g_filter_rules;
+
+/* Registration limits. find and replace are capped at the same 64 KiB the
+ * script-result line uses; a host that needs more is writing a proxy, not a
+ * filter. */
+constexpr size_t kFilterMaxText = 64 * 1024;
+constexpr size_t kFilterMaxCss = 1024 * 1024;
+constexpr size_t kFilterMaxOps = 32;
+
+const FilterRule* MatchFilterRule(const std::string& url) {
+  // Callers hold g_intercept_mutex. Resource types do not gate filters: the
+  // plan's shape is patterns + ops, and a rule on a page path means that path
+  // however it was fetched.
+  for (const auto& rule : g_filter_rules) {
+    if (rule.ops.empty())
+      continue;
+    for (const auto& pattern : rule.patterns)
+      if (pattern.Usable() && pattern.Matches(url))
+        return &rule;
+  }
+  return nullptr;
+}
+
 /* The DevTools protocol pipe. Off until cdp-enable: registering the observer
  * is the switch, because a page's full protocol — script, storage, network,
  * everything — is exactly what it hands the host. Method results map back to
@@ -3762,24 +3809,304 @@ void ApplyUserAgentOverride(CefRefPtr<CefBrowser> browser) {
   slot->ua_set = !effective.empty();
 }
 
+/* The streaming engine behind one matched request. CEF hands the body through
+ * Filter() in chunks on the IO thread; the engine stitches them, because a
+ * literal match must not depend on where the network happened to cut the
+ * stream: each stage holds back find-length-minus-one bytes until the next
+ * chunk or the end of the stream resolves them, so a match spanning a chunk
+ * boundary still lands. Ops run in rule order, each stage's output feeding
+ * the next; inject-css scans the replaced stream for </head> (text/html only,
+ * decided by the response's mime type before the engine exists) and falls
+ * back to appending at the end of the stream when the marker never shows. */
+class FilterEngine : public CefResponseFilter {
+ public:
+  FilterEngine(const std::vector<FilterOp>& ops, bool html) {
+    for (const FilterOp& op : ops) {
+      Stage stage;
+      switch (op.kind) {
+        case FilterOp::Kind::Replace:
+          stage.kind = Stage::kReplace;
+          stage.find = op.find;
+          stage.replace = op.replace;
+          stage.hold = op.find.size() - 1;
+          break;
+          case FilterOp::Kind::InjectCss:
+          if (!html)
+            continue;  // the plan: inject-css works on text/html only
+          stage.kind = Stage::kInjectHead;
+          stage.css = "<style>" + op.css + "</style>";
+          stage.hold = sizeof("</head") - 2;  // a partial marker's longest run
+          break;
+      }
+      stages_.push_back(std::move(stage));
+    }
+  }
+
+  bool InitFilter() override { return !stages_.empty(); }
+
+  FilterStatus Filter(void* data_in, size_t data_in_size,
+                      size_t& data_in_read, void* data_out,
+                      size_t data_out_size, size_t& data_out_written) override {
+    data_in_read = 0;
+    data_out_written = 0;
+    if (done_)
+      return RESPONSE_FILTER_DONE;
+
+    /* Every presented byte is consumed into stage 0; what the pipeline
+     * cannot decide yet stays in the stage buffers. */
+    if (data_in && data_in_size) {
+      stages_.front().buf.append(static_cast<const char*>(data_in),
+                                 data_in_size);
+      in_total_ += data_in_size;
+      ++chunks_;
+      data_in_read = data_in_size;
+    }
+
+    /* An empty input is the end of the response — this filter never fills
+     * the output buffer to its last byte, so CEF's "come back with an empty
+     * input to drain" call never happens and the empty call has exactly one
+     * meaning. Release every held byte and settle the inject-css fallback. */
+    if (data_in_size == 0 && !eof_flushed_) {
+      eof_flushed_ = true;
+      EofFlush();
+    }
+
+    /* Two regimes share one write loop. Before the flush the buffer is
+     * written only to one byte short of full, so CEF never has a reason to
+     * come back with an empty input just to drain — an empty input here can
+     * only mean the response is over. After the flush the response IS over,
+     * the ambiguity is gone, and the buffer fills to its last byte so a big
+     * flushed tail earns the next call and drains whole. */
+    const size_t limit = eof_flushed_
+                             ? data_out_size
+                             : (data_out_size ? data_out_size - 1 : 0);
+    WriteOut(static_cast<char*>(data_out), data_out_written, limit);
+    PumpStages(limit);
+    WriteOut(static_cast<char*>(data_out), data_out_written, limit);
+
+    if (out_.empty() && eof_flushed_) {
+      done_ = true;
+      fprintf(stderr,
+              "helper: filter done chunks=%zu in=%zu out=%zu spans=%zu\n",
+              chunks_, in_total_, out_total_, spans_);
+    }
+    return done_ ? RESPONSE_FILTER_DONE : RESPONSE_FILTER_NEED_MORE_DATA;
+  }
+
+ private:
+  struct Stage {
+    enum Kind { kReplace, kInjectHead, kPassthrough };
+    Kind kind = kPassthrough;
+    std::string find;
+    std::string replace;
+    std::string css;
+    size_t hold = 0;        // bytes at the tail that may still grow a match
+    bool injected = false;  // kInjectHead: the css went out
+    std::string buf;        // input waiting to be decided
+    size_t scan = 0;        // buf[0, scan) is done
+    size_t stable_end = 0;  // where the previous round stopped deciding
+  };
+
+  static constexpr size_t kHeadMarkerLen = 6;  // "</head"
+
+  /* First "</head" from |from|, ASCII case-insensitive: pages emit the tag
+   * in both registers and the engine does not get to care which. */
+  static size_t HeadMarkerFind(const std::string& text, size_t from) {
+    for (size_t i = from; i + kHeadMarkerLen <= text.size(); ++i) {
+      static const char marker[] = "</head";
+      size_t j = 0;
+      for (; j < kHeadMarkerLen; ++j)
+        if (tolower(static_cast<unsigned char>(text[i + j])) != marker[j])
+          break;
+      if (j == kHeadMarkerLen)
+        return i;
+    }
+    return std::string::npos;
+  }
+
+  /* Appends buf[from, end) to out_ under the budget unless this is the end
+   * of the stream; returns how much went out, so the caller's scan only ever
+   * advances over emitted bytes. */
+  size_t EmitRun(Stage& stage, size_t from, size_t end, size_t budget,
+                 bool eof) {
+    size_t n = end - from;
+    if (!eof && out_.size() + n > budget)
+      n = out_.size() >= budget ? 0 : budget - out_.size();
+    if (n) {
+      out_.append(stage.buf, from, n);
+      out_total_ += n;
+    }
+    return n;
+  }
+
+  bool PumpStage(Stage& stage, size_t budget, bool eof) {
+    const size_t start = stage.scan;
+    const size_t stable_end =
+        eof ? stage.buf.size()
+            : (stage.buf.size() > stage.hold ? stage.buf.size() - stage.hold
+                                             : 0);
+    size_t p = stage.scan;
+
+    if (stage.kind == Stage::kPassthrough ||
+        (stage.kind == Stage::kInjectHead && stage.injected)) {
+      /* Decided content only: everything that arrived goes straight out. */
+      while (p < stage.buf.size()) {
+        if (!eof && out_.size() >= budget)
+          break;
+        p += EmitRun(stage, p, stage.buf.size(), budget, eof);
+      }
+      stage.scan = p;
+      Compact(stage);
+      return p != start;
+    }
+
+    if (stage.kind == Stage::kReplace) {
+      for (;;) {
+        if (p >= stable_end || (!eof && out_.size() >= budget))
+          break;
+        const size_t pos = stage.buf.find(stage.find, p);
+        if (pos == std::string::npos || pos >= stable_end) {
+          p += EmitRun(stage, p, stable_end, budget, eof);
+          break;
+        }
+        if (pos + stage.find.size() > stable_end && !eof) {
+          /* The match straddles the decided boundary: emit the literal run
+           * before it and wait for the rest of the match to arrive. */
+          p += EmitRun(stage, p, pos, budget, eof);
+          break;
+        }
+        if (pos < stage.stable_end && !eof)
+          ++spans_;  // completed only because the chunks were stitched
+        p += EmitRun(stage, p, pos, budget, eof);
+        if (!eof && out_.size() + stage.replace.size() > budget)
+          break;  // the replacement waits for output room
+        out_.append(stage.replace);
+        out_total_ += stage.replace.size();
+        p += stage.find.size();
+      }
+      stage.scan = p;
+      stage.stable_end = stable_end;
+      Compact(stage);
+      return p != start;
+    }
+
+    /* kInjectHead, not yet injected. */
+    for (;;) {
+      if (p >= stable_end || (!eof && out_.size() >= budget))
+        break;
+      const size_t pos = HeadMarkerFind(stage.buf, p);
+      if (pos == std::string::npos || pos >= stable_end) {
+        p += EmitRun(stage, p, stable_end, budget, eof);
+        break;
+      }
+      if (pos + kHeadMarkerLen > stable_end && !eof) {
+        p += EmitRun(stage, p, pos, budget, eof);
+        break;
+      }
+      if (pos < stage.stable_end && !eof)
+        ++spans_;
+      p += EmitRun(stage, p, pos, budget, eof);
+      if (!eof && out_.size() + stage.css.size() > budget)
+        break;
+      out_.append(stage.css);
+      out_total_ += stage.css.size();
+      stage.injected = true;
+      break;  // the next round runs this stage as a passthrough
+    }
+    stage.scan = p;
+    stage.stable_end = stable_end;
+    Compact(stage);
+    return p != start;
+  }
+
+  bool PumpStages(size_t budget) {
+    bool progress = false;
+    bool again = true;
+    while (again && out_.size() < budget) {
+      again = false;
+      for (auto& stage : stages_) {
+        if (out_.size() >= budget)
+          break;
+        again |= PumpStage(stage, budget, false);
+      }
+      progress |= again;
+    }
+    return progress;
+  }
+
+  /* The response is over: every held byte is decided now, in stage order so
+   * each stage's release feeds the next one's buffer first. */
+  void EofFlush() {
+    for (auto& stage : stages_) {
+      PumpStage(stage, 0, true);
+      if (stage.kind == Stage::kInjectHead && !stage.injected) {
+        /* No </head> in the whole stream: the plan's fallback is the end of
+         * the body, which still styles the page. */
+        out_.append(stage.css);
+        out_total_ += stage.css.size();
+        stage.injected = true;
+      }
+    }
+  }
+
+  void WriteOut(char* out, size_t& written, size_t limit) {
+    const size_t n = std::min(limit - written, out_.size());
+    if (n) {
+      memcpy(out + written, out_.data(), n);
+      written += n;
+      out_.erase(0, n);
+    }
+  }
+
+  static void Compact(Stage& stage) {
+    if (stage.scan >= stage.buf.size()) {
+      stage.buf.clear();
+      stage.scan = 0;
+    } else if (stage.scan > 16384) {
+      stage.buf.erase(0, stage.scan);
+      stage.scan = 0;
+    }
+  }
+
+  std::vector<Stage> stages_;
+  std::string out_;
+  size_t chunks_ = 0;
+  size_t in_total_ = 0;
+  size_t out_total_ = 0;
+  size_t spans_ = 0;  // matches the stitching rescued from a chunk boundary
+  bool eof_flushed_ = false;
+  bool done_ = false;
+
+  IMPLEMENT_REFCOUNTING(FilterEngine);
+};
+
 /* The per-request handler CEF asks for when a rule matches. It exists only
  * for the moment OnBeforeResourceLoad runs: either the event goes out and
  * the request continues (passive), or the decision parks here and the
- * answer comes back as request-respond. */
+ * answer comes back as request-respond. A filter rule can mint one of these
+ * on its own — consult is then false, nothing parks, and the handler's only
+ * work is carrying the filter to GetResourceResponseFilter. The ops are
+ * copied at mint time, so a rule removed later cannot reach into a filter
+ * already streaming. */
 class RequestGate : public CefResourceRequestHandler {
  public:
   RequestGate(uint32_t request_id, int browser_id, std::string url,
               std::string method, std::string resource_type,
-              bool is_main_frame, std::string headers_json)
+              bool is_main_frame, std::string headers_json, bool consult,
+              std::vector<FilterOp> filter_ops)
       : request_id_(request_id), browser_id_(browser_id),
         url_(std::move(url)), method_(std::move(method)),
         resource_type_(std::move(resource_type)),
-        is_main_frame_(is_main_frame), headers_json_(std::move(headers_json)) {}
+        is_main_frame_(is_main_frame), headers_json_(std::move(headers_json)),
+        consult_(consult), filter_ops_(std::move(filter_ops)) {}
 
   cef_return_value_t OnBeforeResourceLoad(
       CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
       CefRefPtr<CefRequest> request, CefRefPtr<CefCallback> callback)
       override {
+    if (!consult_)
+      return RV_CONTINUE;
+
     bool passive;
     {
       std::lock_guard<std::mutex> lock(g_intercept_mutex);
@@ -3822,6 +4149,33 @@ class RequestGate : public CefResourceRequestHandler {
   std::string resource_type_;
   bool is_main_frame_;
   std::string headers_json_;
+  bool consult_;
+  std::vector<FilterOp> filter_ops_;
+
+  /* Body work only: a rule without body ops never installs an engine, and
+   * inject-css is dropped for responses that are not text/html — the engine
+   * that would have been a pure passthrough never exists. */
+  CefRefPtr<CefResponseFilter> GetResourceResponseFilter(
+      CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+      CefRefPtr<CefRequest> request, CefRefPtr<CefResponse> response)
+      override {
+    if (filter_ops_.empty())
+      return nullptr;
+    std::string mime = response->GetMimeType().ToString();
+    std::transform(mime.begin(), mime.end(), mime.begin(), ::tolower);
+    const bool html = mime.rfind("text/html", 0) == 0;
+    bool body_work = false;
+    for (const FilterOp& op : filter_ops_) {
+      if (op.kind == FilterOp::Kind::Replace ||
+          (op.kind == FilterOp::Kind::InjectCss && html)) {
+        body_work = true;
+        break;
+      }
+    }
+    if (!body_work)
+      return nullptr;
+    return new FilterEngine(filter_ops_, html);
+  }
 
   IMPLEMENT_REFCOUNTING(RequestGate);
 };
@@ -6041,6 +6395,101 @@ void HandleCommand(const std::string& line) {
     return;
   }
 
+  if (name == "filter-add") {
+    /* One rule replaces whatever the same id held, and every op in it is
+     * validated before anything registers: a rule that names a protected
+     * header, an oversized field or an unknown op is refused whole, the way
+     * intercept-add refuses a rule without patterns. */
+    std::lock_guard<std::mutex> filter_lock(g_intercept_mutex);
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    FilterRule rule;
+    rule.id = id;
+    if (command->GetType("patterns") == VTYPE_LIST) {
+      CefRefPtr<CefListValue> patterns = command->GetList("patterns");
+      for (size_t i = 0; i < patterns->GetSize(); ++i)
+        rule.patterns.push_back(
+            MatchPattern::Parse(patterns->GetString(i).ToString()));
+    }
+    if (rule.patterns.empty()) {
+      EmitStatus("filter-add-needs-patterns");
+      return;
+    }
+    if (command->GetType("ops") != VTYPE_LIST) {
+      EmitStatus("filter-add-needs-ops");
+      return;
+    }
+    CefRefPtr<CefListValue> ops = command->GetList("ops");
+    if (ops->GetSize() > kFilterMaxOps) {
+      EmitStatus("filter-add-too-many-ops");
+      return;
+    }
+    for (size_t i = 0; i < ops->GetSize(); ++i) {
+      if (ops->GetType(i) != VTYPE_DICTIONARY) {
+        EmitStatus("filter-add-bad-op");
+        return;
+      }
+      CefRefPtr<CefDictionaryValue> spec = ops->GetDictionary(i);
+      const std::string type = spec->GetString("type").ToString();
+      FilterOp op;
+      if (type == "replace") {
+        op.kind = FilterOp::Kind::Replace;
+        op.find = spec->GetString("find").ToString();
+        op.replace = spec->GetString("replace").ToString();
+        if (op.find.empty() || op.find.size() > kFilterMaxText ||
+            op.replace.size() > kFilterMaxText) {
+          EmitStatus("filter-add-op-too-large");
+          return;
+        }
+      } else if (type == "inject-css") {
+        op.kind = FilterOp::Kind::InjectCss;
+        op.css = spec->GetString("css").ToString();
+        if (op.css.empty() || op.css.size() > kFilterMaxCss) {
+          EmitStatus("filter-add-op-too-large");
+          return;
+        }
+      } else if (type == "drop-header") {
+        /* Measured out of existence (2026-10-26): CEF 156 marks the response
+         * unmodifiable at every callback that carries one, and rewrites at
+         * both OnResourceResponse and GetResourceResponseFilter never
+         * reached the wire. Refused by name rather than ignored. */
+        EmitStatus("filter-add-drop-header-unsupported");
+        return;
+      } else {
+        EmitStatus("filter-add-bad-op");
+        return;
+      }
+      rule.ops.push_back(std::move(op));
+    }
+    if (rule.ops.empty()) {
+      EmitStatus("filter-add-needs-ops");
+      return;
+    }
+    g_filter_rules.erase(
+        std::remove_if(g_filter_rules.begin(), g_filter_rules.end(),
+                       [id](const FilterRule& existing) {
+                         return existing.id == id;
+                       }),
+        g_filter_rules.end());
+    g_filter_rules.push_back(std::move(rule));
+    fprintf(stderr, "helper: filter-add %u rules=%zu\n", id,
+            g_filter_rules.size());
+    return;
+  }
+
+  if (name == "filter-remove") {
+    std::lock_guard<std::mutex> filter_lock(g_intercept_mutex);
+    const uint32_t id = static_cast<uint32_t>(command->GetInt("id"));
+    g_filter_rules.erase(
+        std::remove_if(g_filter_rules.begin(), g_filter_rules.end(),
+                       [id](const FilterRule& existing) {
+                         return existing.id == id;
+                       }),
+        g_filter_rules.end());
+    fprintf(stderr, "helper: filter-remove %u rules=%zu\n", id,
+            g_filter_rules.size());
+    return;
+  }
+
   if (name == "request-respond") {
     std::lock_guard<std::mutex> intercept_lock(g_intercept_mutex);
     const uint32_t request_id =
@@ -7466,9 +7915,11 @@ class HelperClient : public CefClient,
     return true;
   }
 
-  /* No rule registered is the zero-cost answer: no handler object, no
-   * callback, the request flows as if the feature did not exist. A match
-   * creates one RequestGate for exactly this request. */
+  /* No rule registered — either table — is the zero-cost answer: no handler
+   * object, no callback, the request flows as if the feature did not exist.
+   * A match creates one RequestGate for exactly this request, consult when
+   * an intercept rule asked for it and always carrying the filter rule's
+   * snapshot when a filter matched. */
   CefRefPtr<CefResourceRequestHandler> GetResourceRequestHandler(
       CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
       CefRefPtr<CefRequest> request, bool is_navigation, bool is_download,
@@ -7477,21 +7928,31 @@ class HelperClient : public CefClient,
     const std::string url = request->GetURL().ToString();
     const std::string type = ResourceTypeText(request->GetResourceType());
     std::lock_guard<std::mutex> lock(g_intercept_mutex);
-    fprintf(stderr, "helper: get-resource-handler url=%s type=%s rules=%zu\n",
-            url.c_str(), type.c_str(), g_intercept_rules.size());
-    if (g_intercept_rules.empty())
+    fprintf(stderr,
+            "helper: get-resource-handler url=%s type=%s rules=%zu "
+            "filters=%zu\n",
+            url.c_str(), type.c_str(), g_intercept_rules.size(),
+            g_filter_rules.size());
+    if (g_intercept_rules.empty() && g_filter_rules.empty())
       return nullptr;
 
     const InterceptRule* rule = MatchInterceptRule(url, type);
-    if (!rule)
+    const FilterRule* filter = MatchFilterRule(url);
+    if (!rule && !filter)
       return nullptr;
 
-    const uint32_t request_id = ++g_intercept_seq;
+    /* The id only exists when a question will be asked: filter-only
+     * requests leave the intercept seq alone. */
+    const uint32_t request_id = rule ? ++g_intercept_seq : 0;
+    std::vector<FilterOp> filter_ops;
+    if (filter)
+      filter_ops = filter->ops;
     return new RequestGate(request_id,
                            browser ? browser->GetIdentifier() : 0, url,
                            request->GetMethod().ToString(), type,
                            request->GetResourceType() == RT_MAIN_FRAME,
-                           BuildHeadersJson(request));
+                           BuildHeadersJson(request), rule != nullptr,
+                           std::move(filter_ops));
   }
 
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {

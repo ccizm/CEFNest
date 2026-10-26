@@ -37,6 +37,7 @@
 | CDP 管道 | `cdp_enable(browser)` 打开（每 browser 一支开关） · `cdp_execute(id, browser, method, params_json)` → `::cdp-result` · `cdp_disable(browser)`；观察者开着期间，所有协议事件经 `::cdp-event` 到达。组件自身的功能（历史跳转、TLS 信息、UA、截图、分类型清数据）不需要这支开关 |
 | 证书 | 用 `certificate_respond(id, allow)` 应答 `::certificate-error`；`certificate_authorize(fingerprint)` 对该证书在本 helper 生命周期内免询问放行；`certificate_clear_authorized()` 撤销全部豁免（helper 表与 Chromium 自己的例外记忆一起清） |
 | 请求拦截 | `intercept_add(id, patterns, resource_types)` · `intercept_remove(id)` · `intercept_set_passive()`；用 `request_respond(request_id, action, url)` 应答 `::request-intercept` |
+| 响应过滤 | `filter_add(id, patterns, ops, n_ops)` · `filter_remove(id)` — 声明式的 helper 内改写：`replace`（跨块拼接，两侧各 ≤ 64 KiB）与 `inject-css`（`text/html` 的 `</head>` 前）。无事件、无应答义务。`drop-header` 被点名拒绝——CEF 156 没有剔除响应头的面（2026-10-26 实测） |
 | 插件 | 应答 `::grant-request`（见下） |
 
 **信号**

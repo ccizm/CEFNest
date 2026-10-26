@@ -96,6 +96,7 @@ ALL_RUNS=(
   "auth|./test/auth-gate.sh|420"
   "tls-info|./test/tls-info-gate.sh|300"
   "intercept|./test/intercept-gate.sh|300"
+  "filter|./test/filter-gate.sh|540"
   "cdp|./test/cdp-gate.sh|300"
   "history|./test/history-gate.sh|420"
   "browsers|./test/browsers-gate.sh|300"

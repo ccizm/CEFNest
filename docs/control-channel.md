@@ -81,6 +81,8 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `intercept-remove` | `id` | takes the rule back out |
 | `intercept-mode` | `passive` | passive reports every match and blocks nothing; the default is blocking |
 | `request-respond` | `request_id`, `action` (`allow`/`cancel`/`redirect`), `url` (redirect only) | answers `request-intercept`; a redirect swaps the URL first. No timeout — the page waits for the host |
+| `filter-add` | `id`, `patterns[]` (match patterns), `ops[]` (ordered: `{type: "replace", find, replace}` ≤ 64 KiB each, `{type: "inject-css", css}` ≤ 1 MiB, ≤ 32 ops) | registers one declarative response filter: the helper's own engine rewrites matched responses' bodies as they stream past — replace is chunk-stitched so a match spanning a chunk boundary still lands, inject-css goes in before `</head>` of `text/html` only (a stream without the marker gets it at the end). No question ever parks on the channel; no rules registered = nothing exists. A `drop-header` op is refused by name (`filter-add-drop-header-unsupported`): CEF 156 offers no face that removes a response header, measured at both `OnResourceResponse` and `GetResourceResponseFilter` (2026-10-26) |
+| `filter-remove` | `id` | takes the filter rule back out; a response already streaming finishes under the ops it was minted with |
 | `cdp-enable` | `browser` (optional) | registers the DevTools protocol observer on this browser; the one switch that lets `cdp-execute` through |
 | `cdp-disable` | `browser` (optional) | unregisters the observer |
 | `cdp-execute` | `id` (the host's own), `method`, `params` (JSON text) | one DevTools method call; refused with `cdp-not-enabled` while the observer is off. Answered by `cdp-result` |

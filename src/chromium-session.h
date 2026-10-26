@@ -728,6 +728,54 @@ void               chromium_session_request_respond (ChromiumSession *self,
                                                    ChromiumRequestAction action,
                                                    const char *url);
 
+/* Response filtering, the declarative second phase. No question ever parks
+ * on the channel and no callback crosses it: the host names patterns and
+ * ops, and the helper's own engine rewrites the matched responses' bodies
+ * as they stream past. With no rule registered the feature does not exist
+ * — the same zero-overhead pass-through as interception. Rules are the
+ * host's own ids over the same Chrome match-pattern syntax; re-adding an
+ * id replaces it, removing takes it back out, and nothing survives a
+ * helper restart. A request eats the first matching rule.
+ *
+ * chromium_session_filter_add () registers id → patterns with an ordered
+ * op list:
+ *
+ *   "replace"     literal find → replace in the body stream, both capped
+ *                 at 64 KiB. The helper stitches chunks (it holds back up
+ *                 to find-length-minus-one bytes between reads), so a
+ *                 match spanning a chunk boundary still lands.
+ *   "inject-css"  a <style> with this text goes in before </head> of
+ *                 text/html responses; a stream without the marker gets
+ *                 it appended at the end. Other mime types skip the op.
+ *
+ * A "drop-header" op is refused by name (filter-add-drop-header-
+ * unsupported): CEF 156 marks the response unmodifiable at every callback
+ * that carries one, and header rewrites measured at both
+ * OnResourceResponse and GetResourceResponseFilter never reached the wire
+ * (2026-10-26) — there is no face to remove a response header with, and a
+ * silently ignored op would lie. CSP and HSTS stay with Chromium's own
+ * pipeline either way.
+ *
+ * Field caps: find/replace ≤ 64 KiB, css ≤ 1 MiB, ≤ 32 ops per rule.
+ * Oversized or unknown ops refuse the whole rule (filter-add-op-too-large,
+ * filter-add-bad-op), as does an empty pattern list
+ * (filter-add-needs-patterns); a refused id registers nothing. */
+typedef struct {
+  const char *type;     /* "replace" or "inject-css" */
+  const char *find;     /* replace */
+  const char *replace;  /* replace */
+  const char *css;      /* inject-css */
+  const char *name;     /* drop-header: refused; kept for honest round-trips */
+} ChromiumFilterOp;
+
+void               chromium_session_filter_add (ChromiumSession *self,
+                                                guint id,
+                                                const char *const *patterns,
+                                                const ChromiumFilterOp *ops,
+                                                gsize n_ops);
+void               chromium_session_filter_remove (ChromiumSession *self,
+                                                   guint id);
+
 /* The DevTools protocol pipe. CDP is full control of a page — script,
  * storage, network, all of it — so the pipe is off until the host turns it
  * on, per browser, with chromium_session_cdp_enable (); until then every

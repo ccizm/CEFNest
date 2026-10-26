@@ -3625,6 +3625,7 @@ demo_drag_in_end (NestedCompositor *compositor, gboolean taken, const char *mime
  * "certificate-clear", "hang-respond <wait|terminate>",
  * "intercept-add <id> <pattern>[;<pattern>…]", "intercept-remove <id>",
  * "intercept-mode <passive|blocking>",
+ * "filter-add <id> <pattern>[;<pattern>…] <ops-b64>", "filter-remove <id>",
  * "request-respond <id> <allow|cancel|redirect> [url]",
  * "cdp-enable [browser]", "cdp-disable [browser]",
  * "cdp-execute <id> <method> [json-params]",
@@ -4910,6 +4911,114 @@ script_run_next (void)
           chromium_session_intercept_set_passive (demo.session, passive);
           g_printerr ("demo: intercept-mode %s\n",
                       passive ? "passive" : "blocking");
+          continue;
+        }
+      else if (!strncmp (line, "filter-add ", 11))
+        {
+          /* filter-add <id> <pattern>[;<pattern>…] <ops-b64> — the ops ride
+           * base64 JSON, the same escape script-add uses for code, because
+           * they are exactly the thing with quotes and spaces in them:
+           * [{"type":"replace","find":…,"replace":…},
+           *  {"type":"inject-css","css":…},
+           *  {"type":"drop-header","name":…}] */
+          g_auto (GStrv) parts = g_strsplit (line + 11, " ", 3);
+          g_auto (GStrv) patterns = NULL;
+          gsize length = 0;
+          g_autofree guchar *raw = NULL;
+          g_autofree char *ops_json = NULL;
+          g_autoptr (JsonParser) parser = NULL;
+          ChromiumFilterOp *ops = NULL;
+          gsize n_ops = 0;
+
+          if (g_strv_length (parts) != 3)
+            {
+              g_warning ("demo: filter-add wants '<id> <patterns> "
+                         "<ops-b64>', got '%s'", line);
+              continue;
+            }
+          patterns = g_strsplit (parts[1], ";", 64);
+          raw = g_base64_decode (parts[2], &length);
+          ops_json = g_strndup ((gchar *) raw, length);
+          parser = json_parser_new ();
+          if (json_parser_load_from_data (parser, ops_json, (gssize) length,
+                                          NULL))
+            {
+              JsonNode *root = json_parser_get_root (parser);
+
+              if (root && json_node_get_node_type (root) == JSON_NODE_ARRAY)
+                {
+                  JsonArray *array = json_node_get_array (root);
+                  guint count = json_array_get_length (array);
+
+                  ops = g_new0 (ChromiumFilterOp, count);
+                  for (guint i = 0; i < count; i++)
+                    {
+                      JsonObject *spec =
+                          json_array_get_object_element (array, i);
+                      const char *type;
+
+                      if (!spec)
+                        continue;
+                      type = json_object_get_string_member_with_default (
+                          spec, "type", "");
+                      if (!strcmp (type, "replace"))
+                        {
+                          if (json_object_has_member (spec, "find"))
+                            ops[n_ops].find =
+                                json_object_get_string_member (spec, "find");
+                          if (json_object_has_member (spec, "replace"))
+                            ops[n_ops].replace = json_object_get_string_member (
+                                spec, "replace");
+                          ops[n_ops].type = "replace";
+                          if (ops[n_ops].find && ops[n_ops].replace)
+                            n_ops++;
+                        }
+                      else if (!strcmp (type, "inject-css"))
+                        {
+                          if (json_object_has_member (spec, "css"))
+                            ops[n_ops].css =
+                                json_object_get_string_member (spec, "css");
+                          ops[n_ops].type = "inject-css";
+                          if (ops[n_ops].css)
+                            n_ops++;
+                        }
+                      else if (!strcmp (type, "drop-header"))
+                        {
+                          if (json_object_has_member (spec, "name"))
+                            ops[n_ops].name =
+                                json_object_get_string_member (spec, "name");
+                          ops[n_ops].type = "drop-header";
+                          if (ops[n_ops].name)
+                            n_ops++;
+                        }
+                      else
+                        g_warning ("demo: filter-add op %u has unknown type"
+                                   " '%s'", i, type);
+                    }
+                }
+              else
+                g_warning ("demo: filter-add ops must be a JSON array");
+            }
+          else
+            g_warning ("demo: filter-add ops are not valid JSON");
+
+          if (n_ops > 0)
+            chromium_session_filter_add (demo.session,
+                                         (guint) atoi (parts[0]),
+                                         (const char *const *) patterns, ops,
+                                         n_ops);
+          else
+            g_warning ("demo: filter-add produced no usable ops");
+          g_free (ops);
+          g_printerr ("demo: filter-add %s (%u ops)\n", parts[0],
+                      (guint) n_ops);
+          continue;
+        }
+      else if (!strncmp (line, "filter-remove ", 14))
+        {
+          chromium_session_filter_remove (demo.session,
+                                          (guint) atoi (line + 14));
+          g_printerr ("demo: filter-remove %s\n", line + 14);
           continue;
         }
       else if (!strncmp (line, "request-respond ", 16))

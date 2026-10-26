@@ -3,8 +3,10 @@
 [English](plugins.md) | 简体中文
 
 插件是什么、能做什么、永远不能做什么。方法与信号速览见
-[api.zh-CN.md](api.zh-CN.md);响应过滤(拦截二期)规划在
-[`docs/plans/response-filter-plan-2026-10-26.md`](plans/response-filter-plan-2026-10-26.md)。
+[api.zh-CN.md](api.zh-CN.md);响应过滤(拦截二期)已落地——声明式的
+`filter_add`/`filter_remove`,形状见
+[`docs/plans/response-filter-plan-2026-10-26.md`](plans/response-filter-plan-2026-10-26.md)
+的落地记录。
 
 ## 形态
 

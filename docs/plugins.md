@@ -4,8 +4,10 @@
 
 What a plugin is, what one can do, and what it can never do. The method and
 signal digest is in [api.md](api.md); response filtering (interception phase
-two) is planned in
-[`docs/plans/response-filter-plan-2026-10-26.md`](plans/response-filter-plan-2026-10-26.md).
+two) has landed — the declarative `filter_add`/`filter_remove`, with the
+shape and the measured rulings in
+[`docs/plans/response-filter-plan-2026-10-26.md`](plans/response-filter-plan-2026-10-26.md)'s
+landing record.
 
 ## The shape
 

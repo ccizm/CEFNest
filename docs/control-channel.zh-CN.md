@@ -78,6 +78,8 @@
 | `intercept-remove` | `id` | 摘掉这条规则 |
 | `intercept-mode` | `passive` | passive 只上报不阻塞；默认 blocking |
 | `request-respond` | `request_id`、`action`（`allow`/`cancel`/`redirect`）、`url`（仅 redirect） | 应答 `request-intercept`；redirect 先换 URL。无超时——页面在等宿主 |
+| `filter-add` | `id`、`patterns[]`（match pattern）、`ops[]`（按序：`{type: "replace", find, replace}` 各 ≤ 64 KiB、`{type: "inject-css", css}` ≤ 1 MiB、≤ 32 条 op） | 登记一条声明式响应过滤规则：helper 自己的引擎在匹配响应的字节流上改写——replace 做跨块拼接（块边界上的匹配也命中），inject-css 只对 `text/html` 在 `</head>` 前注入（流里没有该标记就附加在末尾）。任何问题都不在通道上挂起；无规则注册 = 什么都不存在。`drop-header` op 被点名拒绝（`filter-add-drop-header-unsupported`）：CEF 156 没有剔除响应头的面，`OnResourceResponse` 与 `GetResourceResponseFilter` 两处实测（2026-10-26）改写均不上线 |
+| `filter-remove` | `id` | 摘掉这条过滤规则；已经流出中的响应用它出厂时的 ops 跑完 |
 | `cdp-enable` | `browser`（可选） | 在该 browser 上注册 DevTools 协议观察者；这是放行 `cdp-execute` 的唯一开关 |
 | `cdp-disable` | `browser`（可选） | 注销观察者 |
 | `cdp-execute` | `id`（宿主自己的）、`method`、`params`（JSON 文本） | 一条 DevTools 方法调用；观察者未开时以 `cdp-not-enabled` 拒绝。由 `cdp-result` 应答 |

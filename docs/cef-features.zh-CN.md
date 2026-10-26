@@ -133,7 +133,7 @@ CEF 156 的 `CefClient` 可返回 18 个 handler。下表覆盖这 18 个，以�
 | 桌面捕获（getDisplayMedia） | ✗ | — | CEF Alloy 无桌面捕获源选择面；未接，未实测 |
 | 站点隔离 / 进程模型 | ◐ | — | 走 Chromium 默认（每站点一 renderer）；未做 per-site 进程策略 |
 | 响应级拦截 / 放行 / 重定向 | ✅ | `intercept_add` / `::request-intercept` / `request_respond` | `OnBeforeResourceLoad` 的 parked 与 passive 两态；`intercept-gate` |
-| 响应头 / 响应体改写 | ✗ | — | `OnResourceResponse`、`GetResourceResponseFilter` 未接；响应过滤在 `response-filter-plan` 里独立立项，未开工 |
+| 响应头 / 响应体改写 | ◐ | `filter_add` / `filter_remove`（`replace`、`inject-css`） | 响应体改写已接：声明式规则长在 helper，replace 跨块拼接、inject-css 仅 `text/html`；`filter-gate`。响应头改写无面：`OnResourceResponse`、`GetResourceResponseFilter` 里的 response 均标注不可修改，实测（2026-10-26）两处改写都不上线——`drop-header` op 被点名拒绝（`filter-add-drop-header-unsupported`） |
 | Cookie 访问过滤 | ✗ | — | `GetCookieAccessFilter` / `CanSendCookie` / `CanSaveCookie` 未接 |
 | Content-Security-Policy 干预 | — | — | 不改页面 CSP；宿主脚本按"无隔离世界"跑在页面域内（文档写明） |
 | 防护（点击劫持/混合内容等） | ◐ | — | 全交给 Chromium 默认 |
@@ -239,7 +239,7 @@ CEF 156 的 `CefClient` 可返回 18 个 handler。下表覆盖这 18 个，以�
 1. ~~`CefFrameHandler`（frame 生命周期）~~ — **已接**（2026-10-26）：`frame-*` 事件族，`frame-gate`。
 2. ~~`OnConsoleMessage`~~ — **已接**（2026-10-26）：`::console`，`console-gate`。
 3. **`CefAudioHandler`** — 拿不到音频流。影响：可视化、转写、逐页音量归一都做不了；只有静音。
-4. **`CefResponseFilter` / `OnResourceResponse`** — 不能改响应。影响：广告/追踪拦截只能"整请求取消/重定向"，不能"DNR 式"局部改；这是 `response-filter-plan` 的立项理由。
+4. ~~`CefResponseFilter` / `OnResourceResponse`~~ — **响应体改写已接**（2026-10-26，`response-filter-plan` 落地）：`filter_add` 的 `replace`/`inject-css`，`filter-gate`。响应头改写**实测定案无面**：response 在两个回调里都标注不可修改，实测改写均不上线，`drop-header` 被点名拒绝。
 5. **`CefDragHandler`** — 不能改拖放目标或拖放内容。维持不做：页面拖放已通，宿主介入无需求。
 6. **`CefAccessibilityHandler`** — 宿主拿不到无障碍树（系统级 a11y 正常）。
 7. **`OnStatusMessage` / `OnTooltip`** — status-message 已接（实测通）；tooltip 的面接了但本形态 CEF 不回调（2026-10-26 实测），面保留。
@@ -249,7 +249,7 @@ CEF 156 的 `CefClient` 可返回 18 个 handler。下表覆盖这 18 个，以�
 10. **Widevine** — 发行包不带，受 DRM 保护的流媒体不可用。
 11. **桌面捕获（getDisplayMedia）** — 无源选择面。
 12. **系统打印对话框** — 明确不做（宿主 GTK 事务）；`window.print()` 现以 `::print-requested` 上报（2026-10-26），宿主拿 `print_pdf` 喂自己的 GTK 对话框即闭环。
-13. **下载续传、证书例外清理、`CefUrlRequest`、`CefServer`、`CefMediaRouter`** — 无需求/不在范围。
+13. **下载续传、`CefUrlRequest`、`CefServer`、`CefMediaRouter`** — 无需求/不在范围。证书例外清理**已接**（2026-10-26，`certificate_clear_authorized()`，`certificate-gate` 的 revoke 段），此处旧表未及时划线。
 
 ## 十二、明确不做（与计划的裁定一致）
 

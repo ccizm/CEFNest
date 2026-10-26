@@ -40,6 +40,7 @@ samples for every group live in the [examples](../examples/README.md).
 | CDP pipe | `cdp_enable(browser)` opens it (one switch, per browser) · `cdp_execute(id, browser, method, params_json)` → `::cdp-result` · `cdp_disable(browser)`; every protocol event arrives on `::cdp-event` while the observer is on. The component's own features (history jumps, TLS info, UA, screenshots, typed clearing) never need this switch |
 | Certificates | answer `::certificate-error` with `certificate_respond(id, allow)`; `certificate_authorize(fingerprint)` trusts one certificate for this helper's lifetime; `certificate_clear_authorized()` revokes every exemption (the helper's table and Chromium's own exception memory both go) |
 | Interception | `intercept_add(id, patterns, resource_types)` · `intercept_remove(id)` · `intercept_set_passive()`; answer `::request-intercept` with `request_respond(request_id, action, url)` |
+| Response filter | `filter_add(id, patterns, ops, n_ops)` · `filter_remove(id)` — declarative body rewriting in the helper: `replace` (chunk-stitched, both sides ≤ 64 KiB) and `inject-css` (before `</head>` of `text/html`). No event, no answer owed. `drop-header` is refused by name — CEF 156 has no face that removes a response header (measured 2026-10-26) |
 | Plugins | answer `::grant-request` (see below) |
 
 **Signals**
