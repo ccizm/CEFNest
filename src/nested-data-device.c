@@ -1494,7 +1494,18 @@ drag_update_destination (Drag *drag)
   DataDevice *device;
   double x, y;
 
-  target = nested_compositor_surface_at (self, self->pointer_x, self->pointer_y);
+  /* Resolve inside the tree the pointer is over, as the seat does: a drag
+   * over a second window has to enter that window's surfaces, and the
+   * primary-wide lookup would hand the drag to whichever window's surfaces
+   * happen to sit under the coordinates. */
+  if (self->input_surface && self->input_surface->mapped &&
+      self->input_surface->wl_surface)
+    target = nested_compositor_surface_at_for (self, self->input_surface,
+                                               self->pointer_x,
+                                               self->pointer_y);
+  else
+    target = nested_compositor_surface_at (self, self->pointer_x,
+                                           self->pointer_y);
   if (target && !target->wl_surface)
     target = NULL;
 

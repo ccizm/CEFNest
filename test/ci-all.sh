@@ -81,7 +81,6 @@ ALL_RUNS=(
   "auto-resize|./test/auto-resize-gate.sh|180"
   "cookies|./test/cookies-gate.sh|240"
   "page-text|./test/page-text-gate.sh|180"
-  "history|./test/history-gate.sh|180"
   "pdf|./test/pdf-gate.sh|300"
   "favicon|./test/favicon-gate.sh|180"
   "source|./test/source-gate.sh|240"

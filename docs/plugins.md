@@ -177,7 +177,11 @@ default the table exists to keep. The built-in handlers enforce the table
 themselves: a plugin that never declared `storage` calling
 `chrome.storage.local.get` is refused by name
 (`permission-denied:storage` on `::plugin-error`, an error to the page), and
-the other plugins keep working.
+the other plugins keep working. `tabs.*` and `contextMenus.*` ride the same
+table — both enumerate and steer every browser on the host, so both require
+their declared permission (`permission-denied:tabs`,
+`permission-denied:contextMenus`); a storage area beyond `local`/`sync`
+answers `unknown-storage-area` rather than silently reading as local.
 
 ## Unloading
 

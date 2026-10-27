@@ -1096,6 +1096,12 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
   int natural_width, natural_height;
   int previous_width, previous_height;
 
+  /* Holds a reference across a popup's first configure below: configure
+   * flushes, and a flush that finds a dead peer destroys this surface's
+   * client — with every resource owning this object — before the tail of
+   * this function runs. */
+  g_autoptr (NestedSurface) self_held = NULL;
+
   /* A drag icon is placed by the pointer, so a new offset moves it now; every
    * other surface keeps the offset the protocol tells us to ignore. */
   self->offset_x = self->pending_offset_x;
@@ -1218,7 +1224,10 @@ surface_commit (struct wl_client *client, struct wl_resource *resource)
     {
       self->mapped = TRUE;
       if (self->is_popup)
-        xdg_surface_configure (self);
+        {
+          self_held = g_object_ref (self);
+          xdg_surface_configure (self);
+        }
       if (nested)
         nested_update_primary (nested);
     }
@@ -2798,6 +2807,15 @@ nested_compositor_new (GError **error)
       g_object_unref (self);
       return NULL;
     }
+  /* add_socket_auto leaves the path at 0777 & ~umask; the runtime directory's
+     0700 already gates access, but the socket itself need not offer write
+     access to every process that ends up inside it — the control socket in
+     chromium-session.c answers to nobody but the owner either. */
+  {
+    g_autofree char *path =
+      g_build_filename (g_get_user_runtime_dir (), name, NULL);
+    g_chmod (path, 0600);
+  }
   self->socket_name = g_strdup (name);
 
   self->global_compositor =

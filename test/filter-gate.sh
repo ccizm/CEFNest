@@ -2,7 +2,7 @@
 #
 # test/filter-gate.sh — the declarative response filter, for real.
 #
-# One local server, one probe page, five scenarios:
+# One local server, one probe page, seven scenarios:
 #
 #   replace    a rule rewrites the page's marker string on the wire; the DOM
 #              text the page presents is the verdict
@@ -14,6 +14,12 @@
 #              marker again — no rule, no rewrite
 #   css        inject-css lands a <style> before </head>; the computed
 #              background color is the verdict
+#   chain      two replace ops in one rule: the second must see the first's
+#              output (marker → INTERMEDIATE-TOKEN → REPLACED-BY-FILTER), so
+#              only a wired pipeline reads REPLACED at the end
+#   chain-css  replace then inject-css in one rule: the css must land before
+#              </head> of the replaced stream — head.innerHTML is the verdict,
+#              an end-of-stream fallback would re-parent it into the body
 #   header     drop-header is refused by name (filter-add-drop-header-
 #              unsupported) and registers nothing — the plan's third op was
 #              measured out of existence: CEF 156 marks the response
@@ -71,6 +77,8 @@ b64() { printf '%s' "$1" | base64 -w0; }
 
 REPLACE_OPS=$(b64 '[{"type":"replace","find":"MARKER-FIND-XYZ","replace":"REPLACED-BY-FILTER"}]')
 CSS_OPS=$(b64 '[{"type":"inject-css","css":"body{background-color:rgb(1,2,3)}"}]')
+CHAIN_OPS=$(b64 '[{"type":"replace","find":"MARKER-FIND-XYZ","replace":"INTERMEDIATE-TOKEN"},{"type":"replace","find":"INTERMEDIATE-TOKEN","replace":"REPLACED-BY-FILTER"}]')
+CHAIN_CSS_OPS=$(b64 '[{"type":"replace","find":"MARKER-FIND-XYZ","replace":"REPLACED-BY-FILTER"},{"type":"inject-css","css":"body{background-color:rgb(1,2,3)}"}]')
 DROP_OPS=$(b64 '[{"type":"drop-header","name":"x-echo-marker"}]')
 
 # The server serves the probe page (with the echo header) and a generated
@@ -158,8 +166,9 @@ EOF
 
 echo "== filter over $ORIGIN"
 run_demo replace "$WORK/replace.session"
+rc=$?
 log=$WORK/replace.log
-if [ "$?" = 0 ]; then ok "replace: demo exited 0"
+if [ "$rc" = 0 ]; then ok "replace: demo exited 0"
 else bad "replace: demo exited"; tail -8 "$log" | sed 's/^/         /'; fi
 expect 'demo: filter-add 1 \(1 ops\)' "$log" replace
 expect 'helper: filter-add 1 rules=1' "$log" replace
@@ -177,8 +186,9 @@ quit
 EOF
 
 run_demo spans "$WORK/spans.session"
+rc=$?
 log=$WORK/spans.log
-if [ "$?" = 0 ]; then ok "spans: demo exited 0"
+if [ "$rc" = 0 ]; then ok "spans: demo exited 0"
 else bad "spans: demo exited"; tail -8 "$log" | sed 's/^/         /'; fi
 expect 'demo: script [0-9]+ ok value="ALL-REPLACED"' "$log" spans
 expect 'helper: filter done chunks=[0-9]+ in=[0-9]{6,}' "$log" spans
@@ -200,8 +210,9 @@ quit
 EOF
 
 run_demo remove "$WORK/remove.session"
+rc=$?
 log=$WORK/remove.log
-if [ "$?" = 0 ]; then ok "remove: demo exited 0"
+if [ "$rc" = 0 ]; then ok "remove: demo exited 0"
 else bad "remove: demo exited"; tail -8 "$log" | sed 's/^/         /'; fi
 expect 'helper: filter-remove 1 rules=0' "$log" remove
 # First readback replaced, the one after remove+reload back to the marker.
@@ -220,10 +231,53 @@ quit
 EOF
 
 run_demo css "$WORK/css.session"
+rc=$?
 log=$WORK/css.log
-if [ "$?" = 0 ]; then ok "css: demo exited 0"
+if [ "$rc" = 0 ]; then ok "css: demo exited 0"
 else bad "css: demo exited"; tail -8 "$log" | sed 's/^/         /'; fi
 expect 'demo: script [0-9]+ ok value="rgb\(1, 2, 3\)"' "$log" css
+
+# --- chain: two replaces in one rule, the second sees the first's output ------
+
+cat >"$WORK/chain.session" <<EOF
+filter-add 1 *://*/filter-page.html* $CHAIN_OPS
+load $PAGE?probe=chain
+wait 2500
+js document.getElementById("m").innerText
+wait 600
+quit
+EOF
+
+run_demo chain "$WORK/chain.session"
+rc=$?
+log=$WORK/chain.log
+if [ "$rc" = 0 ]; then ok "chain: demo exited 0"
+else bad "chain: demo exited"; tail -8 "$log" | sed 's/^/         /'; fi
+expect 'demo: filter-add 1 \(2 ops\)' "$log" chain
+expect 'helper: filter-add 1 rules=1' "$log" chain
+expect 'demo: script [0-9]+ ok value="REPLACED-BY-FILTER"' "$log" chain
+
+# --- chain-css: replace then inject-css, the css lands before </head> ---------
+
+cat >"$WORK/chain-css.session" <<EOF
+filter-add 1 *://*/filter-page.html* $CHAIN_CSS_OPS
+load $PAGE?probe=chaincss
+wait 2500
+js document.getElementById("m").innerText
+wait 600
+js (document.head.innerHTML.indexOf("rgb(1,2,3)") >= 0 ? "CSS-IN-HEAD" : "CSS-NOT-IN-HEAD")
+wait 600
+quit
+EOF
+
+run_demo chain-css "$WORK/chain-css.session"
+rc=$?
+log=$WORK/chain-css.log
+if [ "$rc" = 0 ]; then ok "chain-css: demo exited 0"
+else bad "chain-css: demo exited"; tail -8 "$log" | sed 's/^/         /'; fi
+expect 'demo: filter-add 1 \(2 ops\)' "$log" chain-css
+expect 'demo: script [0-9]+ ok value="REPLACED-BY-FILTER"' "$log" chain-css
+expect 'demo: script [0-9]+ ok value="CSS-IN-HEAD"' "$log" chain-css
 
 # --- header: drop-header refused by name ---------------------------------------
 
@@ -237,8 +291,9 @@ quit
 EOF
 
 run_demo header "$WORK/header.session"
+rc=$?
 log=$WORK/header.log
-if [ "$?" = 0 ]; then ok "header: demo exited 0"
+if [ "$rc" = 0 ]; then ok "header: demo exited 0"
 else bad "header: demo exited"; tail -8 "$log" | sed 's/^/         /'; fi
 expect 'helper status: filter-add-drop-header-unsupported' "$log" header
 expect_no 'helper: filter-add 1 rules=' "$log" header

@@ -3662,6 +3662,23 @@ static SessionScript session_script;
 
 static void script_run_next (void);
 
+/* A string member that is absent or not a string reads as NULL — the plain
+   get_string_member would raise a critical on the wrong type, and the gates
+   run with fatal-criticals. */
+static const char *
+script_member_string (JsonObject *spec, const char *name)
+{
+  JsonNode *node;
+
+  if (!json_object_has_member (spec, name))
+    return NULL;
+  node = json_object_get_member (spec, name);
+  if (!node || !JSON_NODE_HOLDS_VALUE (node) ||
+      json_node_get_value_type (node) != G_TYPE_STRING)
+    return NULL;
+  return json_node_get_string (node);
+}
+
 static gboolean
 script_wait_done (gpointer data)
 {
@@ -3980,6 +3997,9 @@ script_run_next (void)
                             !strncmp (line, "auto-resize", 11) ||
                             !strncmp (line, "surface-", 8) ||
                             !strncmp (line, "cookies-", 8) ||
+                            !strncmp (line, "filter-", 7) ||
+                            !strncmp (line, "intercept-", 10) ||
+                            !strncmp (line, "request-", 8) ||
                             !strcmp (line, "history") ||
                             !strcmp (line, "page-text") ||
                             !strncmp (line, "print-pdf", 9) ||
@@ -4959,34 +4979,29 @@ script_run_next (void)
 
                       if (!spec)
                         continue;
-                      type = json_object_get_string_member_with_default (
-                          spec, "type", "");
+                      type = script_member_string (spec, "type");
+                      if (!type)
+                        type = "";
                       if (!strcmp (type, "replace"))
                         {
-                          if (json_object_has_member (spec, "find"))
-                            ops[n_ops].find =
-                                json_object_get_string_member (spec, "find");
-                          if (json_object_has_member (spec, "replace"))
-                            ops[n_ops].replace = json_object_get_string_member (
-                                spec, "replace");
+                          ops[n_ops].find =
+                              script_member_string (spec, "find");
+                          ops[n_ops].replace =
+                              script_member_string (spec, "replace");
                           ops[n_ops].type = "replace";
                           if (ops[n_ops].find && ops[n_ops].replace)
                             n_ops++;
                         }
                       else if (!strcmp (type, "inject-css"))
                         {
-                          if (json_object_has_member (spec, "css"))
-                            ops[n_ops].css =
-                                json_object_get_string_member (spec, "css");
+                          ops[n_ops].css = script_member_string (spec, "css");
                           ops[n_ops].type = "inject-css";
                           if (ops[n_ops].css)
                             n_ops++;
                         }
                       else if (!strcmp (type, "drop-header"))
                         {
-                          if (json_object_has_member (spec, "name"))
-                            ops[n_ops].name =
-                                json_object_get_string_member (spec, "name");
+                          ops[n_ops].name = script_member_string (spec, "name");
                           ops[n_ops].type = "drop-header";
                           if (ops[n_ops].name)
                             n_ops++;

@@ -772,7 +772,6 @@ _chromium_session_deliver_plugin_message (ChromiumSession *self,
   g_autofree char *code = NULL;
   GHashTableIter iter;
   gpointer key, value;
-  g_autofree char *message_quoted = NULL;
 
   g_return_if_fail (CHROMIUM_IS_SESSION (self));
   g_return_if_fail (plugin_id != NULL);
@@ -781,7 +780,6 @@ _chromium_session_deliver_plugin_message (ChromiumSession *self,
     return;
 
   prefix = g_strconcat (CHROMIUM_EXTENSION_URI_PREFIX, plugin_id, "/", NULL);
-  message_quoted = g_strescape (message_json ? message_json : "null", NULL);
 
   g_hash_table_iter_init (&iter, self->browser_urls);
   while (g_hash_table_iter_next (&iter, &key, &value))
@@ -791,10 +789,14 @@ _chromium_session_deliver_plugin_message (ChromiumSession *self,
       if (g_str_has_prefix (url, prefix))
         {
           /* One line of JS per open page: the shim's __cefnestOnMessage fans
-             the message out to that page's own listeners. */
+             the message out to that page's own listeners. The JSON text
+             splices in as the expression itself — g_strescape here octal-
+             escaped every byte past 0x7F and turned non-ASCII payloads into
+             mojibake, the exact thing chromium_plugin_web_deliver_menu
+             avoids by splicing raw. */
           code = g_strdup_printf ("window.__cefnestOnMessage&&"
-                                  "__cefnestOnMessage(\"%s\");",
-                                  message_quoted);
+                                  "__cefnestOnMessage(%s);",
+                                  message_json ? message_json : "null");
           _chromium_session_run_javascript_in_browser (self,
                                                        GPOINTER_TO_INT (key),
                                                        code);
@@ -2389,8 +2391,17 @@ feed_control_bytes (ChromiumSession *self, const guint8 *data, gsize length)
    * consumed lines are cut out by index with the tail moved once per chunk.
    * Erasing per line made a long js-result arriving in 4 KiB reads pay a full
    * memmove of everything after it at every line-sized step. */
-  gsize scan = pending->len;
+  gsize scan = 0;
   gsize head = 0;
+
+  /* attach_connection() pairs the stream a read ran on with this buffer and
+   * drop_connection() frees both together; the stale guard in
+   * read_chunk_done is what keeps a dropped channel from reaching here. The
+   * check costs one branch against writing into a freed buffer. */
+  if (!pending)
+    return TRUE;
+
+  scan = pending->len;
 
   g_string_append_len (pending, (const char *) data, length);
 
@@ -2445,6 +2456,21 @@ read_chunk_done (GObject *source, GAsyncResult *result, gpointer data)
   gboolean keep_reading = TRUE;
 
   bytes = g_input_stream_read_bytes_finish (G_INPUT_STREAM (source), result, &error);
+
+  /* A read armed on an older connection can complete after drop_connection()
+   * cleared the channel — send_json failing with EPIPE drops it without
+   * cancelling the read — or after a fresh attach_connection(), in which case
+   * its bytes belong to no helper the session knows. As in accepted(), only
+   * the read that ran on the current input stream may act; a stale result is
+   * dropped whole, without touching the channel the session now uses. */
+  if (self->input == NULL || G_INPUT_STREAM (source) != self->input)
+    {
+      if (error)
+        g_error_free (error);
+      g_clear_pointer (&bytes, g_bytes_unref);
+      g_object_unref (self);
+      return;
+    }
 
   if (error)
     {
@@ -2638,6 +2664,9 @@ accepted (GObject *source, GAsyncResult *result, gpointer data)
   else
     {
       attach_connection (self, connection);
+      /* attach_connection keeps its own reference; this one came from
+       * accept_finish and is ours to drop. */
+      g_object_unref (connection);
       accept_one (self);
     }
 

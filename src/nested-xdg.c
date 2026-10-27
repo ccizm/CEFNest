@@ -1151,6 +1151,18 @@ xdg_popup_grab (struct wl_client *client, struct wl_resource *resource,
     nested_surfaces_changed (self->nested);
 }
 
+typedef struct
+{
+  struct wl_listener listener;
+  gboolean destroyed;
+} RepositionGuard;
+
+static void
+reposition_resource_destroyed (struct wl_listener *listener, void *data)
+{
+  ((RepositionGuard *) listener)->destroyed = TRUE;
+}
+
 static void
 xdg_popup_reposition (struct wl_client *client, struct wl_resource *resource,
                       struct wl_resource *positioner, uint32_t token)
@@ -1171,10 +1183,24 @@ xdg_popup_reposition (struct wl_client *client, struct wl_resource *resource,
   rules = wl_resource_get_user_data (positioner);
   self->positioner = rules->rules;
 
-  xdg_surface_configure (self);
+  {
+    /* configure ends in a flush, and a flush that finds a dead peer destroys
+     * this popup's resource before it returns — repositioned may only go out
+     * if the resource survived it. */
+    RepositionGuard guard;
 
-  if (wl_resource_get_version (resource) >= XDG_POPUP_REPOSITIONED_SINCE_VERSION)
-    xdg_popup_send_repositioned (resource, token);
+    guard.destroyed = FALSE;
+    guard.listener.notify = reposition_resource_destroyed;
+    wl_resource_add_destroy_listener (resource, &guard.listener);
+
+    xdg_surface_configure (self);
+
+    if (guard.destroyed)
+      return;
+    wl_list_remove (&guard.listener.link);
+    if (wl_resource_get_version (resource) >= XDG_POPUP_REPOSITIONED_SINCE_VERSION)
+      xdg_popup_send_repositioned (resource, token);
+  }
 }
 
 static const struct xdg_popup_interface xdg_popup_impl = {

@@ -147,7 +147,11 @@ storage 只在内存,随进程消失。
 拒绝**——这是这张表存在的理由。内建 handler 自己执行这张表:从没声明
 `storage` 的插件调 `chrome.storage.local.get` 会被点名拒绝
 (`::plugin-error` 上是 `permission-denied:storage`,页面拿到错误),其他
-插件不受影响。
+插件不受影响。`tabs.*` 与 `contextMenus.*` 走同一张表——两者都能枚举并
+操纵宿主上的每个 browser,都必须有各自声明的权限
+(`permission-denied:tabs`、`permission-denied:contextMenus`);`local`/
+`sync` 之外的 storage 区域以 `unknown-storage-area` 应答,不再默默当作
+local 读。
 
 ## 卸载
 

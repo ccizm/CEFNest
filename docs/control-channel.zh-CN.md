@@ -89,6 +89,13 @@
 | `menu-remove-user-item` | `slot` | 摘掉这条行（disable/卸载时） |
 | `plugin-respond` | `browser`、`reply_id`、`ok`、`value`（JSON 文本） | 宿主对一条 `plugin-message` 的应答；路由到那个浏览器的渲染进程，由持有该 reply id 的 shim 兑现。`value` 超 1 MiB 以 `plugin-payload-too-large` 拒收 |
 | `browsers-list` | `id`（请求 id） | 请求浏览器表；由同名 `browsers` 事件带着同一 `id` 应答 |
+| `history` | `id`（宿主自定）、`browser`（可选） | 该 browser 的导航条目，由 `history-result` 带同一 `id` 应答；1.5 秒无应答的存储按空列表处理 |
+| `page-text` | `id`、`browser`（可选） | 主框架的文本，按 `page-text-begin`/`-chunk`/`-end` 流式送回，带同一 `id` |
+| `print-pdf` | `id`、`path`、打印设置（可选：`landscape`、`print_background`、`scale`、`page_ranges`、页面尺寸）、`browser`（可选） | 把主框架打印成 PDF，按 `pdf-begin`/`-chunk`/`-end` 流式送回，带同一 `id` |
+| `cookies-get` | `id`、`url` | 所有匹配 `url` 的 cookie（含 httpOnly），由 `cookies-result` 带同一 `id` 应答；1.5 秒无应答的存储按空列表处理 |
+| `cookies-set` | `id`、`cookies[]`、`url`（可选） | 逐个写入 cookie；由 `cookies-result`（`ok`）应答 |
+| `cookies-delete` | `id`、`url` 和/或 `name`（至少一项） | 删除匹配的 cookie；由 `cookies-result`（`ok`）应答 |
+| `auto-resize` | `enabled`、`min_width`/`min_height`/`max_width`/`max_height`、`browser`（可选） | 让 Chromium 按页面自身意愿决定视图尺寸，夹在框内；尺寸变化以 `auto-resize` 事件送达 |
 
 ## 事件（helper → 宿主）
 
@@ -114,8 +121,8 @@
 | `copy-text` | `text`（菜单中的“复制链接/图片/媒体地址”） |
 | `open-url` | `url`、`disposition`（菜单中的“在新窗口打开…”） |
 | `popup-requested` | `url`、`disposition`、`gesture`、`browser` |
-| `page-message` | `json`（页面调用 `cefnestPostMessage` 时传入的原始字符串） |
-| `primary-selection` | `text`（页面选区；空字符串表示清除选区） |
+| `page-message` | `json`（页面调用 `cefnestPostMessage` 时传入的原始字符串；超 1 MiB 的调用不会到达宿主——helper 以 `status` `page-message-too-large` 回话） |
+| `primary-selection` | `text`（页面选区；空字符串表示清除选区；超 1 MiB 时 helper 以 `status` `primary-selection-too-large` 回话） |
 | `js-result` | `id`、`ok`、`value`、`message`（`ok` 为真当且仅当脚本运行**且**结果送达；超过 helper 64 KiB 上限的结果以 `ok` 假、`value` null、`message` 说明丢弃的方式送达，不再是"成功但恰好没有值"） |
 | `download-begin` | `id`、`url`、`suggested_name`、`mime_type`、`total_bytes` |
 | `download-progress` | `id`、`received_bytes`、`total_bytes`、`percent`、`speed` |

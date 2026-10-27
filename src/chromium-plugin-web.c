@@ -473,6 +473,26 @@ plugin_has_permission (ChromiumPluginManager *manager, const char *id,
   return FALSE;
 }
 
+/* The refusal face the storage handler inlines: a plugin-error naming the
+   table's verdict, and the shim's promise rejection. tabs and contextMenus
+   enumerate and steer every browser on the host, so they ride the same
+   table — docs/plugins.md's permission vocabulary names them for exactly
+   this. */
+static void
+respond_permission_denied (ChromiumPluginManager *manager, WebState *state,
+                           ChromiumSession *session, int browser,
+                           int reply_id, const char *id,
+                           const char *permission)
+{
+  g_autofree char *token = g_strdup_printf ("permission-denied:%s",
+                                            permission);
+  g_autofree char *text = g_strdup_printf (
+    "\"%s was not granted to this plugin\"", permission);
+
+  g_signal_emit_by_name (manager, "plugin-error", id, token);
+  web_respond (state, session, browser, reply_id, FALSE, text);
+}
+
 /* chrome.storage's get: null for everything, a string for one key, an array
    for a set, an object whose members are defaults. All four land here. */
 static void
@@ -584,6 +604,19 @@ handle_storage (WebState *state, ChromiumPluginManager *manager,
 
   if (args && json_array_get_length (args) > 0)
     arg = json_array_get_element (args, 0);
+
+  /* local is the one area, sync the aliased twin; anything else a porting
+     plugin names (session, managed, …) has no twin here and silently reading
+     it as local would hide the mistake. */
+  if (area_name[0] != '\0' && g_strcmp0 (area_name, "local") != 0 &&
+      g_strcmp0 (area_name, "sync") != 0)
+    {
+      g_signal_emit_by_name (manager, "plugin-error", id,
+                             "unknown-storage-area");
+      web_respond (state, session, browser, reply_id, FALSE,
+                   "\"this host answers only storage.local and storage.sync\"");
+      return;
+    }
 
   if (g_strcmp0 (area_name, "sync") == 0)
     {
@@ -978,13 +1011,21 @@ chromium_plugin_web_handle_message (ChromiumPluginManager *manager,
   if (g_str_has_prefix (api, "storage."))
     handle_storage (state, manager, session, browser, reply_id, id, api,
                     array);
+  else if (g_str_has_prefix (api, "contextMenus.") &&
+           !plugin_has_permission (manager, id, "contextMenus"))
+    respond_permission_denied (manager, state, session, browser, reply_id, id,
+                               "contextMenus");
+  else if (g_str_has_prefix (api, "contextMenus."))
+    handle_context_menus (state, session, browser, reply_id, id, api, array);
+  else if (g_str_has_prefix (api, "tabs.") &&
+           !plugin_has_permission (manager, id, "tabs"))
+    respond_permission_denied (manager, state, session, browser, reply_id, id,
+                               "tabs");
   else if (g_strcmp0 (api, "runtime.sendMessage") == 0)
     handle_runtime_send_message (state, session, browser, reply_id, id, array);
   else if (g_strcmp0 (api, "runtime.onMessage") == 0)
     /* Listeners are registered shim-side; nothing delivers to them yet. */
     web_respond (state, session, browser, reply_id, TRUE, "null");
-  else if (g_str_has_prefix (api, "contextMenus."))
-    handle_context_menus (state, session, browser, reply_id, id, api, array);
   else if (g_strcmp0 (api, "tabs.query") == 0)
     handle_tabs_query (state, session, browser, reply_id);
   else if (g_strcmp0 (api, "tabs.update") == 0)
@@ -994,8 +1035,9 @@ chromium_plugin_web_handle_message (ChromiumPluginManager *manager,
   else
     {
       g_signal_emit_by_name (manager, "plugin-error", id, "unknown-api");
-      web_respond (state, session, browser, reply_id, FALSE,
-                   g_strdup_printf ("\"unknown plugin api: %s\"", api));
+      g_autofree char *value = g_strdup_printf ("\"unknown plugin api: %s\"",
+                                                api);
+      web_respond (state, session, browser, reply_id, FALSE, value);
     }
 }
 

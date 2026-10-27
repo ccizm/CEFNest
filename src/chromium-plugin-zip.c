@@ -282,6 +282,15 @@ chromium_zip_read (ChromiumZip *zip, const char *name, char **data,
   if (entry->size == 0)
     return TRUE;
 
+  if (entry->size > CHROMIUM_ZIP_MAX_ENTRY_BYTES)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                   "the entry \"%s\" is %llu uncompressed, over the %u byte "
+                   "ceiling", name, (unsigned long long) entry->size,
+                   CHROMIUM_ZIP_MAX_ENTRY_BYTES);
+      return FALSE;
+    }
+
   const char *base = zip->data + zip->zip_offset;
   const gsize local = entry->local_offset;
   if (local + 30 > zip->length - zip->zip_offset ||

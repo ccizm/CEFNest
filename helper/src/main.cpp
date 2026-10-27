@@ -155,6 +155,14 @@ constexpr size_t kHostScriptsTableSwitchMax = 96u << 10;
  * Say so instead. */
 constexpr size_t kMaxResultBytes = 64 * 1024;
 
+/* The trust boundary for renderer-supplied strings (page-message,
+ * primary-selection): the injected scripts cap what a page can send, but a
+ * call from outside them — or a renderer gone rogue — has nothing standing
+ * between GetString(0) and the wire, and one oversized line would have the
+ * host tear the whole channel down. The cap sits far above what the scripts
+ * emit (64 Ki chars, up to 4 bytes each) so honest traffic never touches it. */
+constexpr size_t kRelayMaxBytes = 1024 * 1024;
+
 /* The control-channel contract this helper speaks. It goes out in every
  * ::ready event so the host can refuse a helper it cannot talk to before the
  * first command is misread; the session compares the major number against its
@@ -258,7 +266,7 @@ constexpr char kDisableSpellcheckScript[] =
  * trailing send per tick, and the value dedupe below keeps empty repeats
  * from going out at all. */
 constexpr char kPrimarySelectionScript[] =
-    R"JS((function(){if(window.__cefnestPrimaryHooked)return;window.__cefnestPrimaryHooked=1;var sent=false,last=null;function read(){var a=document.activeElement;if(a&&typeof a.selectionStart==="number"&&typeof a.selectionEnd==="number"&&a.selectionEnd>a.selectionStart){return String(a.value||"").slice(a.selectionStart,a.selectionEnd);}var s=window.getSelection();return s?String(s):"";}function send(){var t=read();if(!sent&&!t)return;if(t===last)return;last=t;sent=true;if(t.length>65536)t=t.slice(0,65536);try{cefnestPrimarySelection(t);}catch(e){}}var timer=0,stamp=0;function fire(){timer=0;stamp=Date.now();send();}function pump(){if(timer)return;var now=Date.now();if(now-stamp>=32){fire();}else{timer=setTimeout(fire,32-(now-stamp));}}document.addEventListener("selectionchange",pump,true);document.addEventListener("mouseup",pump,true);document.addEventListener("keyup",pump,true);send();})();)JS";
+    R"JS((function(){if(window.__cefnestPrimaryHooked)return;window.__cefnestPrimaryHooked=1;var sent=false,last=null;function read(){var a=document.activeElement;if(a&&typeof a.selectionStart==="number"&&typeof a.selectionEnd==="number"&&a.selectionEnd>a.selectionStart){return String(a.value||"").slice(a.selectionStart,a.selectionEnd);}var s=window.getSelection();return s?String(s):"";}function send(){var t=read();if(t.length>65536)t=t.slice(0,65536);if(!sent&&!t)return;if(t===last)return;last=t;sent=true;try{cefnestPrimarySelection(t);}catch(e){}}var timer=0,stamp=0;function fire(){timer=0;stamp=Date.now();send();}function pump(){if(timer)return;var now=Date.now();if(now-stamp>=32){fire();}else{timer=setTimeout(fire,32-(now-stamp));}}document.addEventListener("selectionchange",pump,true);document.addEventListener("mouseup",pump,true);document.addEventListener("keyup",pump,true);send();})();)JS";
 
 /* The component-provided chrome.* shim, one instance per plugin (__ID__ is
  * substituted with the plugin id). It rides into every context that gets
@@ -940,9 +948,14 @@ class Control {
         }
         if (head > 0)
           buffer.erase(0, head);
-        if (buffer.size() > (1U << 20)) {
-          fprintf(stderr, "helper: command line exceeded 1 MiB, discarding\n");
-          buffer.clear();
+        if (buffer.size() > (4U << 20)) {
+          /* The host tears its own receive down at this ceiling
+           * (CONTROL_LINE_MAX) and so do the docs; keeping the tail would
+           * feed the rest of an over-limit command through as bogus lines,
+           * and a legal filter-add can reach the limit. End the channel the
+           * way a vanished host ends it. */
+          fprintf(stderr, "helper: command line over 4 MiB, dropping the host\n");
+          break;
         }
         continue;
       }
@@ -3840,12 +3853,14 @@ class FilterEngine : public CefResponseFilter {
           stage.replace = op.replace;
           stage.hold = op.find.size() - 1;
           break;
-          case FilterOp::Kind::InjectCss:
+        case FilterOp::Kind::InjectCss:
           if (!html)
             continue;  // the plan: inject-css works on text/html only
           stage.kind = Stage::kInjectHead;
           stage.css = "<style>" + op.css + "</style>";
-          stage.hold = sizeof("</head") - 2;  // a partial marker's longest run
+          /* The marker plus the byte after it: the boundary check reads one
+             character past a candidate, so that byte has to be held too. */
+          stage.hold = sizeof("</head") - 1;
           break;
       }
       stages_.push_back(std::move(stage));
@@ -3920,7 +3935,9 @@ class FilterEngine : public CefResponseFilter {
   static constexpr size_t kHeadMarkerLen = 6;  // "</head"
 
   /* First "</head" from |from|, ASCII case-insensitive: pages emit the tag
-   * in both registers and the engine does not get to care which. */
+   * in both registers and the engine does not get to care which. A name
+   * character straight after the marker is a longer tag name (</header) or
+   * text inside a script string — not the head close — and is scanned past. */
   static size_t HeadMarkerFind(const std::string& text, size_t from) {
     for (size_t i = from; i + kHeadMarkerLen <= text.size(); ++i) {
       static const char marker[] = "</head";
@@ -3928,28 +3945,47 @@ class FilterEngine : public CefResponseFilter {
       for (; j < kHeadMarkerLen; ++j)
         if (tolower(static_cast<unsigned char>(text[i + j])) != marker[j])
           break;
-      if (j == kHeadMarkerLen)
+      if (j == kHeadMarkerLen) {
+        if (i + kHeadMarkerLen < text.size()) {
+          const unsigned char next =
+              static_cast<unsigned char>(text[i + kHeadMarkerLen]);
+          if ((next >= 'a' && next <= 'z') ||
+              (next >= 'A' && next <= 'Z') ||
+              (next >= '0' && next <= '9'))
+            continue;
+        }
         return i;
+      }
     }
     return std::string::npos;
   }
 
-  /* Appends buf[from, end) to out_ under the budget unless this is the end
-   * of the stream; returns how much went out, so the caller's scan only ever
-   * advances over emitted bytes. */
-  size_t EmitRun(Stage& stage, size_t from, size_t end, size_t budget,
-                 bool eof) {
+  /* Appends buf[from, end) to |sink| — the next stage's buffer for every
+   * stage but the last, out_ for the last — under the budget unless this is
+   * the end of the stream. Returns how much went out, so the caller's scan
+   * only ever advances over emitted bytes. */
+  size_t EmitRun(Stage& stage, size_t from, size_t end, bool eof,
+                 std::string& sink, bool final_sink, size_t budget) {
     size_t n = end - from;
-    if (!eof && out_.size() + n > budget)
-      n = out_.size() >= budget ? 0 : budget - out_.size();
+    if (!eof && final_sink && sink.size() + n > budget)
+      n = sink.size() >= budget ? 0 : budget - sink.size();
     if (n) {
-      out_.append(stage.buf, from, n);
-      out_total_ += n;
+      sink.append(stage.buf, from, n);
+      if (final_sink)
+        out_total_ += n;
     }
     return n;
   }
 
-  bool PumpStage(Stage& stage, size_t budget, bool eof) {
+  bool PumpStage(size_t index, size_t budget, bool eof) {
+    Stage& stage = stages_[index];
+    /* Decided bytes go to the next stage's buffer; only the last stage's go
+     * to out_, and only that sink is budget-limited, because only it backs
+     * the wire. An intermediate sink holds what its stage could not decide
+     * yet, the same order of buffering stage 0's own tail has. */
+    std::string& sink =
+        index + 1 < stages_.size() ? stages_[index + 1].buf : out_;
+    const bool final_sink = index + 1 == stages_.size();
     const size_t start = stage.scan;
     const size_t stable_end =
         eof ? stage.buf.size()
@@ -3961,9 +3997,10 @@ class FilterEngine : public CefResponseFilter {
         (stage.kind == Stage::kInjectHead && stage.injected)) {
       /* Decided content only: everything that arrived goes straight out. */
       while (p < stage.buf.size()) {
-        if (!eof && out_.size() >= budget)
+        if (!eof && final_sink && sink.size() >= budget)
           break;
-        p += EmitRun(stage, p, stage.buf.size(), budget, eof);
+        p += EmitRun(stage, p, stage.buf.size(), eof, sink, final_sink,
+                     budget);
       }
       stage.scan = p;
       Compact(stage);
@@ -3972,26 +4009,27 @@ class FilterEngine : public CefResponseFilter {
 
     if (stage.kind == Stage::kReplace) {
       for (;;) {
-        if (p >= stable_end || (!eof && out_.size() >= budget))
+        if (p >= stable_end || (!eof && final_sink && sink.size() >= budget))
           break;
         const size_t pos = stage.buf.find(stage.find, p);
         if (pos == std::string::npos || pos >= stable_end) {
-          p += EmitRun(stage, p, stable_end, budget, eof);
+          p += EmitRun(stage, p, stable_end, eof, sink, final_sink, budget);
           break;
         }
         if (pos + stage.find.size() > stable_end && !eof) {
           /* The match straddles the decided boundary: emit the literal run
            * before it and wait for the rest of the match to arrive. */
-          p += EmitRun(stage, p, pos, budget, eof);
+          p += EmitRun(stage, p, pos, eof, sink, final_sink, budget);
           break;
         }
         if (pos < stage.stable_end && !eof)
           ++spans_;  // completed only because the chunks were stitched
-        p += EmitRun(stage, p, pos, budget, eof);
-        if (!eof && out_.size() + stage.replace.size() > budget)
+        p += EmitRun(stage, p, pos, eof, sink, final_sink, budget);
+        if (!eof && final_sink && sink.size() + stage.replace.size() > budget)
           break;  // the replacement waits for output room
-        out_.append(stage.replace);
-        out_total_ += stage.replace.size();
+        sink.append(stage.replace);
+        if (final_sink)
+          out_total_ += stage.replace.size();
         p += stage.find.size();
       }
       stage.scan = p;
@@ -4002,24 +4040,25 @@ class FilterEngine : public CefResponseFilter {
 
     /* kInjectHead, not yet injected. */
     for (;;) {
-      if (p >= stable_end || (!eof && out_.size() >= budget))
+      if (p >= stable_end || (!eof && final_sink && sink.size() >= budget))
         break;
       const size_t pos = HeadMarkerFind(stage.buf, p);
       if (pos == std::string::npos || pos >= stable_end) {
-        p += EmitRun(stage, p, stable_end, budget, eof);
+        p += EmitRun(stage, p, stable_end, eof, sink, final_sink, budget);
         break;
       }
       if (pos + kHeadMarkerLen > stable_end && !eof) {
-        p += EmitRun(stage, p, pos, budget, eof);
+        p += EmitRun(stage, p, pos, eof, sink, final_sink, budget);
         break;
       }
       if (pos < stage.stable_end && !eof)
         ++spans_;
-      p += EmitRun(stage, p, pos, budget, eof);
-      if (!eof && out_.size() + stage.css.size() > budget)
+      p += EmitRun(stage, p, pos, eof, sink, final_sink, budget);
+      if (!eof && final_sink && sink.size() + stage.css.size() > budget)
         break;
-      out_.append(stage.css);
-      out_total_ += stage.css.size();
+      sink.append(stage.css);
+      if (final_sink)
+        out_total_ += stage.css.size();
       stage.injected = true;
       break;  // the next round runs this stage as a passthrough
     }
@@ -4034,10 +4073,10 @@ class FilterEngine : public CefResponseFilter {
     bool again = true;
     while (again && out_.size() < budget) {
       again = false;
-      for (auto& stage : stages_) {
+      for (size_t i = 0; i < stages_.size(); ++i) {
         if (out_.size() >= budget)
           break;
-        again |= PumpStage(stage, budget, false);
+        again |= PumpStage(i, budget, false);
       }
       progress |= again;
     }
@@ -4045,15 +4084,20 @@ class FilterEngine : public CefResponseFilter {
   }
 
   /* The response is over: every held byte is decided now, in stage order so
-   * each stage's release feeds the next one's buffer first. */
+   * each stage's release reaches the next one's buffer before that stage
+   * releases in turn. */
   void EofFlush() {
-    for (auto& stage : stages_) {
-      PumpStage(stage, 0, true);
+    for (size_t i = 0; i < stages_.size(); ++i) {
+      Stage& stage = stages_[i];
+      PumpStage(i, 0, true);
       if (stage.kind == Stage::kInjectHead && !stage.injected) {
         /* No </head> in the whole stream: the plan's fallback is the end of
          * the body, which still styles the page. */
-        out_.append(stage.css);
-        out_total_ += stage.css.size();
+        std::string& sink =
+            i + 1 < stages_.size() ? stages_[i + 1].buf : out_;
+        sink.append(stage.css);
+        if (i + 1 == stages_.size())
+          out_total_ += stage.css.size();
         stage.injected = true;
       }
     }
@@ -7479,8 +7523,14 @@ class HelperClient : public CefClient,
     if (source_process == PID_RENDERER &&
         message->GetName() == kPageMessageProcess)
       {
+        const std::string json = message->GetArgumentList()->GetString(0);
+        if (json.size() > kRelayMaxBytes)
+          {
+            EmitStatus("page-message-too-large");
+            return true;
+          }
         CefRefPtr<CefDictionaryValue> dict = NewEvent(kPageMessageEvent);
-        dict->SetString("json", message->GetArgumentList()->GetString(0));
+        dict->SetString("json", json);
         Emit(dict);
         return true;
       }
@@ -7488,8 +7538,14 @@ class HelperClient : public CefClient,
     if (source_process == PID_RENDERER &&
         message->GetName() == kPrimarySelectionProcess)
       {
+        const std::string text = message->GetArgumentList()->GetString(0);
+        if (text.size() > kRelayMaxBytes)
+          {
+            EmitStatus("primary-selection-too-large");
+            return true;
+          }
         CefRefPtr<CefDictionaryValue> dict = NewEvent(kPrimarySelectionEvent);
-        dict->SetString("text", message->GetArgumentList()->GetString(0));
+        dict->SetString("text", text);
         Emit(dict);
         return true;
       }

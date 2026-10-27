@@ -8,6 +8,14 @@
 
 G_BEGIN_DECLS
 
+/* Install ceilings. The central directory states uncompressed sizes and the
+   reader trusts them, so a package may claim a 4 GiB entry or a thousand of
+   them — a ceiling per entry and per package turns a zip bomb into an
+   ordinary refusal before the first g_malloc. Both are far above anything a
+   real plugin ships (the manifest alone is capped at 1 MiB). */
+#define CHROMIUM_ZIP_MAX_ENTRY_BYTES  (64u << 20)
+#define CHROMIUM_ZIP_MAX_TOTAL_BYTES  (256u << 20)
+
 typedef struct _ChromiumZip ChromiumZip;
 
 /* Opens @path as a .crx (the CRX3 shell is skipped: "Cr24", a version, a

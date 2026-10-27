@@ -3,7 +3,7 @@
   "name": "Plugin Demo",
   "version": "1.0",
   "description": "The native plugin the plugin gate installs: a context-menu row, a load-end subscription, content scripts, storage and an action popup.",
-  "permissions": ["storage"],
+  "permissions": ["storage", "tabs"],
   "content_scripts": [
     { "matches": ["file://*/*plugin-page-*.html"],
       "js": ["cs.js"],

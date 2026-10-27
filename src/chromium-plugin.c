@@ -2068,8 +2068,12 @@ remove_tree_at (const char *path)
       while ((name = g_dir_read_name (dir)) != NULL)
         {
           g_autofree char *child = g_build_filename (path, name, NULL);
+          struct stat sb;
 
-          if (g_file_test (child, G_FILE_TEST_IS_DIR))
+          /* lstat, not g_file_test: a symlinked directory inside an
+             uninstalling plugin comes off as the link itself — recursing
+             into it would delete whatever it names outside the root. */
+          if (lstat (child, &sb) == 0 && S_ISDIR (sb.st_mode))
             remove_tree_at (child);
           else
             g_unlink (child);
@@ -2108,6 +2112,7 @@ install_extract (const char *package, const char *dest, GError **error)
 
   g_auto (GStrv) names = chromium_zip_names (zip);
   gboolean wrote_manifest = FALSE;
+  gsize total_uncompressed = 0;
 
   for (guint i = 0; names[i]; i++)
     {
@@ -2129,6 +2134,16 @@ install_extract (const char *package, const char *dest, GError **error)
 
       if (!chromium_zip_read (zip, name, &data, &size, error))
         return FALSE;
+      total_uncompressed += size;
+      if (total_uncompressed > CHROMIUM_ZIP_MAX_TOTAL_BYTES)
+        {
+          /* Many honest-sized entries still fill the data directory: the
+             package ceiling bounds the whole unpack, not just one entry. */
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                       "\"%s\" unpacks past the %u byte package ceiling",
+                       package, CHROMIUM_ZIP_MAX_TOTAL_BYTES);
+          return FALSE;
+        }
       if (size == 0)
         {
           /* A zero-byte entry is a file with nothing in it — still a file. */

@@ -92,6 +92,13 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `menu-remove-user-item` | `slot` | takes the row back (disable/unload) |
 | `plugin-respond` | `browser`, `reply_id`, `ok`, `value` (JSON text) | the host's answer to one `plugin-message`; routed to that browser's renderer, delivered to the shim holding the reply id. `value` past 1 MiB is refused with `plugin-payload-too-large` |
 | `browsers-list` | `id` (request id) | asks for the browser table; answered by the `browsers` event with the same `id` |
+| `history` | `id` (the host's own), optional `browser` | that browser's navigation entries, answered by `history-result` with the same `id`; a silent store answers an empty list after 1.5 s |
+| `page-text` | `id`, optional `browser` | the main frame's text, streamed back as `page-text-begin`/`-chunk`/`-end` carrying the same `id` |
+| `print-pdf` | `id`, `path`, optional print settings (`landscape`, `print_background`, `scale`, `page_ranges`, page sizes), optional `browser` | prints the main frame to a PDF, streamed back as `pdf-begin`/`-chunk`/`-end` with the same `id` |
+| `cookies-get` | `id`, `url` | every cookie that matches `url` (httpOnly included), answered by `cookies-result` with the same `id`; a silent store answers an empty list after 1.5 s |
+| `cookies-set` | `id`, `cookies[]`, optional `url` | writes each cookie; answered by `cookies-result` (`ok`) |
+| `cookies-delete` | `id`, `url` and/or `name` (at least one required) | deletes the matching cookies; answered by `cookies-result` (`ok`) |
+| `auto-resize` | `enabled`, `min_width`/`min_height`/`max_width`/`max_height`, optional `browser` | lets Chromium size the view from the page's own extent, clamped to the box; size changes arrive as `auto-resize` events |
 
 ## Events (helper → host)
 
@@ -117,8 +124,8 @@ a private root under `$XDG_RUNTIME_DIR` (or `/dev/shm`).
 | `copy-text` | `text` (the menu's "copy link/image/media address") |
 | `open-url` | `url`, `disposition` (the menu's "open in a new window…") |
 | `popup-requested` | `url`, `disposition`, `gesture`, `browser` |
-| `page-message` | `json` (the raw string from the page's `cefnestPostMessage`) |
-| `primary-selection` | `text` (the page's selection; an empty string clears it) |
+| `page-message` | `json` (the raw string from the page's `cefnestPostMessage`; a call past 1 MiB never arrives — the helper answers `status` `page-message-too-large` instead) |
+| `primary-selection` | `text` (the page's selection; an empty string clears it; past 1 MiB the helper answers `status` `primary-selection-too-large`) |
 | `js-result` | `id`, `ok`, `value`, `message` (`ok` is TRUE only when the script ran *and* its result was delivered; a result over the helper's 64 KiB ceiling arrives as `ok` false, `value` null, `message` naming the drop) |
 | `download-begin` | `id`, `url`, `suggested_name`, `mime_type`, `total_bytes` |
 | `download-progress` | `id`, `received_bytes`, `total_bytes`, `percent`, `speed` |
